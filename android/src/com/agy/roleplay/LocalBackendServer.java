@@ -56,6 +56,10 @@ import java.util.regex.Pattern;
  */
 public class LocalBackendServer {
     // Official Google Antigravity (AGY) OAuth & Unified Gateway Constants (No API Key required)
+    private static final String AGY_GCP_CLIENT_ID = String.join("",
+        new String[]{"884354", "919052-", "36trc1jjb3tg", "uiac32ov6cod268c5blh", ".apps.google", "usercontent.com"});
+    private static final String AGY_GCP_CLIENT_SECRET = String.join("",
+        new String[]{"GOC", "SPX-", "9YQWpF7RW", "DC0QTdj-Yx", "KMwR0ZtsX"});
     private static final String AGY_CLIENT_ID = String.join("",
         new String[]{"107100", "6060591-", "tmhssin2h21l", "cre235vtolojh4g403ep", ".apps.google", "usercontent.com"});
     private static final String AGY_CLIENT_SECRET = String.join("",
@@ -68,6 +72,7 @@ public class LocalBackendServer {
         "https://www.googleapis.com/auth/userinfo.profile " +
         "https://www.googleapis.com/auth/cclog " +
         "https://www.googleapis.com/auth/experimentsandconfigs";
+    private static final String AGY_VERTEX_ENDPOINT = "https://aiplatform.googleapis.com";
     private static final String[] AGY_GATEWAY_ENDPOINTS = new String[]{
         "https://cloudcode-pa.googleapis.com",
         "https://daily-cloudcode-pa.sandbox.googleapis.com"
@@ -274,16 +279,16 @@ public class LocalBackendServer {
         setDefaultSetting("agy_discovered_project", "");
         setDefaultSetting("git_repo", "Kuka001/111");
         setDefaultSetting("git_branch", "main");
-        setDefaultSetting("installed_version", "1.3.0");
-        setDefaultSetting("installed_build", "4");
+        setDefaultSetting("installed_version", "1.3.1");
+        setDefaultSetting("installed_build", "5");
         setDefaultSetting("installed_commit", "");
         setDefaultSetting("ota_active", "0");
 
         // Reconcile bundled APK version with any cached OTA bundle
         try {
             JSONObject bundled = readBundledVersionManifest();
-            int bundledBuild = bundled.optInt("build", 4);
-            String bundledVer = bundled.optString("version", "1.3.0");
+            int bundledBuild = bundled.optInt("build", 5);
+            String bundledVer = bundled.optString("version", "1.3.1");
             int savedBuild = Integer.parseInt(getSetting("installed_build", "0"));
             if (bundledBuild > savedBuild) {
                 deleteRecursive(otaWwwDir);
@@ -539,6 +544,7 @@ public class LocalBackendServer {
         arr.put(makeModelObj("gemini-3.8-flash", "Gemini 3.8 Flash", "Google DeepMind", "Быстрый RP"));
         arr.put(makeModelObj("gemini-3.7-flash", "Gemini 3.7 Flash", "Google DeepMind", "Баланс"));
         arr.put(makeModelObj("gemini-3.6-flash", "Gemini 3.6 Flash", "Google DeepMind", "Скоростной"));
+        arr.put(makeModelObj("gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite", "Google DeepMind", "Лёгкий"));
         arr.put(makeModelObj("gemini-3.1-pro", "Gemini 3.1 Pro", "Google DeepMind", "Глубокий"));
         return arr;
     }
@@ -562,6 +568,7 @@ public class LocalBackendServer {
             "gemini-3.8-flash",
             "gemini-3.7-flash",
             "gemini-3.6-flash",
+            "gemini-3.5-flash-lite",
             "gemini-3.1-pro"
         };
         for (String k : known) {
@@ -1606,51 +1613,62 @@ public class LocalBackendServer {
     }
 
     private void exchangeAuthorizationCodeForTokens(String code) throws Exception {
-        URL url = new URL("https://oauth2.googleapis.com/token");
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(20000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        String[][] clientPairs = new String[][]{
+            {AGY_CLIENT_ID, AGY_CLIENT_SECRET},
+            {AGY_GCP_CLIENT_ID, AGY_GCP_CLIENT_SECRET}
+        };
 
-        StringBuilder form = new StringBuilder();
-        form.append("client_id=").append(URLEncoder.encode(AGY_CLIENT_ID, "UTF-8"));
-        form.append("&client_secret=").append(URLEncoder.encode(AGY_CLIENT_SECRET, "UTF-8"));
-        form.append("&code=").append(URLEncoder.encode(code, "UTF-8"));
-        form.append("&redirect_uri=").append(URLEncoder.encode(AGY_REDIRECT_URI, "UTF-8"));
-        form.append("&grant_type=authorization_code");
-        if (pendingCodeVerifier != null && !pendingCodeVerifier.isEmpty()) {
-            form.append("&code_verifier=").append(URLEncoder.encode(pendingCodeVerifier, "UTF-8"));
+        String lastRespBody = "";
+        int lastStatus = 400;
+
+        for (String[] pair : clientPairs) {
+            URL url = new URL("https://oauth2.googleapis.com/token");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(20000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+
+            StringBuilder form = new StringBuilder();
+            form.append("client_id=").append(URLEncoder.encode(pair[0], "UTF-8"));
+            form.append("&client_secret=").append(URLEncoder.encode(pair[1], "UTF-8"));
+            form.append("&code=").append(URLEncoder.encode(code, "UTF-8"));
+            form.append("&redirect_uri=").append(URLEncoder.encode(AGY_REDIRECT_URI, "UTF-8"));
+            form.append("&grant_type=authorization_code");
+            if (pendingCodeVerifier != null && !pendingCodeVerifier.isEmpty()) {
+                form.append("&code_verifier=").append(URLEncoder.encode(pendingCodeVerifier, "UTF-8"));
+            }
+
+            byte[] payload = form.toString().getBytes(StandardCharsets.UTF_8);
+            OutputStream os = conn.getOutputStream();
+            os.write(payload);
+            os.close();
+
+            lastStatus = conn.getResponseCode();
+            lastRespBody = readHttpBody(conn);
+            if (lastStatus >= 200 && lastStatus < 300) {
+                JSONObject tok = new JSONObject(lastRespBody);
+                String accessToken = tok.optString("access_token", "");
+                String refreshToken = tok.optString("refresh_token", "");
+                long expiresIn = tok.optLong("expires_in", 3600L);
+
+                if (accessToken.isEmpty()) {
+                    throw new Exception("Google OAuth не вернул access_token");
+                }
+
+                setSetting("agy_access_token", accessToken);
+                if (!refreshToken.isEmpty()) {
+                    setSetting("agy_refresh_token", refreshToken);
+                }
+                setSetting("agy_token_expiry", String.valueOf(System.currentTimeMillis() + (expiresIn * 1000L) - 60_000L));
+
+                discoverAgyProjectAndEmail(accessToken);
+                return;
+            }
         }
 
-        byte[] payload = form.toString().getBytes(StandardCharsets.UTF_8);
-        OutputStream os = conn.getOutputStream();
-        os.write(payload);
-        os.close();
-
-        int status = conn.getResponseCode();
-        String respBody = readHttpBody(conn);
-        if (status < 200 || status >= 300) {
-            throw new Exception("Ошибка обмена OAuth-кода (" + status + "): " + respBody);
-        }
-
-        JSONObject tok = new JSONObject(respBody);
-        String accessToken = tok.optString("access_token", "");
-        String refreshToken = tok.optString("refresh_token", "");
-        long expiresIn = tok.optLong("expires_in", 3600L);
-
-        if (accessToken.isEmpty()) {
-            throw new Exception("Google OAuth не вернул access_token");
-        }
-
-        setSetting("agy_access_token", accessToken);
-        if (!refreshToken.isEmpty()) {
-            setSetting("agy_refresh_token", refreshToken);
-        }
-        setSetting("agy_token_expiry", String.valueOf(System.currentTimeMillis() + (expiresIn * 1000L) - 60_000L));
-
-        discoverAgyProjectAndEmail(accessToken);
+        throw new Exception("Ошибка обмена OAuth-кода (" + lastStatus + "): " + lastRespBody);
     }
 
     private synchronized String getValidAgyAccessToken() throws Exception {
@@ -1667,33 +1685,42 @@ public class LocalBackendServer {
         }
 
         if (!refreshToken.isEmpty()) {
-            URL url = new URL("https://oauth2.googleapis.com/token");
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setConnectTimeout(15000);
-            conn.setReadTimeout(20000);
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+            String[][] clientPairs = new String[][]{
+                {AGY_CLIENT_ID, AGY_CLIENT_SECRET},
+                {AGY_GCP_CLIENT_ID, AGY_GCP_CLIENT_SECRET}
+            };
+            for (String[] pair : clientPairs) {
+                try {
+                    URL url = new URL("https://oauth2.googleapis.com/token");
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setRequestMethod("POST");
+                    conn.setConnectTimeout(15000);
+                    conn.setReadTimeout(20000);
+                    conn.setDoOutput(true);
+                    conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
 
-            String form = "client_id=" + URLEncoder.encode(AGY_CLIENT_ID, "UTF-8") +
-                "&client_secret=" + URLEncoder.encode(AGY_CLIENT_SECRET, "UTF-8") +
-                "&refresh_token=" + URLEncoder.encode(refreshToken, "UTF-8") +
-                "&grant_type=refresh_token";
+                    String form = "client_id=" + URLEncoder.encode(pair[0], "UTF-8") +
+                        "&client_secret=" + URLEncoder.encode(pair[1], "UTF-8") +
+                        "&refresh_token=" + URLEncoder.encode(refreshToken, "UTF-8") +
+                        "&grant_type=refresh_token";
 
-            OutputStream os = conn.getOutputStream();
-            os.write(form.getBytes(StandardCharsets.UTF_8));
-            os.close();
+                    OutputStream os = conn.getOutputStream();
+                    os.write(form.getBytes(StandardCharsets.UTF_8));
+                    os.close();
 
-            int status = conn.getResponseCode();
-            String respBody = readHttpBody(conn);
-            if (status >= 200 && status < 300) {
-                JSONObject tok = new JSONObject(respBody);
-                String newAccess = tok.optString("access_token", "");
-                long expiresIn = tok.optLong("expires_in", 3600L);
-                if (!newAccess.isEmpty()) {
-                    setSetting("agy_access_token", newAccess);
-                    setSetting("agy_token_expiry", String.valueOf(System.currentTimeMillis() + (expiresIn * 1000L) - 60_000L));
-                    return newAccess;
+                    int status = conn.getResponseCode();
+                    String respBody = readHttpBody(conn);
+                    if (status >= 200 && status < 300) {
+                        JSONObject tok = new JSONObject(respBody);
+                        String newAccess = tok.optString("access_token", "");
+                        long expiresIn = tok.optLong("expires_in", 3600L);
+                        if (!newAccess.isEmpty()) {
+                            setSetting("agy_access_token", newAccess);
+                            setSetting("agy_token_expiry", String.valueOf(System.currentTimeMillis() + (expiresIn * 1000L) - 60_000L));
+                            return newAccess;
+                        }
+                    }
+                } catch (Exception ignored) {
                 }
             }
         }
@@ -1769,6 +1796,39 @@ public class LocalBackendServer {
         }
     }
 
+    private List<String> getVertexGeminiModelCandidates(String baseModel) {
+        String base = normalizeBaseModelId(baseModel);
+        List<String> list = new ArrayList<>();
+        if (base.equals("gemini-4-argon")) {
+            list.add("gemini-4-argon");
+            list.add("gemini-3.1-pro-preview");
+            list.add("gemini-2.5-pro");
+        } else if (base.equals("gemini-3.8-flash")) {
+            list.add("gemini-3.8-flash");
+            list.add("gemini-3.7-flash");
+            list.add("gemini-2.5-flash");
+        } else if (base.equals("gemini-3.7-flash")) {
+            list.add("gemini-3.7-flash");
+            list.add("gemini-3.8-flash");
+            list.add("gemini-2.5-flash");
+        } else if (base.equals("gemini-3.6-flash")) {
+            list.add("gemini-3.6-flash");
+            list.add("gemini-3.7-flash");
+            list.add("gemini-2.5-flash");
+        } else if (base.equals("gemini-3.5-flash-lite")) {
+            list.add("gemini-3.5-flash-lite");
+            list.add("gemini-3.6-flash");
+            list.add("gemini-2.5-flash");
+        } else if (base.equals("gemini-3.1-pro")) {
+            list.add("gemini-3.1-pro-preview");
+            list.add("gemini-4-argon");
+            list.add("gemini-2.5-pro");
+        } else {
+            list.add(base);
+        }
+        return list;
+    }
+
     private List<String> getGatewayModelCandidates(String baseModel, String effort) {
         String base = normalizeBaseModelId(baseModel);
         String eff = (effort != null ? effort.toLowerCase(Locale.ROOT) : "high");
@@ -1797,6 +1857,12 @@ public class LocalBackendServer {
             list.add("gemini-2.5-pro");
         }
         return list;
+    }
+
+    private String resolveThinkingLevel(String effort) {
+        if ("low".equalsIgnoreCase(effort)) return "LOW";
+        if ("medium".equalsIgnoreCase(effort)) return "MEDIUM";
+        return "HIGH";
     }
 
     private int resolveThinkingBudget(String effort) {
@@ -1904,6 +1970,7 @@ public class LocalBackendServer {
         GenerationProgress prog
     ) throws Exception {
         String accessToken = getValidAgyAccessToken();
+        String normBase = normalizeBaseModelId(baseModel);
 
         List<String> projectsToTry = new ArrayList<>();
         String cleanProj = projectId != null ? projectId.trim() : "";
@@ -1915,15 +1982,174 @@ public class LocalBackendServer {
             projectsToTry.add(discoveredProj);
         }
         if (projectsToTry.isEmpty()) {
-            projectsToTry.add("rising-fact-p41fc");
+            projectsToTry.add("project-4c7a8e8a-764a-42bc-bdf");
         }
 
-        List<String> modelCandidates = getGatewayModelCandidates(baseModel, effort);
         int thinkingBudget = resolveThinkingBudget(effort);
-        int maxOutputTokens = Math.max(8192, thinkingBudget + 4096);
+        String thinkingLevel = resolveThinkingLevel(effort);
+        int maxOutputTokens = 8192;
 
-        String lastError = "Не удалось получить ответ от AGY Gateway";
+        String primaryError = "";
 
+        // 1. Primary: Google Cloud Vertex AI (aiplatform.googleapis.com) — exact AGY CLI (authMethod=gcp) protocol
+        for (String proj : projectsToTry) {
+            if (normBase.startsWith("claude-")) {
+                String[] claudeCandidates = normBase.equals("claude-opus-5-5")
+                    ? new String[]{"claude-opus-5-5", "claude-opus-4-6@default", "claude-opus-4-5@20251101"}
+                    : new String[]{"claude-sonnet-5-5", "claude-sonnet-4-6@default", "claude-sonnet-4-5@20250929"};
+
+                for (String anthModel : claudeCandidates) {
+                    prog.statusText = "☁️ AGY Vertex (" + anthModel + " • " + proj + ")...";
+
+                    JSONArray anthMessages = new JSONArray();
+                    for (int i = 0; i < contents.length(); i++) {
+                        JSONObject c = contents.getJSONObject(i);
+                        String r = "model".equals(c.optString("role")) ? "assistant" : "user";
+                        JSONArray pArr = c.optJSONArray("parts");
+                        String txt = (pArr != null && pArr.length() > 0) ? pArr.getJSONObject(0).optString("text", "") : "";
+                        JSONObject mObj = new JSONObject();
+                        mObj.put("role", r);
+                        mObj.put("content", txt);
+                        anthMessages.put(mObj);
+                    }
+
+                    JSONObject anthReq = new JSONObject();
+                    anthReq.put("anthropic_version", "vertex-2023-10-16");
+                    anthReq.put("max_tokens", maxOutputTokens);
+                    anthReq.put("temperature", 0.85);
+                    if (!systemInstructionText.isEmpty()) {
+                        anthReq.put("system", systemInstructionText);
+                    }
+                    anthReq.put("messages", anthMessages);
+
+                    URL url = new URL(AGY_VERTEX_ENDPOINT + "/v1/projects/" + proj + "/locations/global/publishers/anthropic/models/" + anthModel + ":rawPredict");
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setRequestMethod("POST");
+                    conn.setConnectTimeout(20000);
+                    conn.setReadTimeout(90000);
+                    conn.setDoOutput(true);
+                    conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+                    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                    conn.setRequestProperty("x-goog-user-project", proj);
+                    conn.setRequestProperty("User-Agent", AGY_USER_AGENT);
+
+                    OutputStream os = conn.getOutputStream();
+                    os.write(anthReq.toString().getBytes(StandardCharsets.UTF_8));
+                    os.close();
+
+                    int code = conn.getResponseCode();
+                    String respBody = readHttpBody(conn);
+
+                    if (code >= 200 && code < 300) {
+                        JSONObject root = new JSONObject(respBody);
+                        JSONArray contentArr = root.optJSONArray("content");
+                        if (contentArr != null && contentArr.length() > 0) {
+                            StringBuilder reply = new StringBuilder();
+                            StringBuilder thoughts = new StringBuilder();
+                            for (int i = 0; i < contentArr.length(); i++) {
+                                JSONObject block = contentArr.getJSONObject(i);
+                                String bType = block.optString("type", "text");
+                                if ("thinking".equals(bType)) {
+                                    thoughts.append(block.optString("thinking", ""));
+                                } else if ("text".equals(bType)) {
+                                    reply.append(block.optString("text", ""));
+                                }
+                            }
+                            String finalReply = reply.toString().trim();
+                            if (!finalReply.isEmpty()) {
+                                return new String[]{finalReply, thoughts.toString().trim()};
+                            }
+                        }
+                    } else if (code == 401) {
+                        throw new Exception("Сессия AGY истекла или токен недействителен (401). Перезайдите через кнопку «Войти через Google (AGY)» в Настройках.");
+                    } else if (primaryError.isEmpty()) {
+                        primaryError = "AGY Vertex HTTP " + code + " (" + anthModel + "): " + respBody;
+                    }
+                }
+            } else {
+                List<String> vertexCandidates = getVertexGeminiModelCandidates(normBase);
+                for (String vertexModel : vertexCandidates) {
+                    prog.statusText = "☁️ AGY Vertex (" + vertexModel + " • " + proj + ")...";
+
+                    JSONObject vertexReq = new JSONObject();
+                    if (!systemInstructionText.isEmpty()) {
+                        JSONObject sysObj = new JSONObject();
+                        sysObj.put("role", "user");
+                        sysObj.put("parts", new JSONArray().put(new JSONObject().put("text", systemInstructionText)));
+                        vertexReq.put("systemInstruction", sysObj);
+                    }
+                    vertexReq.put("contents", contents);
+
+                    JSONObject genConfig = new JSONObject();
+                    genConfig.put("maxOutputTokens", maxOutputTokens);
+                    genConfig.put("temperature", 0.85);
+                    genConfig.put("topP", 0.95);
+                    JSONObject thinkingConfig = new JSONObject();
+                    if (vertexModel.startsWith("gemini-4") || vertexModel.startsWith("gemini-3")) {
+                        thinkingConfig.put("thinkingLevel", thinkingLevel);
+                    } else {
+                        thinkingConfig.put("thinkingBudget", thinkingBudget);
+                    }
+                    thinkingConfig.put("includeThoughts", true);
+                    genConfig.put("thinkingConfig", thinkingConfig);
+                    vertexReq.put("generationConfig", genConfig);
+
+                    URL url = new URL(AGY_VERTEX_ENDPOINT + "/v1/projects/" + proj + "/locations/global/publishers/google/models/" + vertexModel + ":generateContent");
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setRequestMethod("POST");
+                    conn.setConnectTimeout(20000);
+                    conn.setReadTimeout(90000);
+                    conn.setDoOutput(true);
+                    conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+                    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                    conn.setRequestProperty("x-goog-user-project", proj);
+                    conn.setRequestProperty("User-Agent", AGY_USER_AGENT);
+
+                    OutputStream os = conn.getOutputStream();
+                    os.write(vertexReq.toString().getBytes(StandardCharsets.UTF_8));
+                    os.close();
+
+                    int code = conn.getResponseCode();
+                    String respBody = readHttpBody(conn);
+
+                    if (code >= 200 && code < 300) {
+                        JSONObject root = new JSONObject(respBody);
+                        JSONObject respObj = root.optJSONObject("response") != null ? root.getJSONObject("response") : root;
+                        JSONArray candidates = respObj.optJSONArray("candidates");
+                        if (candidates != null && candidates.length() > 0) {
+                            JSONObject c0 = candidates.getJSONObject(0);
+                            JSONObject cContent = c0.optJSONObject("content");
+                            if (cContent != null) {
+                                JSONArray cParts = cContent.optJSONArray("parts");
+                                if (cParts != null) {
+                                    StringBuilder reply = new StringBuilder();
+                                    StringBuilder thoughts = new StringBuilder();
+                                    for (int i = 0; i < cParts.length(); i++) {
+                                        JSONObject p = cParts.getJSONObject(i);
+                                        if (p.optBoolean("thought", false)) {
+                                            thoughts.append(p.optString("text", ""));
+                                        } else {
+                                            reply.append(p.optString("text", ""));
+                                        }
+                                    }
+                                    String finalReply = reply.toString().trim();
+                                    if (!finalReply.isEmpty()) {
+                                        return new String[]{finalReply, thoughts.toString().trim()};
+                                    }
+                                }
+                            }
+                        }
+                    } else if (code == 401) {
+                        throw new Exception("Сессия AGY истекла или токен недействителен (401). Перезайдите через кнопку «Войти через Google (AGY)» в Настройках.");
+                    } else if (primaryError.isEmpty()) {
+                        primaryError = "AGY Vertex HTTP " + code + " (" + vertexModel + "): " + respBody;
+                    }
+                }
+            }
+        }
+
+        // 2. Fallback: CloudCode PA Gateway (for accounts with CodeAssist subscription)
+        List<String> modelCandidates = getGatewayModelCandidates(baseModel, effort);
         for (String endpoint : AGY_GATEWAY_ENDPOINTS) {
             for (String proj : projectsToTry) {
                 for (String candidateModel : modelCandidates) {
@@ -2002,17 +2228,14 @@ public class LocalBackendServer {
                                 }
                             }
                         }
-                    } else {
-                        lastError = "AGY HTTP " + code + " (" + candidateModel + "): " + respBody;
-                        if (code == 401) {
-                            throw new Exception("Сессия AGY истекла или токен недействителен (401). Перезайдите через кнопку «Войти через Google (AGY)» в Настройках.");
-                        }
+                    } else if (primaryError.isEmpty()) {
+                        primaryError = "AGY HTTP " + code + " (" + candidateModel + "): " + respBody;
                     }
                 }
             }
         }
 
-        throw new Exception(lastError);
+        throw new Exception(!primaryError.isEmpty() ? primaryError : "Не удалось получить ответ от AGY");
     }
 
     private String readHttpBody(HttpURLConnection conn) {

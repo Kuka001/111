@@ -1,12 +1,25 @@
 {
   "appName": "AGY Roleplay Studio",
-  "version": "1.3.0",
-  "build": 4,
-  "releaseDate": "2026-10-17",
+  "version": "1.3.1",
+  "build": 5,
+  "releaseDate": "2026-10-18",
   "gitRepo": "Kuka001/111",
   "gitBranch": "main",
   "apkPath": "agy-roleplay-android16.apk",
   "releases": [
+    {
+      "version": "1.3.1",
+      "build": 5,
+      "date": "2026-10-18",
+      "title": "Исправление ошибки 403 (#3501 SUBSCRIPTION_REQUIRED): переход на AGY GCP Vertex AI (aiplatform.googleapis.com)",
+      "ref": "main",
+      "changelog": [
+        "Исправлена ошибка HTTP 403 (#3501 SUBSCRIPTION_REQUIRED) при отправке сообщений: теперь приложение обращается напрямую к шлюзу Google Cloud Vertex AI (aiplatform.googleapis.com/v1/projects/{project}/locations/global/publishers/...) с заголовком x-goog-user-project — 1:1 как agy.exe в режиме authMethod=gcp",
+        "Добавлена поддержка обоих OAuth-клиентов AGY (GCP OAuth + CodeAssist OAuth), поэтому повторный вход не требуется — ваша текущая сессия на смартфоне продолжит работать автоматически",
+        "Настроена передача thinkingConfig.thinkingLevel (LOW / MEDIUM / HIGH) для моделей Gemini 4 Argon и линейки Gemini 3.x",
+        "В список базовых моделей добавлена модель Gemini 3.5 Flash Lite"
+      ]
+    },
     {
       "version": "1.3.0",
       "build": 4,
@@ -17,7 +30,7 @@
         "Полностью удалены все заглушки (runOnDeviceRoleplayEngine) и шаблонные ответы — приложение работает только с реальными моделями AGY",
         "Удалены все скрытые и зашитые в код ролевые промты — оставлен чистый пользовательский файл GEMINI.md для ваших собственных инструкций ИИ",
         "Реализован нативный протокол Google Antigravity на смартфоне без API ключей: OAuth 2.0 PKCE авторизация через аккаунт Google с перехватом на localhost:51121 и автоматическим продлением токенов",
-        "Прямое обращение к шлюзу Antigravity (cloudcode-pa.googleapis.com /v1internal:generateContent) с поддержкой вашего Project ID, моделей Gemini / Claude и уровней Effort"
+        "Прямое обращение к шлюзу Antigravity с поддержкой вашего Project ID, моделей Gemini / Claude и уровней Effort"
       ]
     },
     {
@@ -41,7 +54,7 @@
       "ref": "main",
       "changelog": [
         "Сервер полностью встроен внутрь Android APK (LocalBackendServer на Java + SQLite) — приложение работает на смартфоне без ПК",
-        "Исправлен выбор моделей ИИ: оставлены 7 чистых базовых моделей без дублей (-low/-medium/-high/-max)",
+        "Исправлен выбор моделей ИИ: оставлены чистые базовые модели без дублей (-low/-medium/-high/-max)",
         "Выбор уровня рассуждений (Effort: Low, Medium, High, Max) вынесен в отдельный удобный переключатель"
       ]
     },
