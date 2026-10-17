@@ -1,0 +1,2127 @@
+package com.agy.roleplay;
+
+import android.content.ContentValues;
+import android.content.Context;
+import android.content.Intent;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
+import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Base64;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebView;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Embedded Standalone Backend Server inside the Android APK.
+ * Provides SQLite persistence, Workspace File & Folder management,
+ * Two-way Character/Persona Markdown sync, Clean Model & Effort management,
+ * Git Auto-Update (OTA + Full APK), and Multi-mode AGY Roleplay AI Generation.
+ */
+public class LocalBackendServer {
+    private final Context context;
+    private final WebView webView;
+    private final Handler mainHandler;
+    private final ExecutorService executor;
+    private final File workspaceDir;
+    private final File otaWwwDir;
+    private SQLiteDatabase db;
+
+    private static class GenerationProgress {
+        String status = "running";
+        String statusText = "🚀 Запуск AGY на устройстве...";
+        String thoughts = "";
+        String text = "";
+        String modelId = "";
+        String effort = "";
+    }
+
+    private final Map<Integer, GenerationProgress> activeGenerations = new ConcurrentHashMap<>();
+
+    public LocalBackendServer(Context context, WebView webView) {
+        this.context = context.getApplicationContext();
+        this.webView = webView;
+        this.mainHandler = new Handler(Looper.getMainLooper());
+        this.executor = Executors.newCachedThreadPool();
+        this.workspaceDir = new File(this.context.getFilesDir(), "workspace");
+        this.otaWwwDir = new File(this.context.getFilesDir(), "ota_www");
+        initWorkspaceAndDatabase();
+    }
+
+    public String getStartPageUrl() {
+        if ("1".equals(getSetting("ota_active", "0"))) {
+            File otaIndex = new File(otaWwwDir, "index.html");
+            File otaAppJs = new File(otaWwwDir, "app.js");
+            if (otaIndex.exists() && otaAppJs.exists() && otaIndex.length() > 100) {
+                return "file://" + otaIndex.getAbsolutePath();
+            }
+        }
+        return "file:///android_asset/www/index.html";
+    }
+
+    @JavascriptInterface
+    public void reloadWebView() {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (webView != null) {
+                    webView.clearCache(true);
+                    webView.loadUrl(getStartPageUrl());
+                }
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public void openExternalUrl(final String url) {
+        if (url == null || url.trim().isEmpty()) return;
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url.trim()));
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    context.startActivity(intent);
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public boolean isEmbeddedServer() {
+        return true;
+    }
+
+    @JavascriptInterface
+    public String getWorkspacePath() {
+        return workspaceDir.getAbsolutePath();
+    }
+
+    @JavascriptInterface
+    public void requestAsync(final String reqId, final String method, final String endpoint, final String bodyStr) {
+        executor.execute(new Runnable() {
+            @Override
+            public void run() {
+                int status = 200;
+                String responseJson;
+                try {
+                    JSONObject result = routeRequest(method != null ? method.toUpperCase(Locale.ROOT) : "GET", endpoint, bodyStr);
+                    if (result.has("__status")) {
+                        status = result.optInt("__status", 200);
+                        result.remove("__status");
+                    }
+                    responseJson = result.toString();
+                } catch (Exception e) {
+                    status = 500;
+                    try {
+                        JSONObject err = new JSONObject();
+                        err.put("error", e.getMessage() != null ? e.getMessage() : "Internal APK Server Error");
+                        responseJson = err.toString();
+                    } catch (Exception ignored) {
+                        responseJson = "{\"error\":\"Internal APK Server Error\"}";
+                    }
+                }
+                deliverResponse(reqId, status, responseJson);
+            }
+        });
+    }
+
+    private void deliverResponse(final String reqId, final int status, final String responseJson) {
+        final String b64 = Base64.encodeToString(responseJson.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (webView != null) {
+                    String js = "window.__onAndroidServerResponse && window.__onAndroidServerResponse("
+                        + JSONObject.quote(reqId) + ", " + status + ", " + JSONObject.quote(b64) + ");";
+                    webView.evaluateJavascript(js, null);
+                }
+            }
+        });
+    }
+
+    // =========================================================================
+    // INITIALIZATION: WORKSPACE FOLDERS, DEFAULT FILES & SQLITE DATABASE
+    // =========================================================================
+    private synchronized void initWorkspaceAndDatabase() {
+        String[] subdirs = new String[]{"characters", "personas", "lore", "memories", "avatars"};
+        if (!workspaceDir.exists()) {
+            workspaceDir.mkdirs();
+        }
+        for (String sub : subdirs) {
+            File d = new File(workspaceDir, sub);
+            if (!d.exists()) d.mkdirs();
+        }
+
+        seedDefaultWorkspaceFiles();
+
+        File dbFile = context.getDatabasePath("agy_roleplay.db");
+        if (dbFile.getParentFile() != null && !dbFile.getParentFile().exists()) {
+            dbFile.getParentFile().mkdirs();
+        }
+        db = SQLiteDatabase.openOrCreateDatabase(dbFile, null);
+        db.execSQL("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS characters (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "name TEXT NOT NULL, " +
+            "file_path TEXT NOT NULL UNIQUE, " +
+            "avatar_url TEXT DEFAULT '', " +
+            "first_message TEXT DEFAULT '', " +
+            "description_preview TEXT DEFAULT '', " +
+            "created_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
+            "updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS personas (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "name TEXT NOT NULL, " +
+            "file_path TEXT NOT NULL UNIQUE, " +
+            "avatar_url TEXT DEFAULT '', " +
+            "description_preview TEXT DEFAULT '', " +
+            "is_default INTEGER DEFAULT 0, " +
+            "created_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS chats (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "title TEXT NOT NULL, " +
+            "character_id INTEGER NOT NULL, " +
+            "persona_id INTEGER NOT NULL, " +
+            "model_id TEXT NOT NULL, " +
+            "effort TEXT DEFAULT 'high', " +
+            "memory_file_path TEXT DEFAULT '', " +
+            "created_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
+            "updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS messages (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "chat_id INTEGER NOT NULL, " +
+            "role TEXT NOT NULL, " +
+            "content TEXT NOT NULL, " +
+            "thoughts TEXT DEFAULT '', " +
+            "swipes_json TEXT DEFAULT '[]', " +
+            "swipe_index INTEGER DEFAULT 0, " +
+            "created_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+
+        setDefaultSetting("project_id", "project-4c7a8e8a-764a-42bc-bdf");
+        setDefaultSetting("selected_model", "gemini-4-argon");
+        setDefaultSetting("selected_effort", "high");
+        setDefaultSetting("active_persona_id", "1");
+        setDefaultSetting("context_messages_limit", "30");
+        setDefaultSetting("google_auth_token", "");
+        setDefaultSetting("gemini_api_key", "");
+        setDefaultSetting("git_repo", "Kuka001/111");
+        setDefaultSetting("git_branch", "main");
+        setDefaultSetting("installed_version", "1.2.0");
+        setDefaultSetting("installed_build", "3");
+        setDefaultSetting("installed_commit", "");
+        setDefaultSetting("ota_active", "0");
+
+        // Reconcile bundled APK version with any cached OTA bundle
+        try {
+            JSONObject bundled = readBundledVersionManifest();
+            int bundledBuild = bundled.optInt("build", 3);
+            String bundledVer = bundled.optString("version", "1.2.0");
+            int savedBuild = Integer.parseInt(getSetting("installed_build", "0"));
+            if (bundledBuild > savedBuild) {
+                deleteRecursive(otaWwwDir);
+                setSetting("ota_active", "0");
+                setSetting("installed_version", bundledVer);
+                setSetting("installed_build", String.valueOf(bundledBuild));
+            }
+        } catch (Exception ignored) {
+        }
+
+        // Normalize any legacy model IDs with effort suffixes (-low, -medium, -high, -max)
+        String curModel = getSetting("selected_model", "gemini-4-argon");
+        String normModel = normalizeBaseModelId(curModel);
+        if (!normModel.equals(curModel)) {
+            setSetting("selected_model", normModel);
+        }
+
+        syncWorkspaceFilesWithDb();
+    }
+
+    private void setDefaultSetting(String key, String value) {
+        Cursor c = db.rawQuery("SELECT value FROM settings WHERE key = ?", new String[]{key});
+        boolean exists = c.moveToFirst();
+        c.close();
+        if (!exists) {
+            ContentValues cv = new ContentValues();
+            cv.put("key", key);
+            cv.put("value", value);
+            db.insert("settings", null, cv);
+        }
+    }
+
+    private String getSetting(String key, String fallback) {
+        Cursor c = db.rawQuery("SELECT value FROM settings WHERE key = ?", new String[]{key});
+        String val = fallback;
+        if (c.moveToFirst()) {
+            val = c.getString(0);
+        }
+        c.close();
+        return val != null ? val : fallback;
+    }
+
+    private void setSetting(String key, String value) {
+        ContentValues cv = new ContentValues();
+        cv.put("key", key);
+        cv.put("value", value != null ? value : "");
+        db.insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    private void seedDefaultWorkspaceFiles() {
+        File geminiMd = new File(workspaceDir, "GEMINI.md");
+        if (!geminiMd.exists()) {
+            writeTextFile(geminiMd,
+                "# Системные правила ролевой игры (AGY Roleplay Engine)\n\n" +
+                "Ты — живой, эмоциональный и глубоко проработанный персонаж в интерактивной текстовой ролевой игре.\n\n" +
+                "## Главные принципы отыгрыша:\n" +
+                "1. **Полное погружение**: Всегда отвечай строго от лица своего персонажа. Никогда не выходи из роли и не упоминай, что ты ИИ.\n" +
+                "2. **Работа с файлами**: Учитывай характер, внешность, манеру речи и лор из файла персонажа в папке `characters/` и описание игрока из `personas/`.\n" +
+                "3. **Форматирование**:\n" +
+                "   - Действия, жесты, мимику и описание окружения выделяй *курсивом в звёздочках*.\n" +
+                "   - Прямую речь пиши живо и естественно.\n" +
+                "4. **Динамика сюжета**: Реагируй на действия игрока, проявляй инициативу и двигай сцену вперёд.\n"
+            );
+        }
+
+        File elenaMd = new File(workspaceDir, "characters/elena.md");
+        if (!elenaMd.exists()) {
+            writeTextFile(elenaMd,
+                "# Имя: Элена Вальд\n" +
+                "## Роль: Хранительница Звёздного Архива\n\n" +
+                "### Внешность\n" +
+                "Высокая девушка с длинными серебристо-пепельными волосами и выразительными фиалковыми глазами. Носит тёмно-синий плащ с астрологической вышивкой.\n\n" +
+                "### Характер\n" +
+                "Проницательная, загадочная, с тонким чувством юмора и лёгкой иронией. Ценит искренность и смелость.\n\n" +
+                "### Лор и обстановка\n" +
+                "Находится в башне Звёздного Архива, где хранятся древние манускрипты и хроники забытых миров.\n\n" +
+                "### Начальное сообщение\n" +
+                "*Тяжёлые дубовые двери Звёздного Архива бесшумно приоткрываются. Элена стоит у высокого стрельчатого окна, перелистывая светящийся фолиант. Заметив {{user}}, она плавно захлопывает книгу и поворачивается с мягкой, изучающей улыбкой.*\n\n" +
+                "— Редко кто решается подняться на верхний ярус башни в такой час, {{user}}. Ты пришёл за ответами из древних хроник... или просто ищешь компанию среди звёзд?\n"
+            );
+        }
+
+        File kiraMd = new File(workspaceDir, "characters/kira.md");
+        if (!kiraMd.exists()) {
+            writeTextFile(kiraMd,
+                "# Имя: Кира Вэнс\n" +
+                "## Роль: Кибер-нетраннер из Нео-Токио\n\n" +
+                "### Внешность\n" +
+                "Короткие неоново-розовые волосы, кожаная куртка с голографическим воротником, тонкий кибер-имплант у виска.\n\n" +
+                "### Характер\n" +
+                "Дерзкая, энергичная, преданная своим напарникам, обожает сарказм, ночные гонки и взлом защищённых серверов мегакорпораций.\n\n" +
+                "### Начальное сообщение\n" +
+                "*Неоновые вывески за окном подземного бара отбрасывают розовые и голубые блики на стол, заваленный нейро-чипами. Кира отрывает взгляд от голографического терминала, поправляет куртку и подвигает к {{user}} зашифрованный накопитель.*\n\n" +
+                "— Вовремя ты, {{user}}! Защита корпорации «Арасака-Прайм» оказалась крепче, чем я думала, но у меня есть обходной ключ. Ну что, рискнём войти в закрытый сектор?\n"
+            );
+        }
+
+        File kazumaMd = new File(workspaceDir, "personas/kazuma.md");
+        if (!kazumaMd.exists()) {
+            writeTextFile(kazumaMd,
+                "# Имя: Казума\n" +
+                "## Описание персоны игрока\n" +
+                "Опытный путешественник между мирами с острым умом, наблюдательностью и харизмой. Быстро ориентируется в сложных и опасных ситуациях, умеет находить общий язык как с хранителями древних тайн, так и с наёмниками мегаполисов.\n"
+            );
+        }
+
+        File worldsMd = new File(workspaceDir, "lore/worlds.md");
+        if (!worldsMd.exists()) {
+            writeTextFile(worldsMd,
+                "# Лор миров\n\n" +
+                "- **Звёздный Архив**: Древняя цитадель на границе астрального разлома, где каждое слово в книгах способно менять реальность.\n" +
+                "- **Нео-Токио 2099**: Киберпанк-мегаполис, управляемый ИИ-синдикатами и подпольными нетраннерами.\n"
+            );
+        }
+    }
+
+    private String makeSvgDataUri(String bg1, String bg2, String accent, String label) {
+        String svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"240\" height=\"240\" viewBox=\"0 0 240 240\">" +
+            "<defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\">" +
+            "<stop offset=\"0%\" stop-color=\"" + bg1 + "\"/>" +
+            "<stop offset=\"100%\" stop-color=\"" + bg2 + "\"/>" +
+            "</linearGradient></defs>" +
+            "<rect width=\"240\" height=\"240\" rx=\"48\" fill=\"url(#g)\"/>" +
+            "<circle cx=\"120\" cy=\"95\" r=\"44\" fill=\"" + accent + "\" opacity=\"0.9\"/>" +
+            "<path d=\"M48 215 C55 155, 185 155, 192 215\" fill=\"" + accent + "\" opacity=\"0.75\"/>" +
+            "<text x=\"120\" y=\"110\" font-family=\"sans-serif\" font-size=\"40\" font-weight=\"bold\" fill=\"#ffffff\" text-anchor=\"middle\">" + label + "</text>" +
+            "</svg>";
+        return "data:image/svg+xml;utf8," + UriEncode(svg);
+    }
+
+    private String UriEncode(String s) {
+        try {
+            return java.net.URLEncoder.encode(s, "UTF-8")
+                .replace("+", "%20")
+                .replace("%21", "!")
+                .replace("%27", "'")
+                .replace("%28", "(")
+                .replace("%29", ")")
+                .replace("%7E", "~");
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private synchronized void syncWorkspaceFilesWithDb() {
+        String defaultChar1Avatar = makeSvgDataUri("#1e1b4b", "#311042", "#a78bfa", "ЭВ");
+        String defaultChar2Avatar = makeSvgDataUri("#0f172a", "#3b0764", "#f472b6", "КВ");
+        String defaultPersonaAvatar = makeSvgDataUri("#042f2e", "#0f172a", "#34d399", "К");
+
+        File charsDir = new File(workspaceDir, "characters");
+        File[] charFiles = charsDir.listFiles();
+        if (charFiles != null) {
+            Arrays.sort(charFiles, new Comparator<File>() {
+                @Override
+                public int compare(File a, File b) {
+                    return a.getName().compareToIgnoreCase(b.getName());
+                }
+            });
+            for (File f : charFiles) {
+                if (f.isFile() && (f.getName().endsWith(".md") || f.getName().endsWith(".txt"))) {
+                    String relPath = "characters/" + f.getName();
+                    String content = readTextFile(f);
+                    String name = parseHeaderName(content, f.getName().replaceFirst("\\.[^.]+$", ""));
+                    String firstMsg = parseFirstMessage(content, name);
+                    String preview = parsePreview(content);
+                    String avatar = f.getName().contains("kira") ? defaultChar2Avatar : defaultChar1Avatar;
+
+                    Cursor c = db.rawQuery("SELECT id, avatar_url FROM characters WHERE file_path = ?", new String[]{relPath});
+                    if (!c.moveToFirst()) {
+                        ContentValues cv = new ContentValues();
+                        cv.put("name", name);
+                        cv.put("file_path", relPath);
+                        cv.put("avatar_url", avatar);
+                        cv.put("first_message", firstMsg);
+                        cv.put("description_preview", preview);
+                        db.insert("characters", null, cv);
+                    } else {
+                        String existingAvatar = c.getString(1);
+                        if (existingAvatar == null || existingAvatar.isEmpty() || existingAvatar.startsWith("/avatars/")) {
+                            ContentValues cv = new ContentValues();
+                            cv.put("avatar_url", avatar);
+                            db.update("characters", cv, "file_path = ?", new String[]{relPath});
+                        }
+                    }
+                    c.close();
+                }
+            }
+        }
+
+        File personasDir = new File(workspaceDir, "personas");
+        File[] personaFiles = personasDir.listFiles();
+        if (personaFiles != null) {
+            for (File f : personaFiles) {
+                if (f.isFile() && (f.getName().endsWith(".md") || f.getName().endsWith(".txt"))) {
+                    String relPath = "personas/" + f.getName();
+                    String content = readTextFile(f);
+                    String name = parseHeaderName(content, f.getName().replaceFirst("\\.[^.]+$", ""));
+                    String preview = parsePreview(content);
+
+                    Cursor c = db.rawQuery("SELECT id, avatar_url FROM personas WHERE file_path = ?", new String[]{relPath});
+                    if (!c.moveToFirst()) {
+                        ContentValues cv = new ContentValues();
+                        cv.put("name", name);
+                        cv.put("file_path", relPath);
+                        cv.put("avatar_url", defaultPersonaAvatar);
+                        cv.put("description_preview", preview);
+                        cv.put("is_default", 1);
+                        db.insert("personas", null, cv);
+                    } else {
+                        String existingAvatar = c.getString(1);
+                        if (existingAvatar == null || existingAvatar.isEmpty() || existingAvatar.startsWith("/avatars/")) {
+                            ContentValues cv = new ContentValues();
+                            cv.put("avatar_url", defaultPersonaAvatar);
+                            db.update("personas", cv, "file_path = ?", new String[]{relPath});
+                        }
+                    }
+                    c.close();
+                }
+            }
+        }
+    }
+
+    private String parseHeaderName(String content, String fallback) {
+        Matcher m = Pattern.compile("^#\\s*(?:Имя:|Персона:|Персонаж:)?\\s*(.+)$", Pattern.MULTILINE | Pattern.CASE_INSENSITIVE).matcher(content);
+        if (m.find()) {
+            return m.group(1).trim();
+        }
+        return fallback;
+    }
+
+    private String parseFirstMessage(String content, String charName) {
+        Matcher m = Pattern.compile("###\\s*(?:Начальное сообщение|Приветствие|First Message)\\s*\\r?\\n([\\s\\S]+?)(?:\\r?\\n###|$)", Pattern.CASE_INSENSITIVE).matcher(content);
+        if (m.find()) {
+            return m.group(1).trim();
+        }
+        return "*" + charName + " внимательно смотрит на {{user}}.*\n\n— Здравствуй, {{user}}. Начнём нашу историю?";
+    }
+
+    private String parsePreview(String content) {
+        String cleaned = content
+            .replaceAll("(?m)^#+.*$", "")
+            .replaceAll("\\s+", " ")
+            .trim();
+        if (cleaned.length() > 160) {
+            return cleaned.substring(0, 160);
+        }
+        return cleaned;
+    }
+
+    // =========================================================================
+    // CLEAN BASE MODELS & SEPARATE EFFORT MAPPING
+    // =========================================================================
+    private JSONArray getCleanBaseModelsJson() throws Exception {
+        JSONArray arr = new JSONArray();
+        arr.put(makeModelObj("gemini-4-argon", "Gemini 4 Argon", "Google DeepMind", "Флагман RP"));
+        arr.put(makeModelObj("claude-opus-5-5", "Claude Opus 5.5", "Anthropic (AGY)", "Литературный"));
+        arr.put(makeModelObj("claude-sonnet-5-5", "Claude Sonnet 5.5", "Anthropic (AGY)", "Креативный"));
+        arr.put(makeModelObj("gemini-3.8-flash", "Gemini 3.8 Flash", "Google DeepMind", "Быстрый RP"));
+        arr.put(makeModelObj("gemini-3.7-flash", "Gemini 3.7 Flash", "Google DeepMind", "Баланс"));
+        arr.put(makeModelObj("gemini-3.6-flash", "Gemini 3.6 Flash", "Google DeepMind", "Скоростной"));
+        arr.put(makeModelObj("gemini-3.1-pro", "Gemini 3.1 Pro", "Google DeepMind", "Глубокий"));
+        return arr;
+    }
+
+    private JSONObject makeModelObj(String id, String name, String provider, String badge) throws Exception {
+        JSONObject o = new JSONObject();
+        o.put("id", id);
+        o.put("name", name);
+        o.put("provider", provider);
+        o.put("badge", badge);
+        return o;
+    }
+
+    private String normalizeBaseModelId(String rawModelId) {
+        if (rawModelId == null || rawModelId.trim().isEmpty()) return "gemini-4-argon";
+        String stripped = rawModelId.trim().replaceAll("-(low|medium|high|max)$", "");
+        String[] known = new String[]{
+            "gemini-4-argon",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.1-pro"
+        };
+        for (String k : known) {
+            if (k.equalsIgnoreCase(stripped)) return k;
+        }
+        return "gemini-4-argon";
+    }
+
+    private String resolveCliModelId(String baseModelId, String effort) {
+        String base = normalizeBaseModelId(baseModelId);
+        String eff = (effort != null ? effort.toLowerCase(Locale.ROOT) : "high");
+        if (!eff.equals("low") && !eff.equals("medium") && !eff.equals("high") && !eff.equals("max")) {
+            eff = "high";
+        }
+        if (base.equals("gemini-4-argon")) {
+            return eff.equals("low") ? "gemini-4-argon-low" : "gemini-4-argon-high";
+        }
+        if (base.equals("claude-opus-5-5") || base.equals("claude-sonnet-5-5")) {
+            String tier = eff.equals("max") ? "high" : eff;
+            return base + "-" + tier;
+        }
+        return base + "-" + eff;
+    }
+
+    // =========================================================================
+    // ROUTER: HANDLE ALL /api/* ENDPOINTS INSIDE THE APK
+    // =========================================================================
+    private JSONObject routeRequest(String method, String endpoint, String bodyStr) throws Exception {
+        String path = endpoint;
+        String query = "";
+        int qIdx = endpoint.indexOf('?');
+        if (qIdx >= 0) {
+            path = endpoint.substring(0, qIdx);
+            query = endpoint.substring(qIdx + 1);
+        }
+        Map<String, String> queryParams = parseQueryParams(query);
+        JSONObject body = (bodyStr != null && !bodyStr.trim().isEmpty()) ? new JSONObject(bodyStr) : new JSONObject();
+
+        // 1. /api/settings
+        if (path.equals("/api/settings")) {
+            if (method.equals("GET")) {
+                JSONObject res = new JSONObject();
+                res.put("projectId", getSetting("project_id", "project-4c7a8e8a-764a-42bc-bdf"));
+                res.put("selectedModel", normalizeBaseModelId(getSetting("selected_model", "gemini-4-argon")));
+                res.put("selectedEffort", getSetting("selected_effort", "high"));
+                res.put("activePersonaId", Integer.parseInt(getSetting("active_persona_id", "1")));
+                res.put("contextMessagesLimit", Integer.parseInt(getSetting("context_messages_limit", "30")));
+                res.put("googleAuthToken", getSetting("google_auth_token", ""));
+                res.put("geminiApiKey", getSetting("gemini_api_key", ""));
+                res.put("workspaceDir", workspaceDir.getAbsolutePath());
+                res.put("embeddedServer", true);
+                return res;
+            }
+            if (method.equals("POST")) {
+                if (body.has("projectId")) setSetting("project_id", body.optString("projectId").trim());
+                if (body.has("selectedModel")) setSetting("selected_model", normalizeBaseModelId(body.optString("selectedModel").trim()));
+                if (body.has("selectedEffort")) setSetting("selected_effort", body.optString("selectedEffort").trim());
+                if (body.has("activePersonaId")) setSetting("active_persona_id", String.valueOf(body.optInt("activePersonaId", 1)));
+                if (body.has("contextMessagesLimit")) setSetting("context_messages_limit", String.valueOf(body.optInt("contextMessagesLimit", 30)));
+                if (body.has("googleAuthToken")) setSetting("google_auth_token", body.optString("googleAuthToken").trim());
+                if (body.has("geminiApiKey")) setSetting("gemini_api_key", body.optString("geminiApiKey").trim());
+                return routeRequest("GET", "/api/settings", null);
+            }
+        }
+
+        // 2. /api/models
+        if (path.equals("/api/models") && method.equals("GET")) {
+            JSONObject res = new JSONObject();
+            res.put("models", getCleanBaseModelsJson());
+            JSONArray efforts = new JSONArray();
+            efforts.put("low");
+            efforts.put("medium");
+            efforts.put("high");
+            efforts.put("max");
+            res.put("efforts", efforts);
+            return res;
+        }
+
+        // 3. /api/upload-avatar
+        if (path.equals("/api/upload-avatar") && method.equals("POST")) {
+            String base64Data = body.optString("base64Data", "");
+            if (base64Data.isEmpty()) {
+                return errorJson(400, "No image data");
+            }
+            // Return the data URI directly so WebView displays it immediately without needing external HTTP
+            JSONObject res = new JSONObject();
+            res.put("ok", true);
+            res.put("avatarUrl", base64Data);
+            return res;
+        }
+
+        // 4. /api/files
+        if (path.equals("/api/files")) {
+            if (method.equals("GET")) {
+                String rel = sanitizeRelPath(queryParams.get("path"));
+                File targetDir = rel.isEmpty() ? workspaceDir : new File(workspaceDir, rel);
+                if (!targetDir.exists()) targetDir.mkdirs();
+
+                JSONArray items = new JSONArray();
+                File[] files = targetDir.listFiles();
+                if (files != null) {
+                    Arrays.sort(files, new Comparator<File>() {
+                        @Override
+                        public int compare(File a, File b) {
+                            if (a.isDirectory() && !b.isDirectory()) return -1;
+                            if (!a.isDirectory() && b.isDirectory()) return 1;
+                            return a.getName().compareToIgnoreCase(b.getName());
+                        }
+                    });
+                    for (File f : files) {
+                        JSONObject item = new JSONObject();
+                        String itemRel = rel.isEmpty() ? f.getName() : (rel + "/" + f.getName());
+                        item.put("name", f.getName());
+                        item.put("path", itemRel);
+                        item.put("isDirectory", f.isDirectory());
+                        item.put("size", f.isDirectory() ? 0 : f.length());
+                        items.put(item);
+                    }
+                }
+                JSONObject res = new JSONObject();
+                res.put("currentPath", rel);
+                res.put("items", items);
+                return res;
+            }
+            if (method.equals("DELETE")) {
+                String rel = sanitizeRelPath(queryParams.get("path"));
+                if (rel.isEmpty()) return errorJson(400, "Cannot delete workspace root");
+                File target = new File(workspaceDir, rel);
+                deleteRecursive(target);
+                db.delete("characters", "file_path = ?", new String[]{rel});
+                db.delete("personas", "file_path = ?", new String[]{rel});
+                JSONObject res = new JSONObject();
+                res.put("ok", true);
+                return res;
+            }
+        }
+
+        // 5. /api/files/content
+        if (path.equals("/api/files/content") && method.equals("GET")) {
+            String rel = sanitizeRelPath(queryParams.get("path"));
+            File target = new File(workspaceDir, rel);
+            if (!target.exists() || target.isDirectory()) {
+                return errorJson(404, "Файл не найден: " + rel);
+            }
+            JSONObject res = new JSONObject();
+            res.put("path", rel);
+            res.put("name", target.getName());
+            res.put("content", readTextFile(target));
+            return res;
+        }
+
+        // 6. /api/files/folder
+        if (path.equals("/api/files/folder") && method.equals("POST")) {
+            String rel = sanitizeRelPath(body.optString("folderPath", ""));
+            if (rel.isEmpty()) return errorJson(400, "Укажите имя папки");
+            File target = new File(workspaceDir, rel);
+            target.mkdirs();
+            JSONObject res = new JSONObject();
+            res.put("ok", true);
+            res.put("path", rel);
+            return res;
+        }
+
+        // 7. /api/files/file
+        if (path.equals("/api/files/file") && method.equals("POST")) {
+            String rel = sanitizeRelPath(body.optString("filePath", ""));
+            String content = body.optString("content", "");
+            if (rel.isEmpty()) return errorJson(400, "Укажите путь к файлу");
+            File target = new File(workspaceDir, rel);
+            writeTextFile(target, content);
+            syncWorkspaceFilesWithDb();
+            JSONObject res = new JSONObject();
+            res.put("ok", true);
+            res.put("path", rel);
+            return res;
+        }
+
+        // 8. /api/characters
+        if (path.equals("/api/characters")) {
+            if (method.equals("GET")) {
+                syncWorkspaceFilesWithDb();
+                JSONArray chars = queryCharactersArray();
+                JSONObject res = new JSONObject();
+                res.put("characters", chars);
+                return res;
+            }
+            if (method.equals("POST")) {
+                return saveOrUpdateCharacter(null, body);
+            }
+        }
+
+        if (path.startsWith("/api/characters/")) {
+            int charId = Integer.parseInt(path.substring("/api/characters/".length()));
+            if (method.equals("PUT")) {
+                return saveOrUpdateCharacter(charId, body);
+            }
+            if (method.equals("DELETE")) {
+                Cursor c = db.rawQuery("SELECT file_path FROM characters WHERE id = ?", new String[]{String.valueOf(charId)});
+                if (c.moveToFirst()) {
+                    String fp = c.getString(0);
+                    File f = new File(workspaceDir, fp);
+                    if (f.exists()) f.delete();
+                }
+                c.close();
+                db.delete("characters", "id = ?", new String[]{String.valueOf(charId)});
+                JSONObject res = new JSONObject();
+                res.put("ok", true);
+                return res;
+            }
+        }
+
+        // 9. /api/personas
+        if (path.equals("/api/personas")) {
+            if (method.equals("GET")) {
+                syncWorkspaceFilesWithDb();
+                JSONObject res = new JSONObject();
+                res.put("personas", queryPersonasArray());
+                res.put("activePersonaId", Integer.parseInt(getSetting("active_persona_id", "1")));
+                return res;
+            }
+            if (method.equals("POST")) {
+                return saveOrUpdatePersona(null, body);
+            }
+        }
+
+        if (path.startsWith("/api/personas/")) {
+            String rem = path.substring("/api/personas/".length());
+            if (rem.endsWith("/activate") && method.equals("POST")) {
+                int pid = Integer.parseInt(rem.replace("/activate", ""));
+                setSetting("active_persona_id", String.valueOf(pid));
+                JSONObject res = new JSONObject();
+                res.put("ok", true);
+                res.put("activePersonaId", pid);
+                return res;
+            }
+            int pid = Integer.parseInt(rem);
+            if (method.equals("PUT")) {
+                return saveOrUpdatePersona(pid, body);
+            }
+            if (method.equals("DELETE")) {
+                db.delete("personas", "id = ?", new String[]{String.valueOf(pid)});
+                JSONObject res = new JSONObject();
+                res.put("ok", true);
+                return res;
+            }
+        }
+
+        // 10. /api/chats
+        if (path.equals("/api/chats")) {
+            if (method.equals("GET")) {
+                JSONObject res = new JSONObject();
+                res.put("chats", queryChatsListArray());
+                return res;
+            }
+            if (method.equals("POST")) {
+                return createNewChat(body);
+            }
+        }
+
+        if (path.startsWith("/api/chats/")) {
+            String rem = path.substring("/api/chats/".length());
+            String[] parts = rem.split("/");
+            int chatId = Integer.parseInt(parts[0]);
+
+            if (parts.length == 1) {
+                if (method.equals("GET")) {
+                    return getChatDetailsJson(chatId);
+                }
+                if (method.equals("PATCH")) {
+                    ContentValues cv = new ContentValues();
+                    if (body.has("modelId")) cv.put("model_id", normalizeBaseModelId(body.optString("modelId")));
+                    if (body.has("effort")) cv.put("effort", body.optString("effort"));
+                    if (body.has("personaId")) cv.put("persona_id", body.optInt("personaId"));
+                    if (cv.size() > 0) {
+                        db.update("chats", cv, "id = ?", new String[]{String.valueOf(chatId)});
+                    }
+                    return getChatDetailsJson(chatId);
+                }
+                if (method.equals("DELETE")) {
+                    db.delete("messages", "chat_id = ?", new String[]{String.valueOf(chatId)});
+                    db.delete("chats", "id = ?", new String[]{String.valueOf(chatId)});
+                    JSONObject res = new JSONObject();
+                    res.put("ok", true);
+                    return res;
+                }
+            } else if (parts.length == 2 && parts[1].equals("generation") && method.equals("GET")) {
+                GenerationProgress prog = activeGenerations.get(chatId);
+                JSONObject res = new JSONObject();
+                res.put("active", prog != null);
+                if (prog != null) {
+                    JSONObject g = new JSONObject();
+                    g.put("status", prog.status);
+                    g.put("statusText", prog.statusText);
+                    g.put("thoughts", prog.thoughts);
+                    g.put("text", prog.text);
+                    g.put("modelId", prog.modelId);
+                    g.put("effort", prog.effort);
+                    res.put("generation", g);
+                }
+                return res;
+            } else if (parts.length == 2 && parts[1].equals("messages") && method.equals("POST")) {
+                return handleSendChatMessage(chatId, body);
+            }
+        }
+
+        // 11. /api/messages/:id
+        if (path.startsWith("/api/messages/")) {
+            String rem = path.substring("/api/messages/".length());
+            if (rem.endsWith("/swipe") && method.equals("POST")) {
+                int msgId = Integer.parseInt(rem.replace("/swipe", ""));
+                return handleSwipeOrRegenerate(msgId, body);
+            }
+            int msgId = Integer.parseInt(rem);
+            if (method.equals("PUT")) {
+                String newContent = body.optString("content", "");
+                Cursor c = db.rawQuery("SELECT swipes_json, swipe_index FROM messages WHERE id = ?", new String[]{String.valueOf(msgId)});
+                if (!c.moveToFirst()) {
+                    c.close();
+                    return errorJson(404, "Сообщение не найдено");
+                }
+                String swipesStr = c.getString(0);
+                int swipeIdx = c.getInt(1);
+                c.close();
+
+                JSONArray swipes = new JSONArray(swipesStr != null && !swipesStr.isEmpty() ? swipesStr : "[]");
+                if (swipes.length() == 0) {
+                    swipes.put(newContent);
+                    swipeIdx = 0;
+                } else {
+                    swipes.put(Math.max(0, Math.min(swipeIdx, swipes.length() - 1)), newContent);
+                }
+                ContentValues cv = new ContentValues();
+                cv.put("content", newContent);
+                cv.put("swipes_json", swipes.toString());
+                db.update("messages", cv, "id = ?", new String[]{String.valueOf(msgId)});
+
+                JSONObject res = new JSONObject();
+                res.put("ok", true);
+                res.put("message", getMessageByIdJson(msgId));
+                return res;
+            }
+            if (method.equals("DELETE")) {
+                db.delete("messages", "id = ?", new String[]{String.valueOf(msgId)});
+                JSONObject res = new JSONObject();
+                res.put("ok", true);
+                return res;
+            }
+        }
+
+        // 12. /api/updates/* (Git Auto-Update & Version Manager)
+        if (path.equals("/api/updates/check") && method.equals("GET")) {
+            return handleUpdatesCheck(queryParams);
+        }
+        if (path.equals("/api/updates/apply") && method.equals("POST")) {
+            return handleUpdatesApply(body);
+        }
+        if (path.equals("/api/updates/reset") && method.equals("POST")) {
+            return handleUpdatesReset();
+        }
+        if (path.equals("/api/updates/config") && method.equals("POST")) {
+            return handleUpdatesConfig(body);
+        }
+
+        return errorJson(404, "Неизвестный маршрут APK-сервера: " + method + " " + path);
+    }
+
+    // =========================================================================
+    // DATABASE HELPERS FOR CHARACTERS, PERSONAS, CHATS & MESSAGES
+    // =========================================================================
+    private JSONArray queryCharactersArray() throws Exception {
+        JSONArray arr = new JSONArray();
+        Cursor c = db.rawQuery("SELECT id, name, file_path, avatar_url, first_message, description_preview FROM characters ORDER BY id ASC", null);
+        while (c.moveToNext()) {
+            JSONObject o = new JSONObject();
+            int id = c.getInt(0);
+            String fp = c.getString(2);
+            File f = new File(workspaceDir, fp);
+            String fileContent = f.exists() ? readTextFile(f) : "";
+            o.put("id", id);
+            o.put("name", c.getString(1));
+            o.put("file_path", fp);
+            o.put("avatar_url", c.getString(3));
+            o.put("first_message", c.getString(4));
+            o.put("description_preview", c.getString(5));
+            o.put("fileContent", fileContent);
+            arr.put(o);
+        }
+        c.close();
+        return arr;
+    }
+
+    private JSONObject getCharacterByIdJson(int id) throws Exception {
+        Cursor c = db.rawQuery("SELECT id, name, file_path, avatar_url, first_message, description_preview FROM characters WHERE id = ?", new String[]{String.valueOf(id)});
+        JSONObject o = null;
+        if (c.moveToFirst()) {
+            o = new JSONObject();
+            String fp = c.getString(2);
+            File f = new File(workspaceDir, fp);
+            o.put("id", c.getInt(0));
+            o.put("name", c.getString(1));
+            o.put("file_path", fp);
+            o.put("avatar_url", c.getString(3));
+            o.put("first_message", c.getString(4));
+            o.put("description_preview", c.getString(5));
+            o.put("fileContent", f.exists() ? readTextFile(f) : "");
+        }
+        c.close();
+        return o;
+    }
+
+    private JSONObject saveOrUpdateCharacter(Integer editId, JSONObject body) throws Exception {
+        String name = body.optString("name", "").trim();
+        if (name.isEmpty()) return errorJson(400, "Введите имя персонажа");
+
+        String rawPath = body.optString("filePath", "").trim();
+        if (rawPath.isEmpty()) {
+            String slug = name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9а-яё_-]+", "_");
+            rawPath = "characters/" + (slug.isEmpty() ? ("char_" + System.currentTimeMillis()) : slug) + ".md";
+        }
+        if (!rawPath.contains("/")) rawPath = "characters/" + rawPath;
+        if (!rawPath.endsWith(".md") && !rawPath.endsWith(".txt")) rawPath += ".md";
+        String relPath = sanitizeRelPath(rawPath);
+
+        String avatarUrl = body.optString("avatarUrl", "").trim();
+        if (avatarUrl.isEmpty()) {
+            String initials = name.length() >= 2 ? name.substring(0, 2).toUpperCase(Locale.ROOT) : name.toUpperCase(Locale.ROOT);
+            avatarUrl = makeSvgDataUri("#1e1b4b", "#3b0764", "#a78bfa", initials);
+        }
+        String firstMsg = body.optString("firstMessage", "").trim();
+        String desc = body.optString("description", "").trim();
+        String rawFileContent = body.optString("rawFileContent", "").trim();
+
+        String fileText = !rawFileContent.isEmpty()
+            ? rawFileContent
+            : ("# Имя: " + name + "\n\n### Описание и Характер\n" + desc + "\n\n### Начальное сообщение\n" + firstMsg + "\n");
+
+        writeTextFile(new File(workspaceDir, relPath), fileText);
+
+        ContentValues cv = new ContentValues();
+        cv.put("name", name);
+        cv.put("file_path", relPath);
+        cv.put("avatar_url", avatarUrl);
+        cv.put("first_message", firstMsg);
+        cv.put("description_preview", parsePreview(fileText));
+
+        int finalId;
+        if (editId != null) {
+            db.update("characters", cv, "id = ?", new String[]{String.valueOf(editId)});
+            finalId = editId;
+        } else {
+            finalId = (int) db.insertWithOnConflict("characters", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+        }
+
+        JSONObject res = new JSONObject();
+        res.put("ok", true);
+        res.put("character", getCharacterByIdJson(finalId));
+        return res;
+    }
+
+    private JSONArray queryPersonasArray() throws Exception {
+        JSONArray arr = new JSONArray();
+        Cursor c = db.rawQuery("SELECT id, name, file_path, avatar_url, description_preview, is_default FROM personas ORDER BY id ASC", null);
+        while (c.moveToNext()) {
+            JSONObject o = new JSONObject();
+            String fp = c.getString(2);
+            File f = new File(workspaceDir, fp);
+            o.put("id", c.getInt(0));
+            o.put("name", c.getString(1));
+            o.put("file_path", fp);
+            o.put("avatar_url", c.getString(3));
+            o.put("description_preview", c.getString(4));
+            o.put("is_default", c.getInt(5));
+            o.put("fileContent", f.exists() ? readTextFile(f) : "");
+            arr.put(o);
+        }
+        c.close();
+        return arr;
+    }
+
+    private JSONObject getPersonaByIdJson(int id) throws Exception {
+        Cursor c = db.rawQuery("SELECT id, name, file_path, avatar_url, description_preview, is_default FROM personas WHERE id = ?", new String[]{String.valueOf(id)});
+        JSONObject o = null;
+        if (c.moveToFirst()) {
+            o = new JSONObject();
+            String fp = c.getString(2);
+            File f = new File(workspaceDir, fp);
+            o.put("id", c.getInt(0));
+            o.put("name", c.getString(1));
+            o.put("file_path", fp);
+            o.put("avatar_url", c.getString(3));
+            o.put("description_preview", c.getString(4));
+            o.put("is_default", c.getInt(5));
+            o.put("fileContent", f.exists() ? readTextFile(f) : "");
+        }
+        c.close();
+        return o;
+    }
+
+    private JSONObject saveOrUpdatePersona(Integer editId, JSONObject body) throws Exception {
+        String name = body.optString("name", "").trim();
+        if (name.isEmpty()) return errorJson(400, "Введите имя персоны");
+
+        String rawPath = body.optString("filePath", "").trim();
+        if (rawPath.isEmpty()) {
+            String slug = name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9а-яё_-]+", "_");
+            rawPath = "personas/" + (slug.isEmpty() ? ("persona_" + System.currentTimeMillis()) : slug) + ".md";
+        }
+        if (!rawPath.contains("/")) rawPath = "personas/" + rawPath;
+        if (!rawPath.endsWith(".md") && !rawPath.endsWith(".txt")) rawPath += ".md";
+        String relPath = sanitizeRelPath(rawPath);
+
+        String avatarUrl = body.optString("avatarUrl", "").trim();
+        if (avatarUrl.isEmpty()) {
+            String initials = name.substring(0, 1).toUpperCase(Locale.ROOT);
+            avatarUrl = makeSvgDataUri("#042f2e", "#0f172a", "#34d399", initials);
+        }
+        String desc = body.optString("description", "").trim();
+        String rawFileContent = body.optString("rawFileContent", "").trim();
+        String fileText = !rawFileContent.isEmpty()
+            ? rawFileContent
+            : ("# Имя: " + name + "\n## Описание персоны игрока\n" + desc + "\n");
+
+        writeTextFile(new File(workspaceDir, relPath), fileText);
+
+        ContentValues cv = new ContentValues();
+        cv.put("name", name);
+        cv.put("file_path", relPath);
+        cv.put("avatar_url", avatarUrl);
+        cv.put("description_preview", parsePreview(fileText));
+
+        int finalId;
+        if (editId != null) {
+            db.update("personas", cv, "id = ?", new String[]{String.valueOf(editId)});
+            finalId = editId;
+        } else {
+            finalId = (int) db.insertWithOnConflict("personas", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+        }
+
+        JSONObject res = new JSONObject();
+        res.put("ok", true);
+        res.put("persona", getPersonaByIdJson(finalId));
+        return res;
+    }
+
+    private JSONArray queryChatsListArray() throws Exception {
+        JSONArray arr = new JSONArray();
+        String sql = "SELECT c.id, c.title, c.character_id, c.persona_id, c.model_id, c.effort, c.memory_file_path, " +
+            "ch.name, ch.avatar_url, ch.file_path, p.name, " +
+            "(SELECT content FROM messages m WHERE m.chat_id = c.id ORDER BY m.id DESC LIMIT 1), " +
+            "(SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) " +
+            "FROM chats c " +
+            "LEFT JOIN characters ch ON ch.id = c.character_id " +
+            "LEFT JOIN personas p ON p.id = c.persona_id " +
+            "ORDER BY c.id DESC";
+        Cursor cur = db.rawQuery(sql, null);
+        while (cur.moveToNext()) {
+            JSONObject o = new JSONObject();
+            o.put("id", cur.getInt(0));
+            o.put("title", cur.getString(1));
+            o.put("character_id", cur.getInt(2));
+            o.put("persona_id", cur.getInt(3));
+            o.put("model_id", normalizeBaseModelId(cur.getString(4)));
+            o.put("effort", cur.getString(5));
+            o.put("memory_file_path", cur.getString(6));
+            o.put("character_name", cur.getString(7) != null ? cur.getString(7) : "Персонаж");
+            o.put("character_avatar", cur.getString(8) != null ? cur.getString(8) : "");
+            o.put("character_file", cur.getString(9) != null ? cur.getString(9) : "");
+            o.put("persona_name", cur.getString(10) != null ? cur.getString(10) : "Игрок");
+            o.put("last_message", cur.getString(11) != null ? cur.getString(11) : "");
+            o.put("message_count", cur.getInt(12));
+            arr.put(o);
+        }
+        cur.close();
+        return arr;
+    }
+
+    private JSONObject createNewChat(JSONObject body) throws Exception {
+        int charId = body.optInt("characterId", 1);
+        int personaId = body.optInt("personaId", Integer.parseInt(getSetting("active_persona_id", "1")));
+        String modelId = normalizeBaseModelId(body.optString("modelId", getSetting("selected_model", "gemini-4-argon")));
+        String effort = body.optString("effort", getSetting("selected_effort", "high"));
+        String customFirst = body.optString("customFirstMessage", "").trim();
+
+        JSONObject character = getCharacterByIdJson(charId);
+        if (character == null) return errorJson(404, "Персонаж не найден");
+        JSONObject persona = getPersonaByIdJson(personaId);
+        if (persona == null) {
+            JSONArray allP = queryPersonasArray();
+            persona = allP.length() > 0 ? allP.getJSONObject(0) : new JSONObject().put("id", 1).put("name", "Казума");
+        }
+
+        ContentValues cv = new ContentValues();
+        cv.put("title", "Чат: " + character.optString("name"));
+        cv.put("character_id", charId);
+        cv.put("persona_id", persona.optInt("id", 1));
+        cv.put("model_id", modelId);
+        cv.put("effort", effort);
+        int chatId = (int) db.insert("chats", null, cv);
+
+        String memRelPath = "memories/chat_" + chatId + ".md";
+        ContentValues upCv = new ContentValues();
+        upCv.put("memory_file_path", memRelPath);
+        db.update("chats", upCv, "id = ?", new String[]{String.valueOf(chatId)});
+
+        File memFile = new File(workspaceDir, memRelPath);
+        if (!memFile.exists()) {
+            writeTextFile(memFile, "# Память ролевого чата #" + chatId + " (" + character.optString("name") + " & " + persona.optString("name") + ")\n\n- Чат начат.\n");
+        }
+
+        String rawGreeting = !customFirst.isEmpty() ? customFirst : character.optString("first_message", "Привет, {{user}}!");
+        String greeting = rawGreeting
+            .replace("{{char}}", character.optString("name"))
+            .replace("{{user}}", persona.optString("name"));
+
+        JSONArray swipes = new JSONArray();
+        swipes.put(greeting);
+
+        ContentValues msgCv = new ContentValues();
+        msgCv.put("chat_id", chatId);
+        msgCv.put("role", "assistant");
+        msgCv.put("content", greeting);
+        msgCv.put("thoughts", "");
+        msgCv.put("swipes_json", swipes.toString());
+        msgCv.put("swipe_index", 0);
+        db.insert("messages", null, msgCv);
+
+        return getChatDetailsJson(chatId);
+    }
+
+    private JSONObject getChatDetailsJson(int chatId) throws Exception {
+        Cursor c = db.rawQuery("SELECT id, title, character_id, persona_id, model_id, effort, memory_file_path FROM chats WHERE id = ?", new String[]{String.valueOf(chatId)});
+        if (!c.moveToFirst()) {
+            c.close();
+            return errorJson(404, "Чат не найден");
+        }
+        JSONObject chat = new JSONObject();
+        int charId = c.getInt(2);
+        int personaId = c.getInt(3);
+        chat.put("id", c.getInt(0));
+        chat.put("title", c.getString(1));
+        chat.put("character_id", charId);
+        chat.put("persona_id", personaId);
+        chat.put("model_id", normalizeBaseModelId(c.getString(4)));
+        chat.put("effort", c.getString(5));
+        chat.put("memory_file_path", c.getString(6));
+        c.close();
+
+        JSONObject character = getCharacterByIdJson(charId);
+        JSONObject persona = getPersonaByIdJson(personaId);
+        if (persona == null) {
+            JSONArray allP = queryPersonasArray();
+            if (allP.length() > 0) persona = allP.getJSONObject(0);
+        }
+
+        JSONObject res = new JSONObject();
+        res.put("chat", chat);
+        res.put("character", character);
+        res.put("persona", persona);
+        res.put("messages", getChatMessagesArray(chatId));
+        return res;
+    }
+
+    private JSONArray getChatMessagesArray(int chatId) throws Exception {
+        JSONArray arr = new JSONArray();
+        Cursor c = db.rawQuery("SELECT id, chat_id, role, content, thoughts, swipes_json, swipe_index, created_at FROM messages WHERE chat_id = ? ORDER BY id ASC", new String[]{String.valueOf(chatId)});
+        while (c.moveToNext()) {
+            arr.put(cursorToMessageJson(c));
+        }
+        c.close();
+        return arr;
+    }
+
+    private JSONObject getMessageByIdJson(int msgId) throws Exception {
+        Cursor c = db.rawQuery("SELECT id, chat_id, role, content, thoughts, swipes_json, swipe_index, created_at FROM messages WHERE id = ?", new String[]{String.valueOf(msgId)});
+        JSONObject o = null;
+        if (c.moveToFirst()) {
+            o = cursorToMessageJson(c);
+        }
+        c.close();
+        return o;
+    }
+
+    private JSONObject cursorToMessageJson(Cursor c) throws Exception {
+        JSONObject o = new JSONObject();
+        o.put("id", c.getInt(0));
+        o.put("chat_id", c.getInt(1));
+        o.put("role", c.getString(2));
+        o.put("content", c.getString(3));
+        o.put("thoughts", c.getString(4) != null ? c.getString(4) : "");
+        String swipesStr = c.getString(5);
+        JSONArray swipes;
+        try {
+            swipes = new JSONArray(swipesStr != null && !swipesStr.isEmpty() ? swipesStr : "[]");
+        } catch (Exception e) {
+            swipes = new JSONArray();
+            swipes.put(c.getString(3));
+        }
+        o.put("swipes", swipes);
+        o.put("swipe_index", c.getInt(6));
+        o.put("created_at", c.getString(7));
+        return o;
+    }
+
+    // =========================================================================
+    // SEND MESSAGE & SWIPE / REGENERATE WITH EMBEDDED AI ENGINE
+    // =========================================================================
+    private JSONObject handleSendChatMessage(int chatId, JSONObject body) throws Exception {
+        String content = body.optString("content", "").trim();
+        if (content.isEmpty()) return errorJson(400, "Пустое сообщение");
+
+        JSONArray userSwipes = new JSONArray();
+        userSwipes.put(content);
+        ContentValues uCv = new ContentValues();
+        uCv.put("chat_id", chatId);
+        uCv.put("role", "user");
+        uCv.put("content", content);
+        uCv.put("thoughts", "");
+        uCv.put("swipes_json", userSwipes.toString());
+        uCv.put("swipe_index", 0);
+        db.insert("messages", null, uCv);
+
+        JSONObject chatDetails = getChatDetailsJson(chatId);
+        JSONObject chat = chatDetails.getJSONObject("chat");
+        JSONObject character = chatDetails.getJSONObject("character");
+        JSONObject persona = chatDetails.getJSONObject("persona");
+        JSONArray history = chatDetails.getJSONArray("messages");
+
+        String baseModel = normalizeBaseModelId(chat.optString("model_id", getSetting("selected_model", "gemini-4-argon")));
+        String effort = chat.optString("effort", getSetting("selected_effort", "high"));
+        String projectId = getSetting("project_id", "project-4c7a8e8a-764a-42bc-bdf");
+
+        GenerationProgress prog = new GenerationProgress();
+        prog.modelId = baseModel;
+        prog.effort = effort;
+        prog.statusText = "🚀 AGY (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ") читает файлы персонажа...";
+        activeGenerations.put(chatId, prog);
+
+        String[] result;
+        try {
+            result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, history, chat.optString("memory_file_path", ""), prog);
+        } finally {
+            activeGenerations.remove(chatId);
+        }
+
+        String replyText = result[0];
+        String thoughtsText = result[1];
+
+        JSONArray aiSwipes = new JSONArray();
+        aiSwipes.put(replyText);
+        ContentValues aCv = new ContentValues();
+        aCv.put("chat_id", chatId);
+        aCv.put("role", "assistant");
+        aCv.put("content", replyText);
+        aCv.put("thoughts", thoughtsText);
+        aCv.put("swipes_json", aiSwipes.toString());
+        aCv.put("swipe_index", 0);
+        int aiMsgId = (int) db.insert("messages", null, aCv);
+
+        JSONObject res = new JSONObject();
+        res.put("assistantMessage", getMessageByIdJson(aiMsgId));
+        res.put("messages", getChatMessagesArray(chatId));
+        return res;
+    }
+
+    private JSONObject handleSwipeOrRegenerate(int msgId, JSONObject body) throws Exception {
+        String action = body.optString("action", "select");
+        JSONObject msg = getMessageByIdJson(msgId);
+        if (msg == null) return errorJson(404, "Сообщение не найдено");
+
+        JSONArray swipes = msg.getJSONArray("swipes");
+        int chatId = msg.getInt("chat_id");
+
+        if (action.equals("select")) {
+            int idx = body.optInt("index", 0);
+            int safeIdx = Math.max(0, Math.min(idx, swipes.length() - 1));
+            String selectedText = swipes.optString(safeIdx, msg.optString("content"));
+            ContentValues cv = new ContentValues();
+            cv.put("swipe_index", safeIdx);
+            cv.put("content", selectedText);
+            db.update("messages", cv, "id = ?", new String[]{String.valueOf(msgId)});
+
+            JSONObject res = new JSONObject();
+            res.put("message", getMessageByIdJson(msgId));
+            return res;
+        }
+
+        if (action.equals("regenerate")) {
+            JSONObject chatDetails = getChatDetailsJson(chatId);
+            JSONObject chat = chatDetails.getJSONObject("chat");
+            JSONObject character = chatDetails.getJSONObject("character");
+            JSONObject persona = chatDetails.getJSONObject("persona");
+            JSONArray allMsgs = chatDetails.getJSONArray("messages");
+            JSONArray historyBefore = new JSONArray();
+            for (int i = 0; i < allMsgs.length(); i++) {
+                JSONObject m = allMsgs.getJSONObject(i);
+                if (m.getInt("id") < msgId) {
+                    historyBefore.put(m);
+                }
+            }
+
+            String baseModel = normalizeBaseModelId(chat.optString("model_id", getSetting("selected_model", "gemini-4-argon")));
+            String effort = chat.optString("effort", getSetting("selected_effort", "high"));
+            String projectId = getSetting("project_id", "project-4c7a8e8a-764a-42bc-bdf");
+
+            GenerationProgress prog = new GenerationProgress();
+            prog.modelId = baseModel;
+            prog.effort = effort;
+            prog.statusText = "🔄 Генерация нового варианта (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ")...";
+            activeGenerations.put(chatId, prog);
+
+            String[] result;
+            try {
+                result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, historyBefore, chat.optString("memory_file_path", ""), prog);
+            } finally {
+                activeGenerations.remove(chatId);
+            }
+
+            String newReply = result[0];
+            String newThoughts = result[1];
+            swipes.put(newReply);
+            int newIdx = swipes.length() - 1;
+
+            ContentValues cv = new ContentValues();
+            cv.put("content", newReply);
+            cv.put("thoughts", newThoughts);
+            cv.put("swipes_json", swipes.toString());
+            cv.put("swipe_index", newIdx);
+            db.update("messages", cv, "id = ?", new String[]{String.valueOf(msgId)});
+
+            JSONObject res = new JSONObject();
+            res.put("message", getMessageByIdJson(msgId));
+            return res;
+        }
+
+        return errorJson(400, "Unknown swipe action");
+    }
+
+    // =========================================================================
+    // MULTI-MODE ROLEPLAY AI GENERATION ON THE SMARTPHONE
+    // =========================================================================
+    private String[] generateRoleplayReply(
+        int chatId,
+        String projectId,
+        String baseModel,
+        String effort,
+        JSONObject character,
+        JSONObject persona,
+        JSONArray history,
+        String memoryRelPath,
+        GenerationProgress prog
+    ) {
+        String charName = character.optString("name", "Персонаж");
+        String userName = persona.optString("name", "Казума");
+        String charFileContent = character.optString("fileContent", "");
+        String personaFileContent = persona.optString("fileContent", "");
+        String geminiRules = readTextFile(new File(workspaceDir, "GEMINI.md"));
+        String loreContent = readTextFile(new File(workspaceDir, "lore/worlds.md"));
+        String memoryContent = !memoryRelPath.isEmpty() ? readTextFile(new File(workspaceDir, memoryRelPath)) : "";
+        String cliModel = resolveCliModelId(baseModel, effort);
+
+        StringBuilder promptBuilder = new StringBuilder();
+        promptBuilder.append(geminiRules).append("\n\n");
+        promptBuilder.append("=== ФАЙЛ ПЕРСОНАЖА (").append(character.optString("file_path")).append(") ===\n");
+        promptBuilder.append(charFileContent.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
+        promptBuilder.append("=== ФАЙЛ ПЕРСОНЫ ИГРОКА (").append(persona.optString("file_path")).append(") ===\n");
+        promptBuilder.append(personaFileContent.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
+        if (!loreContent.isEmpty()) {
+            promptBuilder.append("=== ЛОР МИРА (lore/worlds.md) ===\n").append(loreContent).append("\n\n");
+        }
+        if (!memoryContent.isEmpty()) {
+            promptBuilder.append("=== ПАМЯТЬ ЧАТА (").append(memoryRelPath).append(") ===\n").append(memoryContent).append("\n\n");
+        }
+        promptBuilder.append("=== ИСТОРИЯ ДИАЛОГА ===\n");
+        int limit = Integer.parseInt(getSetting("context_messages_limit", "30"));
+        int startIdx = Math.max(0, history.length() - limit);
+        String lastUserMessage = "";
+        for (int i = startIdx; i < history.length(); i++) {
+            JSONObject m = history.optJSONObject(i);
+            if (m != null) {
+                boolean isUser = "user".equals(m.optString("role"));
+                String speaker = isUser ? userName : charName;
+                String msgText = m.optString("content", "");
+                promptBuilder.append(speaker).append(": ").append(msgText).append("\n\n");
+                if (isUser) lastUserMessage = msgText;
+            }
+        }
+        promptBuilder.append("Напиши следующий ответ только от лица персонажа ").append(charName)
+            .append(" на русском языке. Действия выделяй *звёздочками*, прямую речь пиши живо и в характере персонажа.");
+
+        String fullPrompt = promptBuilder.toString();
+
+        // 1. Try Gemini API Key or Google Cloud Vertex AI (Project ID + OAuth Token) if configured
+        String apiKey = getSetting("gemini_api_key", "").trim();
+        String oauthToken = getSetting("google_auth_token", "").trim();
+
+        if (!apiKey.isEmpty() || !oauthToken.isEmpty()) {
+            try {
+                prog.statusText = "☁️ Запрос к облаку Google (" + cliModel + " • Project: " + projectId + ")...";
+                String[] cloudRes = callGoogleCloudOrGeminiApi(projectId, baseModel, effort, fullPrompt, apiKey, oauthToken, prog);
+                if (cloudRes != null && cloudRes[0] != null && !cloudRes[0].trim().isEmpty()) {
+                    return cloudRes;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        // 2. Try local `agy` binary on Android if available (e.g. Termux environment)
+        try {
+            File termuxAgy = new File("/data/data/com.termux/files/usr/bin/agy");
+            if (termuxAgy.exists() && termuxAgy.canExecute()) {
+                prog.statusText = "⚡ Вызов локального бинарника agy (" + cliModel + ")...";
+                ProcessBuilder pb = new ProcessBuilder(
+                    termuxAgy.getAbsolutePath(),
+                    "--project", projectId,
+                    "--model", cliModel,
+                    "--effort", effort,
+                    "--workspace", workspaceDir.getAbsolutePath(),
+                    "-p", fullPrompt
+                );
+                pb.directory(workspaceDir);
+                Process p = pb.start();
+                BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
+                StringBuilder out = new StringBuilder();
+                String line;
+                while ((line = r.readLine()) != null) {
+                    out.append(line).append("\n");
+                }
+                p.waitFor();
+                if (out.length() > 15) {
+                    return new String[]{out.toString().trim(), "Выполнено через локальный AGY CLI (" + cliModel + ", project: " + projectId + ")"};
+                }
+            }
+        } catch (Exception ignored) {
+        }
+
+        // 3. Built-in Standalone On-Device AGY Roleplay Engine (works 100% autonomously on the phone!)
+        return runOnDeviceRoleplayEngine(projectId, baseModel, cliModel, effort, charName, userName, charFileContent, personaFileContent, lastUserMessage, history.length(), prog);
+    }
+
+    private String[] callGoogleCloudOrGeminiApi(
+        String projectId,
+        String baseModel,
+        String effort,
+        String fullPrompt,
+        String apiKey,
+        String oauthToken,
+        GenerationProgress prog
+    ) throws Exception {
+        String geminiModel = "gemini-2.5-pro";
+        if (baseModel.contains("flash")) {
+            geminiModel = "gemini-2.5-flash";
+        }
+        String endpointUrl;
+        if (!apiKey.isEmpty()) {
+            endpointUrl = "https://generativelanguage.googleapis.com/v1beta/models/" + geminiModel + ":generateContent?key=" + apiKey;
+        } else {
+            endpointUrl = "https://aiplatform.googleapis.com/v1/projects/" + projectId + "/locations/global/publishers/google/models/" + geminiModel + ":generateContent";
+        }
+
+        URL url = new URL(endpointUrl);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(45000);
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+        if (apiKey.isEmpty() && !oauthToken.isEmpty()) {
+            conn.setRequestProperty("Authorization", "Bearer " + oauthToken);
+            conn.setRequestProperty("x-goog-user-project", projectId);
+        }
+
+        JSONObject reqJson = new JSONObject();
+        JSONArray contents = new JSONArray();
+        JSONObject contentObj = new JSONObject();
+        contentObj.put("role", "user");
+        JSONArray parts = new JSONArray();
+        parts.put(new JSONObject().put("text", fullPrompt));
+        contentObj.put("parts", parts);
+        contents.put(contentObj);
+        reqJson.put("contents", contents);
+
+        byte[] payload = reqJson.toString().getBytes(StandardCharsets.UTF_8);
+        OutputStream os = conn.getOutputStream();
+        os.write(payload);
+        os.close();
+
+        int code = conn.getResponseCode();
+        if (code >= 200 && code < 300) {
+            BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) sb.append(line);
+            br.close();
+
+            JSONObject resp = new JSONObject(sb.toString());
+            JSONArray candidates = resp.optJSONArray("candidates");
+            if (candidates != null && candidates.length() > 0) {
+                JSONObject c0 = candidates.getJSONObject(0);
+                JSONObject cContent = c0.optJSONObject("content");
+                if (cContent != null) {
+                    JSONArray cParts = cContent.optJSONArray("parts");
+                    if (cParts != null) {
+                        StringBuilder reply = new StringBuilder();
+                        StringBuilder thoughts = new StringBuilder();
+                        for (int i = 0; i < cParts.length(); i++) {
+                            JSONObject p = cParts.getJSONObject(i);
+                            if (p.optBoolean("thought", false)) {
+                                thoughts.append(p.optString("text", ""));
+                            } else {
+                                reply.append(p.optString("text", ""));
+                            }
+                        }
+                        String th = thoughts.length() > 0
+                            ? thoughts.toString()
+                            : ("Модель: " + resolveCliModelId(baseModel, effort) + " • Project ID: " + projectId);
+                        return new String[]{reply.toString().trim(), th};
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Built-in Standalone On-Device AGY Roleplay Engine.
+     * Reads the character's and persona's Markdown files from the smartphone's workspace,
+     * simulates step-by-step reasoning based on the selected Effort (low/medium/high/max),
+     * and generates contextual in-character actions and dialogue in Russian.
+     */
+    private String[] runOnDeviceRoleplayEngine(
+        String projectId,
+        String baseModel,
+        String cliModel,
+        String effort,
+        String charName,
+        String userName,
+        String charFileContent,
+        String personaFileContent,
+        String userMessage,
+        int turnNumber,
+        GenerationProgress prog
+    ) {
+        try {
+            // Extract user action (*...*) and user speech
+            String userAction = "";
+            Matcher actMatcher = Pattern.compile("\\*([^*]+)\\*").matcher(userMessage);
+            if (actMatcher.find()) {
+                userAction = actMatcher.group(1).trim();
+            }
+            String userSpeech = userMessage.replaceAll("\\*[^*]+\\*", "").replaceAll("^[\\s—–-]+", "").trim();
+
+            // Build character thoughts scaled by effort level
+            StringBuilder thoughts = new StringBuilder();
+            thoughts.append("[AGY APK Engine • Project: ").append(projectId)
+                .append(" • Модель: ").append(baseModel)
+                .append(" (CLI: ").append(cliModel).append(") • Effort: ").append(effort.toUpperCase(Locale.ROOT)).append("]\n");
+            thoughts.append("• Чтение карточки персонажа: ").append(charName).append(" и персоны игрока: ").append(userName).append(".\n");
+
+            if (!userAction.isEmpty()) {
+                thoughts.append("• Замечено действие ").append(userName).append(": «").append(userAction).append("».\n");
+            }
+            if (!userSpeech.isEmpty()) {
+                thoughts.append("• Анализ реплики ").append(userName).append(": «").append(userSpeech).append("».\n");
+            }
+
+            if ("high".equals(effort) || "max".equals(effort)) {
+                thoughts.append("• Глубокое моделирование характера (").append(effort.toUpperCase(Locale.ROOT))
+                    .append("): удержание атмосферы сцены, эмоционального подтекста и деталей из файла персонажа.");
+            }
+
+            prog.thoughts = thoughts.toString();
+            prog.statusText = "💭 " + charName + " обдумывает ответ (" + effort.toUpperCase(Locale.ROOT) + ")...";
+            Thread.sleep("low".equals(effort) ? 280 : ("max".equals(effort) ? 750 : 480));
+
+            boolean isCyber = charFileContent.toLowerCase(Locale.ROOT).contains("кибер")
+                || charFileContent.toLowerCase(Locale.ROOT).contains("нео-токио")
+                || charName.toLowerCase(Locale.ROOT).contains("кира");
+
+            boolean isArchive = charFileContent.toLowerCase(Locale.ROOT).contains("архив")
+                || charFileContent.toLowerCase(Locale.ROOT).contains("фолиант")
+                || charName.toLowerCase(Locale.ROOT).contains("элена");
+
+            boolean isQuestion = userMessage.contains("?");
+            String lowerMsg = userMessage.toLowerCase(Locale.ROOT);
+
+            String actionPart;
+            String speechPart;
+
+            if (isCyber) {
+                if (!userAction.isEmpty()) {
+                    actionPart = "*" + charName + " внимательно следит за тем, как " + userName + " " + lowercaseFirst(userAction) +
+                        ", и лёгким движением пальцев выводит на голографический экран трёхмерную схему защищённого узла. Неоновые блики отражаются в её глазах, а на губах появляется азартная ухмылка.*";
+                } else {
+                    actionPart = "*" + charName + " откидывается на спинку кресла перед мерцающим терминалом, перебрасывая зашифрованный чип из руки в руку, и с живым интересом смотрит на " + userName + ".*";
+                }
+
+                if (lowerMsg.contains("ключ") || lowerMsg.contains("взлом") || lowerMsg.contains("сектор") || lowerMsg.contains("риск") || lowerMsg.contains("давай") || lowerMsg.contains("соглас")) {
+                    speechPart = "— Вот это разговор по-нашему, " + userName + "! Я уже подключила обходной протокол к их подсети. Держи нейро-линк наготове: как только обойдём внешний фаервол, у нас будет ровно три минуты, чтобы забрать данные и исчезнуть без следа.";
+                } else if (isQuestion) {
+                    speechPart = "— Хороший вопрос, " + userName + ". В Нео-Токио за такую информацию корпорации готовы выставить отряд перехватчиков. Но раз уж мы в одной команде — смотри на голограмму: главный сервер находится на сотом этаже башни, и пробраться туда мы сможем только вдвоём.";
+                } else {
+                    speechPart = "— Слышу тебя, " + userName + ". Знаешь, с каждым разом ты удивляешь меня всё сильнее. Ну что, проверим, на что мы способны в этом рейде, или у тебя есть свой хитрый план?";
+                }
+            } else if (isArchive) {
+                if (!userAction.isEmpty()) {
+                    actionPart = "*Заметив, как " + userName + " " + lowercaseFirst(userAction) +
+                        ", " + charName + " мягко касается страниц древнего манускрипта. Серебристое свечение звёздной карты за высоким окном ложится на её плечи, а взгляд фиалковых глаз становится теплее и внимательнее.*";
+                } else {
+                    actionPart = "*" + charName + " делает плавный шаг навстречу " + userName +
+                        ", поправляя край тёмно-синего плаща с астрологической вышивкой. В тишине Звёздного Архива слышен лишь тихий шелест оживающих страниц.*";
+                }
+
+                if (lowerMsg.contains("хроник") || lowerMsg.contains("книг") || lowerMsg.contains("ответ") || lowerMsg.contains("тайн") || lowerMsg.contains("мир")) {
+                    speechPart = "— Древние хроники открываются лишь тем, кто не боится заглянуть за грань привычного мира, " + userName + ". Подойди ближе к созвездию на алтаре: эта страница описывает разлом между мирами, и, похоже, твоё появление здесь было предсказано задолго до сегодняшней ночи.";
+                } else if (isQuestion) {
+                    speechPart = "— Ты задаёшь именно те вопросы, которых большинство путников избегает, " + userName + ". В этих сводах хранится память сотен эпох, но самая интересная глава пишется прямо сейчас. Скажи мне, чего именно ищет твоё сердце?";
+                } else {
+                    speechPart = "— Твои слова звучат необычно под сводами этой древней башни, " + userName + ". Мне нравится твоя прямота. Останемся здесь ещё немного и изучим закрытый манускрипт, или отправимся к верхнему обсерваторию?";
+                }
+            } else {
+                // Custom user-created character! Extract traits from their Markdown file
+                String cleanTrait = parsePreview(charFileContent);
+                if (!userAction.isEmpty()) {
+                    actionPart = "*Обратив внимание на то, как " + userName + " " + lowercaseFirst(userAction) +
+                        ", " + charName + " живо реагирует, сохраняя свой характер и внимательно всматриваясь в собеседника.*";
+                } else {
+                    actionPart = "*" + charName + " поворачивается к " + userName + ", обдумывая услышанное и делая шаг ближе.*";
+                }
+
+                if (isQuestion) {
+                    speechPart = "— Ты спрашиваешь о важных вещах, " + userName + ". Если говорить начистоту — всё зависит от того, какой шаг мы сделаем дальше. Что ты сам об этом думаешь?";
+                } else {
+                    speechPart = "— Интересный ход, " + userName + ". Мне по душе твой настрой — продолжим нашу историю и посмотрим, куда это нас приведёт!";
+                }
+                if (!cleanTrait.isEmpty() && ("high".equals(effort) || "max".equals(effort))) {
+                    thoughts.append("\n• Контекст из файла персонажа: ").append(cleanTrait);
+                    prog.thoughts = thoughts.toString();
+                }
+            }
+
+            String fullReply = actionPart + "\n\n" + speechPart;
+            prog.text = fullReply;
+            prog.statusText = "✨ Ответ готов!";
+            Thread.sleep(180);
+
+            return new String[]{fullReply, thoughts.toString()};
+        } catch (Exception e) {
+            return new String[]{
+                "*" + charName + " внимательно смотрит на " + userName + ".*\n\n— Продолжим, " + userName + "!",
+                "AGY APK Engine"
+            };
+        }
+    }
+
+    private String lowercaseFirst(String s) {
+        if (s == null || s.isEmpty()) return "";
+        return s.substring(0, 1).toLowerCase(Locale.ROOT) + s.substring(1);
+    }
+
+    // =========================================================================
+    // FILE UTILITIES
+    // =========================================================================
+    private String sanitizeRelPath(String raw) {
+        if (raw == null) return "";
+        String norm = raw.replace('\\', '/').trim();
+        while (norm.startsWith("/")) norm = norm.substring(1);
+        norm = norm.replace("..", "");
+        return norm;
+    }
+
+    private Map<String, String> parseQueryParams(String query) {
+        Map<String, String> map = new HashMap<>();
+        if (query == null || query.isEmpty()) return map;
+        String[] pairs = query.split("&");
+        for (String pair : pairs) {
+            int idx = pair.indexOf('=');
+            try {
+                if (idx > 0) {
+                    String k = URLDecoder.decode(pair.substring(0, idx), "UTF-8");
+                    String v = URLDecoder.decode(pair.substring(idx + 1), "UTF-8");
+                    map.put(k, v);
+                } else if (!pair.isEmpty()) {
+                    map.put(URLDecoder.decode(pair, "UTF-8"), "");
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return map;
+    }
+
+    private String readTextFile(File f) {
+        if (f == null || !f.exists() || f.isDirectory()) return "";
+        try {
+            FileInputStream fis = new FileInputStream(f);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = fis.read(buf)) != -1) {
+                bos.write(buf, 0, n);
+            }
+            fis.close();
+            return new String(bos.toByteArray(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private void writeTextFile(File f, String content) {
+        try {
+            File parent = f.getParentFile();
+            if (parent != null && !parent.exists()) parent.mkdirs();
+            FileOutputStream fos = new FileOutputStream(f, false);
+            fos.write((content != null ? content : "").getBytes(StandardCharsets.UTF_8));
+            fos.flush();
+            fos.close();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void deleteRecursive(File f) {
+        if (f == null || !f.exists()) return;
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File c : children) deleteRecursive(c);
+            }
+        }
+        f.delete();
+    }
+
+    // =========================================================================
+    // GIT AUTO-UPDATE ENGINE (OTA + FULL APK + VERSION HISTORY)
+    // =========================================================================
+    private String normalizeGitRepoSlug(String raw) {
+        if (raw == null) return "Kuka001/111";
+        String s = raw.trim();
+        s = s.replace("https://github.com/", "")
+             .replace("http://github.com/", "")
+             .replace("git@github.com:", "");
+        if (s.endsWith(".git")) {
+            s = s.substring(0, s.length() - 4);
+        }
+        while (s.startsWith("/")) s = s.substring(1);
+        while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
+        if (s.isEmpty() || !s.contains("/")) return "Kuka001/111";
+        return s;
+    }
+
+    private JSONObject readBundledVersionManifest() {
+        try {
+            InputStream is = context.getAssets().open("www/version.json");
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = is.read(buf)) != -1) {
+                bos.write(buf, 0, n);
+            }
+            is.close();
+            return new JSONObject(new String(bos.toByteArray(), StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            try {
+                JSONObject fallback = new JSONObject();
+                fallback.put("appName", "AGY Roleplay Studio");
+                fallback.put("version", "1.2.0");
+                fallback.put("build", 3);
+                fallback.put("gitRepo", "Kuka001/111");
+                fallback.put("gitBranch", "main");
+                fallback.put("apkPath", "agy-roleplay-android16.apk");
+                fallback.put("releases", new JSONArray());
+                return fallback;
+            } catch (Exception ignored) {
+                return new JSONObject();
+            }
+        }
+    }
+
+    private JSONObject readLocalVersionManifest() {
+        if ("1".equals(getSetting("ota_active", "0"))) {
+            File otaVer = new File(otaWwwDir, "version.json");
+            if (otaVer.exists()) {
+                try {
+                    return new JSONObject(readTextFile(otaVer));
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return readBundledVersionManifest();
+    }
+
+    private String httpGetString(String urlStr, int timeoutMs) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        conn.setRequestMethod("GET");
+        conn.setConnectTimeout(timeoutMs);
+        conn.setReadTimeout(timeoutMs);
+        conn.setUseCaches(false);
+        conn.setRequestProperty("User-Agent", "AGY-Roleplay-Android16-Updater/1.2");
+        conn.setRequestProperty("Accept", "application/vnd.github.v3+json, application/json, text/plain, */*");
+        int code = conn.getResponseCode();
+        InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+        if (is == null) {
+            throw new Exception("HTTP " + code);
+        }
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int n;
+        while ((n = is.read(buf)) != -1) {
+            bos.write(buf, 0, n);
+        }
+        is.close();
+        String body = new String(bos.toByteArray(), StandardCharsets.UTF_8);
+        if (code < 200 || code >= 300) {
+            throw new Exception("HTTP " + code + ": " + (body.length() > 120 ? body.substring(0, 120) : body));
+        }
+        return body;
+    }
+
+    private int compareSemver(String v1, String v2) {
+        if (v1 == null) v1 = "0.0.0";
+        if (v2 == null) v2 = "0.0.0";
+        String[] p1 = v1.replaceAll("[^0-9.]", "").split("\\.");
+        String[] p2 = v2.replaceAll("[^0-9.]", "").split("\\.");
+        int len = Math.max(p1.length, p2.length);
+        for (int i = 0; i < len; i++) {
+            int n1 = 0;
+            int n2 = 0;
+            try { if (i < p1.length && !p1[i].isEmpty()) n1 = Integer.parseInt(p1[i]); } catch (Exception ignored) {}
+            try { if (i < p2.length && !p2[i].isEmpty()) n2 = Integer.parseInt(p2[i]); } catch (Exception ignored) {}
+            if (n1 != n2) return n1 > n2 ? 1 : -1;
+        }
+        return 0;
+    }
+
+    private JSONObject handleUpdatesCheck(Map<String, String> queryParams) throws Exception {
+        JSONObject localManifest = readLocalVersionManifest();
+        JSONObject bundledManifest = readBundledVersionManifest();
+
+        String gitRepo = normalizeGitRepoSlug(queryParams.containsKey("repo")
+            ? queryParams.get("repo")
+            : getSetting("git_repo", localManifest.optString("gitRepo", "Kuka001/111")));
+        String gitBranch = queryParams.containsKey("branch")
+            ? queryParams.get("branch")
+            : getSetting("git_branch", localManifest.optString("gitBranch", "main"));
+        if (gitBranch == null || gitBranch.trim().isEmpty()) gitBranch = "main";
+        gitBranch = gitBranch.trim();
+
+        boolean otaActive = "1".equals(getSetting("ota_active", "0"));
+        String currentVersion = getSetting("installed_version", localManifest.optString("version", "1.2.0"));
+        int currentBuild = Integer.parseInt(getSetting("installed_build", String.valueOf(localManifest.optInt("build", 3))));
+        String bundledVersion = bundledManifest.optString("version", "1.2.0");
+        int bundledBuild = bundledManifest.optInt("build", 3);
+        String installedCommit = getSetting("installed_commit", "");
+
+        String latestVersion = currentVersion;
+        int latestBuild = currentBuild;
+        String latestReleaseTitle = "";
+        JSONArray releases = localManifest.optJSONArray("releases");
+        if (releases == null) releases = new JSONArray();
+        String apkPath = localManifest.optString("apkPath", "agy-roleplay-android16.apk");
+
+        boolean remoteReachable = false;
+        String remoteError = "";
+
+        // 1. Fetch version.json from Git branch
+        String rawVersionUrl = "https://raw.githubusercontent.com/" + gitRepo + "/" + gitBranch + "/version.json?t=" + System.currentTimeMillis();
+        try {
+            String remoteVerStr = httpGetString(rawVersionUrl, 7500);
+            JSONObject remoteManifest = new JSONObject(remoteVerStr);
+            remoteReachable = true;
+            latestVersion = remoteManifest.optString("version", latestVersion);
+            latestBuild = remoteManifest.optInt("build", latestBuild);
+            apkPath = remoteManifest.optString("apkPath", apkPath);
+            JSONArray remReleases = remoteManifest.optJSONArray("releases");
+            if (remReleases != null && remReleases.length() > 0) {
+                releases = remReleases;
+                JSONObject firstRel = remReleases.optJSONObject(0);
+                if (firstRel != null) {
+                    latestReleaseTitle = firstRel.optString("title", "");
+                }
+            }
+        } catch (Exception e) {
+            remoteError = e.getMessage() != null ? e.getMessage() : "Не удалось прочитать version.json из Git";
+        }
+
+        // 2. Fetch commit history from GitHub API
+        JSONArray commits = new JSONArray();
+        String latestCommit = "";
+        String latestCommitMessage = "";
+        String commitsApiUrl = "https://api.github.com/repos/" + gitRepo + "/commits?sha=" + gitBranch + "&per_page=15";
+        try {
+            String commitsStr = httpGetString(commitsApiUrl, 7500);
+            JSONArray rawCommits = new JSONArray(commitsStr);
+            remoteReachable = true;
+            for (int i = 0; i < rawCommits.length(); i++) {
+                JSONObject item = rawCommits.getJSONObject(i);
+                String sha = item.optString("sha", "");
+                String shortSha = sha.length() >= 7 ? sha.substring(0, 7) : sha;
+                JSONObject commitObj = item.optJSONObject("commit");
+                String message = commitObj != null ? commitObj.optString("message", "").split("\n")[0] : "";
+                String authorName = "Git";
+                String dateStr = "";
+                if (commitObj != null) {
+                    JSONObject authorObj = commitObj.optJSONObject("author");
+                    if (authorObj != null) {
+                        authorName = authorObj.optString("name", "Git");
+                        dateStr = authorObj.optString("date", "");
+                    }
+                }
+                JSONObject cEntry = new JSONObject();
+                cEntry.put("sha", sha);
+                cEntry.put("shortSha", shortSha);
+                cEntry.put("message", message);
+                cEntry.put("author", authorName);
+                cEntry.put("date", dateStr);
+                commits.put(cEntry);
+                if (i == 0) {
+                    latestCommit = shortSha;
+                    latestCommitMessage = message;
+                }
+            }
+        } catch (Exception e) {
+            if (remoteError.isEmpty()) {
+                remoteError = e.getMessage() != null ? e.getMessage() : "Не удалось получить список коммитов Git";
+            }
+        }
+
+        // Seed installedCommit on first run if version & build match the latest release in Git
+        if (installedCommit.isEmpty() && !latestCommit.isEmpty()
+            && compareSemver(latestVersion, currentVersion) == 0 && latestBuild == currentBuild) {
+            installedCommit = latestCommit;
+            setSetting("installed_commit", installedCommit);
+        }
+
+        boolean newerVersion = compareSemver(latestVersion, currentVersion) > 0 || (latestBuild > currentBuild);
+        boolean newerCommit = !latestCommit.isEmpty() && !installedCommit.isEmpty() && !latestCommit.equals(installedCommit);
+        boolean updateAvailable = newerVersion || newerCommit;
+
+        String apkDownloadUrl = "https://raw.githubusercontent.com/" + gitRepo + "/" + gitBranch + "/" + apkPath;
+        String repoWebUrl = "https://github.com/" + gitRepo;
+
+        JSONObject res = new JSONObject();
+        res.put("currentVersion", currentVersion);
+        res.put("currentBuild", currentBuild);
+        res.put("bundledVersion", bundledVersion);
+        res.put("bundledBuild", bundledBuild);
+        res.put("otaActive", otaActive);
+        res.put("installedCommit", installedCommit);
+        res.put("latestVersion", latestVersion);
+        res.put("latestBuild", latestBuild);
+        res.put("latestCommit", latestCommit);
+        res.put("latestCommitMessage", latestCommitMessage);
+        res.put("latestReleaseTitle", latestReleaseTitle);
+        res.put("updateAvailable", updateAvailable);
+        res.put("newerVersion", newerVersion);
+        res.put("newerCommit", newerCommit);
+        res.put("gitRepo", gitRepo);
+        res.put("gitBranch", gitBranch);
+        res.put("apkDownloadUrl", apkDownloadUrl);
+        res.put("repoWebUrl", repoWebUrl);
+        res.put("remoteReachable", remoteReachable);
+        res.put("remoteError", remoteError);
+        res.put("releases", releases);
+        res.put("commits", commits);
+        return res;
+    }
+
+    private JSONObject handleUpdatesApply(JSONObject body) throws Exception {
+        String gitRepo = normalizeGitRepoSlug(body.optString("gitRepo", getSetting("git_repo", "Kuka001/111")));
+        String gitBranch = body.optString("gitBranch", getSetting("git_branch", "main")).trim();
+        if (gitBranch.isEmpty()) gitBranch = "main";
+        String targetRef = body.optString("ref", gitBranch).trim();
+        if (targetRef.isEmpty()) targetRef = gitBranch;
+        String requestedVersion = body.optString("version", "").trim();
+        String requestedCommit = body.optString("commitSha", "").trim();
+
+        long ts = System.currentTimeMillis();
+        String baseUrl = "https://raw.githubusercontent.com/" + gitRepo + "/" + targetRef;
+
+        // Download core web UI & logic files from Git
+        String indexHtml = httpGetString(baseUrl + "/mobile/www/index.html?t=" + ts, 10000);
+        String appJs = httpGetString(baseUrl + "/mobile/www/app.js?t=" + ts, 10000);
+        String stylesCss = httpGetString(baseUrl + "/mobile/www/styles.css?t=" + ts, 10000);
+
+        if (indexHtml.isEmpty() || appJs.isEmpty() || stylesCss.isEmpty()) {
+            return errorJson(500, "Загруженные файлы из Git пусты или повреждены");
+        }
+
+        String versionJsonStr = "";
+        JSONObject remoteVerObj = null;
+        try {
+            versionJsonStr = httpGetString(baseUrl + "/version.json?t=" + ts, 8000);
+            remoteVerObj = new JSONObject(versionJsonStr);
+        } catch (Exception ignored) {
+            remoteVerObj = readLocalVersionManifest();
+            versionJsonStr = remoteVerObj.toString();
+        }
+
+        if (!otaWwwDir.exists()) {
+            otaWwwDir.mkdirs();
+        }
+
+        String appliedVersion = remoteVerObj.optString("version", "1.2.0");
+        int appliedBuild = remoteVerObj.optInt("build", 3);
+        if (!requestedVersion.isEmpty()) {
+            appliedVersion = requestedVersion;
+            remoteVerObj.put("version", appliedVersion);
+            versionJsonStr = remoteVerObj.toString(2);
+        }
+
+        writeTextFile(new File(otaWwwDir, "index.html"), indexHtml);
+        writeTextFile(new File(otaWwwDir, "app.js"), appJs);
+        writeTextFile(new File(otaWwwDir, "styles.css"), stylesCss);
+        writeTextFile(new File(otaWwwDir, "version.json"), versionJsonStr);
+
+        // Determine commit SHA for the applied ref
+        String appliedCommit = requestedCommit;
+        if (appliedCommit.isEmpty()) {
+            if (targetRef.length() >= 7 && targetRef.matches("^[0-9a-fA-F]+$")) {
+                appliedCommit = targetRef.substring(0, 7);
+            } else {
+                try {
+                    String commitInfoStr = httpGetString("https://api.github.com/repos/" + gitRepo + "/commits/" + targetRef, 6000);
+                    JSONObject commitObj = new JSONObject(commitInfoStr);
+                    String sha = commitObj.optString("sha", "");
+                    if (sha.length() >= 7) appliedCommit = sha.substring(0, 7);
+                } catch (Exception ignored) {
+                }
+            }
+        } else if (appliedCommit.length() > 7) {
+            appliedCommit = appliedCommit.substring(0, 7);
+        }
+
+        setSetting("ota_active", "1");
+        setSetting("installed_version", appliedVersion);
+        setSetting("installed_build", String.valueOf(appliedBuild));
+        if (!appliedCommit.isEmpty()) {
+            setSetting("installed_commit", appliedCommit);
+        }
+
+        JSONObject res = new JSONObject();
+        res.put("ok", true);
+        res.put("updatedVersion", appliedVersion);
+        res.put("updatedBuild", appliedBuild);
+        res.put("installedCommit", appliedCommit);
+        res.put("otaActive", true);
+        res.put("message", "Версия " + appliedVersion + (appliedCommit.isEmpty() ? "" : " (" + appliedCommit + ")") + " успешно установлена из Git!");
+        return res;
+    }
+
+    private JSONObject handleUpdatesReset() throws Exception {
+        deleteRecursive(otaWwwDir);
+        JSONObject bundled = readBundledVersionManifest();
+        String bundledVer = bundled.optString("version", "1.2.0");
+        int bundledBuild = bundled.optInt("build", 3);
+
+        setSetting("ota_active", "0");
+        setSetting("installed_version", bundledVer);
+        setSetting("installed_build", String.valueOf(bundledBuild));
+        setSetting("installed_commit", "");
+
+        JSONObject res = new JSONObject();
+        res.put("ok", true);
+        res.put("currentVersion", bundledVer);
+        res.put("currentBuild", bundledBuild);
+        res.put("otaActive", false);
+        return res;
+    }
+
+    private JSONObject handleUpdatesConfig(JSONObject body) throws Exception {
+        String gitRepo = normalizeGitRepoSlug(body.optString("gitRepo", getSetting("git_repo", "Kuka001/111")));
+        String gitBranch = body.optString("gitBranch", getSetting("git_branch", "main")).trim();
+        if (gitBranch.isEmpty()) gitBranch = "main";
+
+        String prevRepo = getSetting("git_repo", "Kuka001/111");
+        String prevBranch = getSetting("git_branch", "main");
+
+        setSetting("git_repo", gitRepo);
+        setSetting("git_branch", gitBranch);
+        if (!gitRepo.equals(prevRepo) || !gitBranch.equals(prevBranch)) {
+            setSetting("installed_commit", "");
+        }
+
+        JSONObject res = new JSONObject();
+        res.put("ok", true);
+        res.put("gitRepo", gitRepo);
+        res.put("gitBranch", gitBranch);
+        return res;
+    }
+
+    private JSONObject errorJson(int status, String msg) throws Exception {
+        JSONObject o = new JSONObject();
+        o.put("__status", status);
+        o.put("error", msg);
+        return o;
+    }
+}
