@@ -1,12 +1,25 @@
 {
   "appName": "AGY Roleplay Studio",
-  "version": "1.2.0",
-  "build": 3,
+  "version": "1.3.0",
+  "build": 4,
   "releaseDate": "2026-10-17",
   "gitRepo": "Kuka001/111",
   "gitBranch": "main",
   "apkPath": "agy-roleplay-android16.apk",
   "releases": [
+    {
+      "version": "1.3.0",
+      "build": 4,
+      "date": "2026-10-17",
+      "title": "Нативный протокол Google Antigravity (OAuth 2.0 без API ключей) и удаление всех заглушек",
+      "ref": "main",
+      "changelog": [
+        "Полностью удалены все заглушки (runOnDeviceRoleplayEngine) и шаблонные ответы — приложение работает только с реальными моделями AGY",
+        "Удалены все скрытые и зашитые в код ролевые промты — оставлен чистый пользовательский файл GEMINI.md для ваших собственных инструкций ИИ",
+        "Реализован нативный протокол Google Antigravity на смартфоне без API ключей: OAuth 2.0 PKCE авторизация через аккаунт Google с перехватом на localhost:51121 и автоматическим продлением токенов",
+        "Прямое обращение к шлюзу Antigravity (cloudcode-pa.googleapis.com /v1internal:generateContent) с поддержкой вашего Project ID, моделей Gemini / Claude и уровней Effort"
+      ]
+    },
     {
       "version": "1.2.0",
       "build": 3,

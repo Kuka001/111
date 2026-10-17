@@ -168,31 +168,58 @@
       <section class="tab-pane" id="tab-settings">
         <div class="view-container">
           <h1 class="section-title">Вход и Настройки AGY</h1>
-          <p class="section-desc">Автономная работа на смартфоне • Project ID и Модели</p>
+          <p class="section-desc">Прямая работа Google Antigravity на смартфоне без API ключей и без скрытых промтов</p>
 
-          <!-- Card 1: Embedded APK Server Status -->
+          <!-- Card 1: Google Antigravity Native OAuth (No API Key) -->
           <div class="settings-card">
-            <div class="card-title">📱 Автономный сервер внутри APK</div>
-            <p class="card-hint">База данных SQLite, папки <code>workspace/</code> и движок ролевой игры встроены прямо в APK и работают на смартфоне без ПК.</p>
-            <div id="serverConnectionStatus" class="conn-badge">Проверка встроенного сервера APK...</div>
+            <div class="card-title">🔑 Вход в Google Antigravity (AGY — без API ключа)</div>
+            <p class="card-hint">Авторизуйтесь через ваш аккаунт Google так же, как это делает оригинальный <code>agy</code> под капотом (OAuth 2.0 PKCE + Cloud Code Gateway).</p>
+            <div id="agyAuthStatusBadge" class="conn-badge" style="margin-bottom:12px;">
+              Проверка статуса авторизации AGY...
+            </div>
+
+            <div class="row-gap-sm" style="flex-wrap:wrap;">
+              <button class="btn-primary" style="flex:1;" id="agyOAuthLoginBtn" onclick="window.appUI.startAgyOAuth()">
+                🔑 Войти через Google (AGY)
+              </button>
+              <button class="btn-danger hidden" id="agyOAuthLogoutBtn" onclick="window.appUI.logoutAgyOAuth()">
+                Выйти
+              </button>
+            </div>
+
+            <details style="margin-top:12px;">
+              <summary style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                Ручной ввод ссылки/кода (если браузер не перенаправил автоматически)
+              </summary>
+              <div style="margin-top:8px;">
+                <input type="text" id="inputOAuthCode" class="text-input" placeholder="Вставьте http://localhost:51121/oauth-callback?code=... или код" />
+                <button class="btn-secondary full-width" style="margin-top:8px;" onclick="window.appUI.exchangeAgyOAuthCode()">
+                  ✓ Подтвердить ссылку или код авторизации
+                </button>
+              </div>
+            </details>
           </div>
 
-          <!-- Card 2: Google Antigravity Project ID Login -->
+          <!-- Card 2: Project ID & Clean GEMINI.md System Prompt Control -->
           <div class="settings-card">
-            <div class="card-title">🔑 Вход через ID проекта (Google Antigravity)</div>
-            <p class="card-hint">Ваш Project ID используется для запросов AGY / Vertex AI напрямую со смартфона.</p>
+            <div class="card-title">⚙️ Проект AGY и файл инструкций GEMINI.md</div>
+            <p class="card-hint">Все заглушки и скрытые промты удалены. Поведение ИИ полностью определяется вашим файлом <code>GEMINI.md</code>, карточками персонажей и вашей персоной.</p>
+
+            <button class="btn-secondary full-width" style="margin-bottom:12px;" onclick="window.appUI.openFileEditor('GEMINI.md')">
+              📝 Открыть и редактировать GEMINI.md
+            </button>
+
             <label class="field-label">ID Проекта (Project ID)</label>
             <input type="text" id="inputProjectId" class="text-input" placeholder="project-4c7a8e8a-764a-42bc-bdf" />
-
-            <label class="field-label" style="margin-top:12px;">Ключ Gemini API или Google OAuth-токен (опционально для облака)</label>
-            <input type="password" id="inputCloudKey" class="text-input" placeholder="AIza... или ya29... (если пусто — работает встроенный RP-движок)" />
 
             <label class="field-label" style="margin-top:12px;">Лимит контекста сообщений из истории БД</label>
             <input type="number" id="inputContextLimit" class="text-input" value="30" min="5" max="200" />
 
             <button class="btn-primary full-width" style="margin-top:14px;" onclick="window.appUI.saveSettings()">
-              ✓ Войти и сохранить настройки проекта
+              💾 Сохранить ID проекта и лимит контекста
             </button>
+
+            <div id="serverConnectionStatus" class="conn-badge" style="margin-top:12px;">Проверка встроенного сервера APK...</div>
           </div>
 
           <!-- Card 3: Clean Base Models & Separate Effort Selection -->

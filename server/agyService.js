@@ -192,25 +192,13 @@ function buildRoleplayPrompt({ character, persona, messages, chat }) {
     .join('\n\n---\n\n');
 
   return [
-    `[СИСТЕМНАЯ ЗАДАЧА РОЛЕВОЙ ИГРЫ]`,
-    `Ты отыгрываешь персонажа «${charName}» в художественном ролевом диалоге с игроком «${userName}».`,
-    `Ниже приведено полное содержимое файла твоего персонажа (${character.file_path}) и файла персоны игрока (${persona.file_path}).`,
-    `Не вызывай инструменты чтения для ${character.file_path} и ${persona.file_path}, так как их актуальный текст уже загружен ниже.`,
-    loreFilesList.length > 0
-      ? `Доступные файлы лора мира в папке lore/: ${loreFilesList.join(', ')} (читай их только если в реплике игрока затронута соответствующая тема).`
-      : '',
-    memoryContent
-      ? `\n=== ДОЛГОСРОЧНАЯ ПАМЯТЬ ЧАТА (${memoryRelPath}) ===\n${memoryContent}`
-      : `\nФайл памяти этого чата: ${memoryRelPath} (пока пуст; записывай туда только если произошло ключевое сюжетное событие).`,
-    `\n=== ПРОФИЛЬ ТВОЕГО ПЕРСОНАЖА (${character.file_path}) ===\n${charFileContent}`,
-    `\n=== ПРОФИЛЬ ПЕРСОНЫ ИГРОКА (${persona.file_path}) ===\n${personaFileContent}`,
-    `\n=== ИСТОРИЯ ДИАЛОГА ===\n${formattedHistory}`,
-    `\n=== ИНСТРУКЦИЯ К ОТВЕТУ ===`,
-    `Напиши следующий художественный ответ ТОЛЬКО от лица персонажа «${charName}» на последнюю реплику «${userName}».`,
-    `Описывай действия, эмоции и окружение *курсивом*, а прямую речь — с тире или в кавычках. Не пиши реплики и действия за «${userName}». Выведи сразу художественный текст ответа без технических вступлений.`,
+    charFileContent ? `=== ${character.file_path} (${charName}) ===\n${charFileContent}` : '',
+    personaFileContent ? `=== ${persona.file_path} (${userName}) ===\n${personaFileContent}` : '',
+    memoryContent ? `=== ${memoryRelPath} ===\n${memoryContent}` : '',
+    formattedHistory,
   ]
     .filter(Boolean)
-    .join('\n');
+    .join('\n\n');
 }
 
 /**

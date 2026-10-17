@@ -49,6 +49,8 @@
   const state = {
     serverUrl: getServerBaseUrl(),
     projectId: 'project-4c7a8e8a-764a-42bc-bdf',
+    agyAuthenticated: false,
+    agyEmail: '',
     selectedModel: 'gemini-4-argon',
     selectedEffort: 'high',
     contextMessagesLimit: 30,
@@ -62,6 +64,24 @@
     currentFilesPath: '',
     pollTimer: null,
     isSending: false,
+  };
+
+  // Callback invoked by Android LocalBackendServer when OAuth callback completes in background
+  window.__onAgyOAuthSuccess = function (b64Json) {
+    try {
+      const jsonStr = decodeBase64Utf8(b64Json);
+      const data = JSON.parse(jsonStr || '{}');
+      state.agyAuthenticated = Boolean(data.authenticated);
+      state.agyEmail = data.email || state.agyEmail;
+      if (data.projectId) {
+        state.projectId = data.projectId;
+        const projInput = document.getElementById('inputProjectId');
+        if (projInput) projInput.value = state.projectId;
+      }
+      renderAgyAuthStatus();
+      updateHeaderIndicators(true);
+      showToast(`✅ Вы вошли в Google Antigravity${state.agyEmail ? ' (' + state.agyEmail + ')' : ''}!`);
+    } catch (e) {}
   };
 
   const FALLBACK_AVATAR =
@@ -139,6 +159,46 @@
     return cleanId || 'Gemini 4 Argon';
   }
 
+  function renderAgyAuthStatus() {
+    const badge = document.getElementById('agyAuthStatusBadge');
+    const loginBtn = document.getElementById('agyOAuthLoginBtn');
+    const logoutBtn = document.getElementById('agyOAuthLogoutBtn');
+
+    if (badge) {
+      if (state.agyAuthenticated) {
+        badge.textContent = `✅ Авторизован в Google Antigravity${state.agyEmail ? ' (' + state.agyEmail + ')' : ''} • Project ID: ${state.projectId}`;
+        badge.style.color = '#34d399';
+      } else {
+        badge.textContent = '⚠️ Вход в Google Antigravity не выполнен. Нажмите кнопку ниже, чтобы войти через аккаунт Google (без API ключа).';
+        badge.style.color = '#fbbf24';
+      }
+    }
+
+    if (loginBtn) {
+      loginBtn.textContent = state.agyAuthenticated
+        ? '🔄 Переподключить аккаунт Google (AGY)'
+        : '🔑 Войти через Google (AGY — без API ключа)';
+    }
+    if (logoutBtn) {
+      logoutBtn.classList.toggle('hidden', !state.agyAuthenticated);
+    }
+  }
+
+  async function checkAgyAuthStatus() {
+    try {
+      const data = await apiFetch('/api/agy/auth/status');
+      state.agyAuthenticated = Boolean(data.authenticated);
+      state.agyEmail = data.email || '';
+      if (data.projectId) {
+        state.projectId = data.projectId;
+        const projInput = document.getElementById('inputProjectId');
+        if (projInput) projInput.value = state.projectId;
+      }
+      renderAgyAuthStatus();
+      updateHeaderIndicators(true);
+    } catch (e) {}
+  }
+
   function updateHeaderIndicators(online = true) {
     const dot = document.getElementById('connStatusDot');
     const projBadge = document.getElementById('headerProjectBadge');
@@ -147,10 +207,16 @@
       : null;
 
     if (dot) {
-      dot.classList.toggle('offline', !online);
+      dot.classList.toggle('offline', !online || !state.agyAuthenticated);
     }
     if (projBadge) {
-      projBadge.textContent = online ? `ID: ${state.projectId}` : 'Автономный режим APK';
+      if (!online) {
+        projBadge.textContent = 'Сервер недоступен';
+      } else if (state.agyAuthenticated) {
+        projBadge.textContent = `AGY: ${state.agyEmail || state.projectId} ✅`;
+      } else {
+        projBadge.textContent = `⚠️ Войти в AGY (${state.projectId})`;
+      }
     }
     if (modelLabel) {
       const activeChatModel = state.currentChatData && state.currentChatData.chat
@@ -183,6 +249,8 @@
       ]);
 
       state.projectId = settingsData.projectId || state.projectId;
+      state.agyAuthenticated = Boolean(settingsData.agyAuthenticated);
+      state.agyEmail = settingsData.agyEmail || '';
       state.selectedModel = settingsData.selectedModel || state.selectedModel;
       state.selectedEffort = settingsData.selectedEffort || state.selectedEffort;
       state.activePersonaId = settingsData.activePersonaId || state.activePersonaId;
@@ -195,20 +263,17 @@
 
       document.getElementById('inputProjectId').value = state.projectId;
       document.getElementById('inputContextLimit').value = state.contextMessagesLimit;
-      const cloudKeyEl = document.getElementById('inputCloudKey');
-      if (cloudKeyEl) {
-        cloudKeyEl.value = settingsData.geminiApiKey || settingsData.googleAuthToken || '';
-      }
 
       const connBadge = document.getElementById('serverConnectionStatus');
       if (connBadge) {
         const isEmbedded = typeof window.AndroidServer !== 'undefined' || settingsData.embeddedServer;
         connBadge.textContent = isEmbedded
-          ? `✅ Встроенный сервер внутри APK активен на смартфоне • БД SQLite + workspace/ • Моделей: ${state.models.length}`
+          ? `✅ Встроенный сервер внутри APK активен • БД SQLite + чистый GEMINI.md • Моделей: ${state.models.length}`
           : `✅ Локальный сервер активен • Моделей: ${state.models.length}`;
         connBadge.style.color = '#34d399';
       }
 
+      renderAgyAuthStatus();
       updateHeaderIndicators(true);
       renderChatsList();
       renderCharactersAndPersonas();
@@ -429,10 +494,11 @@
     document.getElementById('sendMsgBtn').disabled = true;
     input.value = '';
 
+    const tempMsgId = Date.now();
     // Optimistically append user message to UI
     if (state.currentChatData && Array.isArray(state.currentChatData.messages)) {
       state.currentChatData.messages.push({
-        id: Date.now(),
+        id: tempMsgId,
         role: 'user',
         content: text,
         swipes: [text],
@@ -456,7 +522,16 @@
       }
     } catch (err) {
       stopGenerationPolling();
-      showToast('Ошибка генерации AGY: ' + err.message);
+      // Remove optimistic message and restore user input so nothing is lost or polluted
+      if (state.currentChatData && Array.isArray(state.currentChatData.messages)) {
+        state.currentChatData.messages = state.currentChatData.messages.filter(m => m.id !== tempMsgId);
+        renderActiveChatRoom();
+      }
+      input.value = text;
+      showToast(err.message);
+      if (!state.agyAuthenticated) {
+        openTab('settings');
+      }
     } finally {
       state.isSending = false;
       document.getElementById('sendMsgBtn').disabled = false;
@@ -1162,18 +1237,77 @@
     }
   }
 
+  async function startAgyOAuth() {
+    try {
+      showToast('🔑 Запуск авторизации Google Antigravity...');
+      const res = await apiFetch('/api/agy/auth/start', { method: 'POST' });
+      if (res.authUrl && typeof window.AndroidServer === 'undefined') {
+        window.open(res.authUrl, '_blank');
+      }
+      // Poll status briefly while user completes sign-in in browser
+      let checks = 0;
+      const authPoll = setInterval(async () => {
+        checks++;
+        if (checks > 90 || state.agyAuthenticated) {
+          clearInterval(authPoll);
+          return;
+        }
+        await checkAgyAuthStatus();
+      }, 2000);
+    } catch (err) {
+      showToast('Ошибка запуска авторизации: ' + err.message);
+    }
+  }
+
+  async function exchangeAgyOAuthCode() {
+    const inputEl = document.getElementById('inputOAuthCode');
+    const codeOrUrl = inputEl ? inputEl.value.trim() : '';
+    if (!codeOrUrl) {
+      return showToast('Вставьте ссылку редиректа или код авторизации');
+    }
+    try {
+      showToast('⏳ Проверка кода авторизации...');
+      const res = await apiFetch('/api/agy/auth/exchange', {
+        method: 'POST',
+        body: JSON.stringify({ codeOrUrl }),
+      });
+      state.agyAuthenticated = Boolean(res.authenticated);
+      state.agyEmail = res.email || '';
+      if (res.projectId) {
+        state.projectId = res.projectId;
+        const projInput = document.getElementById('inputProjectId');
+        if (projInput) projInput.value = state.projectId;
+      }
+      if (inputEl) inputEl.value = '';
+      renderAgyAuthStatus();
+      updateHeaderIndicators(true);
+      showToast(`✅ Авторизация успешна${state.agyEmail ? ' (' + state.agyEmail + ')' : ''}!`);
+    } catch (err) {
+      showToast('Ошибка авторизации: ' + err.message);
+    }
+  }
+
+  async function logoutAgyOAuth() {
+    try {
+      await apiFetch('/api/agy/auth/logout', { method: 'POST' });
+      state.agyAuthenticated = false;
+      state.agyEmail = '';
+      renderAgyAuthStatus();
+      updateHeaderIndicators(true);
+      showToast('Вы вышли из аккаунта Google Antigravity');
+    } catch (err) {
+      showToast(err.message);
+    }
+  }
+
   async function saveSettings() {
     const projectId = document.getElementById('inputProjectId').value.trim();
     const contextMessagesLimit = Number(document.getElementById('inputContextLimit').value || 30);
-    const cloudKeyEl = document.getElementById('inputCloudKey');
-    const cloudVal = cloudKeyEl ? cloudKeyEl.value.trim() : '';
     if (!projectId) return showToast('Введите Project ID');
 
     const payload = {
       projectId,
       contextMessagesLimit,
-      geminiApiKey: cloudVal.startsWith('AIza') ? cloudVal : '',
-      googleAuthToken: !cloudVal.startsWith('AIza') ? cloudVal : '',
     };
 
     try {
@@ -1183,8 +1317,9 @@
       });
       state.projectId = res.projectId;
       state.contextMessagesLimit = res.contextMessagesLimit;
+      renderAgyAuthStatus();
       updateHeaderIndicators(true);
-      showToast(`✅ Настройки сохранены в БД APK! Project ID: ${state.projectId}`);
+      showToast(`✅ Настройки сохранены! Project ID: ${state.projectId}`);
     } catch (err) {
       showToast(err.message);
     }
@@ -1219,6 +1354,8 @@
     });
     if (tabName === 'updates') {
       checkForUpdates(false);
+    } else if (tabName === 'settings') {
+      checkAgyAuthStatus();
     }
   }
 
@@ -1531,6 +1668,11 @@
         }
       });
     }
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        checkAgyAuthStatus();
+      }
+    });
     initApp();
   });
 
@@ -1575,6 +1717,9 @@
     selectModel,
     setEffort,
     refreshModels,
+    startAgyOAuth,
+    exchangeAgyOAuthCode,
+    logoutAgyOAuth,
     saveSettings,
     applyServerUrl,
     checkForUpdates,
@@ -1586,3 +1731,4 @@
     dismissUpdateBanner,
   };
 })();
+

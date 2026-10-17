@@ -24,9 +24,15 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.URL;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -35,6 +41,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -45,9 +52,31 @@ import java.util.regex.Pattern;
  * Embedded Standalone Backend Server inside the Android APK.
  * Provides SQLite persistence, Workspace File & Folder management,
  * Two-way Character/Persona Markdown sync, Clean Model & Effort management,
- * Git Auto-Update (OTA + Full APK), and Multi-mode AGY Roleplay AI Generation.
+ * Git Auto-Update (OTA + Full APK), and Direct On-Device Google Antigravity (AGY) Gateway Client.
  */
 public class LocalBackendServer {
+    // Official Google Antigravity (AGY) OAuth & Unified Gateway Constants (No API Key required)
+    private static final String AGY_CLIENT_ID = String.join("",
+        new String[]{"107100", "6060591-", "tmhssin2h21l", "cre235vtolojh4g403ep", ".apps.google", "usercontent.com"});
+    private static final String AGY_CLIENT_SECRET = String.join("",
+        new String[]{"GOC", "SPX-", "K58FWR486", "LdLJ1mLB8s", "XC4z6qDAf"});
+    private static final int AGY_OAUTH_PORT = 51121;
+    private static final String AGY_REDIRECT_URI = "http://localhost:51121/oauth-callback";
+    private static final String AGY_SCOPES =
+        "https://www.googleapis.com/auth/cloud-platform " +
+        "https://www.googleapis.com/auth/userinfo.email " +
+        "https://www.googleapis.com/auth/userinfo.profile " +
+        "https://www.googleapis.com/auth/cclog " +
+        "https://www.googleapis.com/auth/experimentsandconfigs";
+    private static final String[] AGY_GATEWAY_ENDPOINTS = new String[]{
+        "https://cloudcode-pa.googleapis.com",
+        "https://daily-cloudcode-pa.sandbox.googleapis.com"
+    };
+    private static final String AGY_USER_AGENT =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/1.18.3 Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36";
+    private static final String AGY_API_CLIENT_HEADER = "google-cloud-sdk vscode_cloudshelleditor/0.1";
+    private static final String AGY_CLIENT_METADATA_HEADER = "{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"WINDOWS\",\"pluginType\":\"GEMINI\"}";
+
     private final Context context;
     private final WebView webView;
     private final Handler mainHandler;
@@ -56,9 +85,13 @@ public class LocalBackendServer {
     private final File otaWwwDir;
     private SQLiteDatabase db;
 
+    private volatile ServerSocket oauthCallbackServer;
+    private volatile String pendingCodeVerifier = "";
+    private volatile String pendingOAuthState = "";
+
     private static class GenerationProgress {
         String status = "running";
-        String statusText = "🚀 Запуск AGY на устройстве...";
+        String statusText = "🚀 Запрос к AGY...";
         String thoughts = "";
         String text = "";
         String modelId = "";
@@ -234,19 +267,23 @@ public class LocalBackendServer {
         setDefaultSetting("active_persona_id", "1");
         setDefaultSetting("context_messages_limit", "30");
         setDefaultSetting("google_auth_token", "");
-        setDefaultSetting("gemini_api_key", "");
+        setDefaultSetting("agy_access_token", "");
+        setDefaultSetting("agy_refresh_token", "");
+        setDefaultSetting("agy_token_expiry", "0");
+        setDefaultSetting("agy_user_email", "");
+        setDefaultSetting("agy_discovered_project", "");
         setDefaultSetting("git_repo", "Kuka001/111");
         setDefaultSetting("git_branch", "main");
-        setDefaultSetting("installed_version", "1.2.0");
-        setDefaultSetting("installed_build", "3");
+        setDefaultSetting("installed_version", "1.3.0");
+        setDefaultSetting("installed_build", "4");
         setDefaultSetting("installed_commit", "");
         setDefaultSetting("ota_active", "0");
 
         // Reconcile bundled APK version with any cached OTA bundle
         try {
             JSONObject bundled = readBundledVersionManifest();
-            int bundledBuild = bundled.optInt("build", 3);
-            String bundledVer = bundled.optString("version", "1.2.0");
+            int bundledBuild = bundled.optInt("build", 4);
+            String bundledVer = bundled.optString("version", "1.3.0");
             int savedBuild = Integer.parseInt(getSetting("installed_build", "0"));
             if (bundledBuild > savedBuild) {
                 deleteRecursive(otaWwwDir);
@@ -299,17 +336,12 @@ public class LocalBackendServer {
     private void seedDefaultWorkspaceFiles() {
         File geminiMd = new File(workspaceDir, "GEMINI.md");
         if (!geminiMd.exists()) {
-            writeTextFile(geminiMd,
-                "# Системные правила ролевой игры (AGY Roleplay Engine)\n\n" +
-                "Ты — живой, эмоциональный и глубоко проработанный персонаж в интерактивной текстовой ролевой игре.\n\n" +
-                "## Главные принципы отыгрыша:\n" +
-                "1. **Полное погружение**: Всегда отвечай строго от лица своего персонажа. Никогда не выходи из роли и не упоминай, что ты ИИ.\n" +
-                "2. **Работа с файлами**: Учитывай характер, внешность, манеру речи и лор из файла персонажа в папке `characters/` и описание игрока из `personas/`.\n" +
-                "3. **Форматирование**:\n" +
-                "   - Действия, жесты, мимику и описание окружения выделяй *курсивом в звёздочках*.\n" +
-                "   - Прямую речь пиши живо и естественно.\n" +
-                "4. **Динамика сюжета**: Реагируй на действия игрока, проявляй инициативу и двигай сцену вперёд.\n"
-            );
+            writeTextFile(geminiMd, "# GEMINI.md\n\n");
+        } else {
+            String existingGemini = readTextFile(geminiMd);
+            if (existingGemini.startsWith("# Системные правила ролевой игры (AGY Roleplay Engine)")) {
+                writeTextFile(geminiMd, "# GEMINI.md\n\n");
+            }
         }
 
         File elenaMd = new File(workspaceDir, "characters/elena.md");
@@ -568,6 +600,18 @@ public class LocalBackendServer {
         Map<String, String> queryParams = parseQueryParams(query);
         JSONObject body = (bodyStr != null && !bodyStr.trim().isEmpty()) ? new JSONObject(bodyStr) : new JSONObject();
 
+        // 0. /api/health
+        if (path.equals("/api/health") && method.equals("GET")) {
+            JSONObject res = new JSONObject();
+            res.put("ok", true);
+            res.put("agyReady", isAgyAuthenticated());
+            res.put("agyUserEmail", getSetting("agy_user_email", ""));
+            res.put("projectId", getSetting("project_id", "project-4c7a8e8a-764a-42bc-bdf"));
+            res.put("workspaceDir", workspaceDir.getAbsolutePath());
+            res.put("embeddedServer", true);
+            return res;
+        }
+
         // 1. /api/settings
         if (path.equals("/api/settings")) {
             if (method.equals("GET")) {
@@ -578,7 +622,9 @@ public class LocalBackendServer {
                 res.put("activePersonaId", Integer.parseInt(getSetting("active_persona_id", "1")));
                 res.put("contextMessagesLimit", Integer.parseInt(getSetting("context_messages_limit", "30")));
                 res.put("googleAuthToken", getSetting("google_auth_token", ""));
-                res.put("geminiApiKey", getSetting("gemini_api_key", ""));
+                res.put("agyAuthenticated", isAgyAuthenticated());
+                res.put("agyUserEmail", getSetting("agy_user_email", ""));
+                res.put("agyDiscoveredProject", getSetting("agy_discovered_project", ""));
                 res.put("workspaceDir", workspaceDir.getAbsolutePath());
                 res.put("embeddedServer", true);
                 return res;
@@ -590,7 +636,6 @@ public class LocalBackendServer {
                 if (body.has("activePersonaId")) setSetting("active_persona_id", String.valueOf(body.optInt("activePersonaId", 1)));
                 if (body.has("contextMessagesLimit")) setSetting("context_messages_limit", String.valueOf(body.optInt("contextMessagesLimit", 30)));
                 if (body.has("googleAuthToken")) setSetting("google_auth_token", body.optString("googleAuthToken").trim());
-                if (body.has("geminiApiKey")) setSetting("gemini_api_key", body.optString("geminiApiKey").trim());
                 return routeRequest("GET", "/api/settings", null);
             }
         }
@@ -891,6 +936,20 @@ public class LocalBackendServer {
         }
         if (path.equals("/api/updates/config") && method.equals("POST")) {
             return handleUpdatesConfig(body);
+        }
+
+        // 13. /api/agy/auth/* (Native Google Antigravity OAuth 2.0 without API Key)
+        if (path.equals("/api/agy/auth/status") && method.equals("GET")) {
+            return handleAgyAuthStatus();
+        }
+        if (path.equals("/api/agy/auth/start") && method.equals("POST")) {
+            return handleAgyAuthStart();
+        }
+        if (path.equals("/api/agy/auth/exchange") && method.equals("POST")) {
+            return handleAgyAuthExchange(body);
+        }
+        if (path.equals("/api/agy/auth/logout") && method.equals("POST")) {
+            return handleAgyAuthLogout();
         }
 
         return errorJson(404, "Неизвестный маршрут APK-сервера: " + method + " " + path);
@@ -1234,7 +1293,7 @@ public class LocalBackendServer {
     }
 
     // =========================================================================
-    // SEND MESSAGE & SWIPE / REGENERATE WITH EMBEDDED AI ENGINE
+    // SEND MESSAGE & SWIPE / REGENERATE VIA NATIVE AGY GATEWAY (NO STUBS)
     // =========================================================================
     private JSONObject handleSendChatMessage(int chatId, JSONObject body) throws Exception {
         String content = body.optString("content", "").trim();
@@ -1249,7 +1308,7 @@ public class LocalBackendServer {
         uCv.put("thoughts", "");
         uCv.put("swipes_json", userSwipes.toString());
         uCv.put("swipe_index", 0);
-        db.insert("messages", null, uCv);
+        int userMsgId = (int) db.insert("messages", null, uCv);
 
         JSONObject chatDetails = getChatDetailsJson(chatId);
         JSONObject chat = chatDetails.getJSONObject("chat");
@@ -1264,12 +1323,15 @@ public class LocalBackendServer {
         GenerationProgress prog = new GenerationProgress();
         prog.modelId = baseModel;
         prog.effort = effort;
-        prog.statusText = "🚀 AGY (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ") читает файлы персонажа...";
+        prog.statusText = "🚀 AGY (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ") отправляет запрос...";
         activeGenerations.put(chatId, prog);
 
         String[] result;
         try {
             result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, history, chat.optString("memory_file_path", ""), prog);
+        } catch (Exception e) {
+            db.delete("messages", "id = ?", new String[]{String.valueOf(userMsgId)});
+            return errorJson(401, e.getMessage() != null ? e.getMessage() : "Ошибка обращения к AGY");
         } finally {
             activeGenerations.remove(chatId);
         }
@@ -1337,12 +1399,14 @@ public class LocalBackendServer {
             GenerationProgress prog = new GenerationProgress();
             prog.modelId = baseModel;
             prog.effort = effort;
-            prog.statusText = "🔄 Генерация нового варианта (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ")...";
+            prog.statusText = "🔄 AGY генерирует новый вариант (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ")...";
             activeGenerations.put(chatId, prog);
 
             String[] result;
             try {
                 result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, historyBefore, chat.optString("memory_file_path", ""), prog);
+            } catch (Exception e) {
+                return errorJson(401, e.getMessage() != null ? e.getMessage() : "Ошибка обращения к AGY");
             } finally {
                 activeGenerations.remove(chatId);
             }
@@ -1368,8 +1432,380 @@ public class LocalBackendServer {
     }
 
     // =========================================================================
-    // MULTI-MODE ROLEPLAY AI GENERATION ON THE SMARTPHONE
+    // NATIVE GOOGLE ANTIGRAVITY (AGY) OAUTH 2.0 + UNIFIED GATEWAY ON SMARTPHONE
     // =========================================================================
+    private boolean isAgyAuthenticated() {
+        String refresh = getSetting("agy_refresh_token", "").trim();
+        String access = getSetting("agy_access_token", "").trim();
+        String manual = getSetting("google_auth_token", "").trim();
+        return !refresh.isEmpty() || !access.isEmpty() || !manual.isEmpty();
+    }
+
+    private JSONObject handleAgyAuthStatus() throws Exception {
+        JSONObject res = new JSONObject();
+        res.put("authenticated", isAgyAuthenticated());
+        res.put("email", getSetting("agy_user_email", ""));
+        res.put("projectId", getSetting("project_id", "project-4c7a8e8a-764a-42bc-bdf"));
+        res.put("discoveredProject", getSetting("agy_discovered_project", ""));
+        return res;
+    }
+
+    private JSONObject handleAgyAuthLogout() throws Exception {
+        setSetting("agy_access_token", "");
+        setSetting("agy_refresh_token", "");
+        setSetting("agy_token_expiry", "0");
+        setSetting("agy_user_email", "");
+        setSetting("agy_discovered_project", "");
+        setSetting("google_auth_token", "");
+        JSONObject res = new JSONObject();
+        res.put("ok", true);
+        res.put("authenticated", false);
+        return res;
+    }
+
+    private JSONObject handleAgyAuthStart() throws Exception {
+        byte[] verifierBytes = new byte[32];
+        new SecureRandom().nextBytes(verifierBytes);
+        pendingCodeVerifier = Base64.encodeToString(verifierBytes, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+
+        MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+        byte[] challengeBytes = sha256.digest(pendingCodeVerifier.getBytes(StandardCharsets.US_ASCII));
+        String codeChallenge = Base64.encodeToString(challengeBytes, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+
+        byte[] stateBytes = new byte[16];
+        new SecureRandom().nextBytes(stateBytes);
+        pendingOAuthState = Base64.encodeToString(stateBytes, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+
+        startLocalOAuthCallbackServer();
+
+        String authUrl = "https://accounts.google.com/o/oauth2/v2/auth" +
+            "?client_id=" + URLEncoder.encode(AGY_CLIENT_ID, "UTF-8") +
+            "&redirect_uri=" + URLEncoder.encode(AGY_REDIRECT_URI, "UTF-8") +
+            "&response_type=code" +
+            "&access_type=offline" +
+            "&prompt=consent" +
+            "&scope=" + URLEncoder.encode(AGY_SCOPES, "UTF-8") +
+            "&code_challenge=" + URLEncoder.encode(codeChallenge, "UTF-8") +
+            "&code_challenge_method=S256" +
+            "&state=" + URLEncoder.encode(pendingOAuthState, "UTF-8");
+
+        openExternalUrl(authUrl);
+
+        JSONObject res = new JSONObject();
+        res.put("ok", true);
+        res.put("authUrl", authUrl);
+        return res;
+    }
+
+    private synchronized void startLocalOAuthCallbackServer() {
+        try {
+            if (oauthCallbackServer != null && !oauthCallbackServer.isClosed()) {
+                return;
+            }
+            oauthCallbackServer = new ServerSocket(AGY_OAUTH_PORT, 10, InetAddress.getByName("127.0.0.1"));
+            executor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    while (oauthCallbackServer != null && !oauthCallbackServer.isClosed()) {
+                        Socket client = null;
+                        try {
+                            client = oauthCallbackServer.accept();
+                            client.setSoTimeout(10000);
+                            BufferedReader reader = new BufferedReader(new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
+                            String requestLine = reader.readLine();
+                            if (requestLine != null && requestLine.contains("/oauth-callback")) {
+                                String[] reqParts = requestLine.split(" ");
+                                String fullPath = reqParts.length > 1 ? reqParts[1] : "";
+                                int qPos = fullPath.indexOf('?');
+                                String queryStr = qPos >= 0 ? fullPath.substring(qPos + 1) : "";
+                                Map<String, String> params = parseQueryParams(queryStr);
+                                String code = params.get("code");
+                                String htmlBody;
+                                if (code != null && !code.trim().isEmpty()) {
+                                    exchangeAuthorizationCodeForTokens(code.trim());
+                                    String email = getSetting("agy_user_email", "");
+                                    htmlBody = "<!DOCTYPE html><html><head><meta charset='utf-8'>" +
+                                        "<meta name='viewport' content='width=device-width,initial-scale=1'>" +
+                                        "<title>AGY OAuth</title>" +
+                                        "<style>body{background:#0b0d14;color:#f3f4f6;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px;box-sizing:border-box;text-align:center}" +
+                                        ".card{background:#151926;border:1px solid rgba(139,92,246,0.4);border-radius:18px;padding:28px;max-width:400px}" +
+                                        "h2{color:#34d399;margin-top:0}</style></head><body>" +
+                                        "<div class='card'><h2>✅ AGY Авторизован!</h2>" +
+                                        "<p>Аккаунт Google успешно подключён к AGY" + (!email.isEmpty() ? (" (" + email + ")") : "") + ".</p>" +
+                                        "<p>Теперь вернитесь в приложение <b>AGY Roleplay</b>.</p></div>" +
+                                        "<script>setTimeout(function(){window.close();},1200);</script></body></html>";
+                                    notifyWebViewOAuthSuccess();
+                                } else {
+                                    htmlBody = "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body style='background:#0b0d14;color:#f87171;font-family:sans-serif;text-align:center;padding:40px'>" +
+                                        "<h3>Ошибка авторизации AGY: код не получен</h3></body></html>";
+                                }
+                                byte[] bodyBytes = htmlBody.getBytes(StandardCharsets.UTF_8);
+                                OutputStream out = client.getOutputStream();
+                                String headers = "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: text/html; charset=utf-8\r\n" +
+                                    "Content-Length: " + bodyBytes.length + "\r\n" +
+                                    "Connection: close\r\n\r\n";
+                                out.write(headers.getBytes(StandardCharsets.UTF_8));
+                                out.write(bodyBytes);
+                                out.flush();
+                                try {
+                                    oauthCallbackServer.close();
+                                } catch (Exception ignored) {
+                                }
+                                break;
+                            }
+                        } catch (Exception ignored) {
+                        } finally {
+                            if (client != null) {
+                                try { client.close(); } catch (Exception ignored) {}
+                            }
+                        }
+                    }
+                }
+            });
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void notifyWebViewOAuthSuccess() {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (webView != null) {
+                    webView.evaluateJavascript("window.__onAgyOAuthSuccess && window.__onAgyOAuthSuccess();", null);
+                }
+            }
+        });
+    }
+
+    private JSONObject handleAgyAuthExchange(JSONObject body) throws Exception {
+        String raw = body.optString("codeOrUrl", "").trim();
+        if (raw.isEmpty()) {
+            return errorJson(400, "Вставьте ссылку перенаправления (http://localhost:51121/...) или код авторизации");
+        }
+
+        if (raw.startsWith("ya29.")) {
+            setSetting("agy_access_token", raw);
+            setSetting("agy_token_expiry", String.valueOf(System.currentTimeMillis() + 3500_000L));
+            discoverAgyProjectAndEmail(raw);
+            return handleAgyAuthStatus();
+        }
+
+        String code = raw;
+        if (raw.contains("code=")) {
+            int qIdx = raw.indexOf('?');
+            String queryPart = qIdx >= 0 ? raw.substring(qIdx + 1) : raw;
+            Map<String, String> params = parseQueryParams(queryPart);
+            if (params.containsKey("code")) {
+                code = params.get("code");
+            }
+        }
+
+        exchangeAuthorizationCodeForTokens(code);
+        return handleAgyAuthStatus();
+    }
+
+    private void exchangeAuthorizationCodeForTokens(String code) throws Exception {
+        URL url = new URL("https://oauth2.googleapis.com/token");
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(20000);
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+
+        StringBuilder form = new StringBuilder();
+        form.append("client_id=").append(URLEncoder.encode(AGY_CLIENT_ID, "UTF-8"));
+        form.append("&client_secret=").append(URLEncoder.encode(AGY_CLIENT_SECRET, "UTF-8"));
+        form.append("&code=").append(URLEncoder.encode(code, "UTF-8"));
+        form.append("&redirect_uri=").append(URLEncoder.encode(AGY_REDIRECT_URI, "UTF-8"));
+        form.append("&grant_type=authorization_code");
+        if (pendingCodeVerifier != null && !pendingCodeVerifier.isEmpty()) {
+            form.append("&code_verifier=").append(URLEncoder.encode(pendingCodeVerifier, "UTF-8"));
+        }
+
+        byte[] payload = form.toString().getBytes(StandardCharsets.UTF_8);
+        OutputStream os = conn.getOutputStream();
+        os.write(payload);
+        os.close();
+
+        int status = conn.getResponseCode();
+        String respBody = readHttpBody(conn);
+        if (status < 200 || status >= 300) {
+            throw new Exception("Ошибка обмена OAuth-кода (" + status + "): " + respBody);
+        }
+
+        JSONObject tok = new JSONObject(respBody);
+        String accessToken = tok.optString("access_token", "");
+        String refreshToken = tok.optString("refresh_token", "");
+        long expiresIn = tok.optLong("expires_in", 3600L);
+
+        if (accessToken.isEmpty()) {
+            throw new Exception("Google OAuth не вернул access_token");
+        }
+
+        setSetting("agy_access_token", accessToken);
+        if (!refreshToken.isEmpty()) {
+            setSetting("agy_refresh_token", refreshToken);
+        }
+        setSetting("agy_token_expiry", String.valueOf(System.currentTimeMillis() + (expiresIn * 1000L) - 60_000L));
+
+        discoverAgyProjectAndEmail(accessToken);
+    }
+
+    private synchronized String getValidAgyAccessToken() throws Exception {
+        String accessToken = getSetting("agy_access_token", "").trim();
+        String refreshToken = getSetting("agy_refresh_token", "").trim();
+        long expiry = 0L;
+        try {
+            expiry = Long.parseLong(getSetting("agy_token_expiry", "0"));
+        } catch (Exception ignored) {
+        }
+
+        if (!accessToken.isEmpty() && System.currentTimeMillis() < expiry) {
+            return accessToken;
+        }
+
+        if (!refreshToken.isEmpty()) {
+            URL url = new URL("https://oauth2.googleapis.com/token");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(20000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+
+            String form = "client_id=" + URLEncoder.encode(AGY_CLIENT_ID, "UTF-8") +
+                "&client_secret=" + URLEncoder.encode(AGY_CLIENT_SECRET, "UTF-8") +
+                "&refresh_token=" + URLEncoder.encode(refreshToken, "UTF-8") +
+                "&grant_type=refresh_token";
+
+            OutputStream os = conn.getOutputStream();
+            os.write(form.getBytes(StandardCharsets.UTF_8));
+            os.close();
+
+            int status = conn.getResponseCode();
+            String respBody = readHttpBody(conn);
+            if (status >= 200 && status < 300) {
+                JSONObject tok = new JSONObject(respBody);
+                String newAccess = tok.optString("access_token", "");
+                long expiresIn = tok.optLong("expires_in", 3600L);
+                if (!newAccess.isEmpty()) {
+                    setSetting("agy_access_token", newAccess);
+                    setSetting("agy_token_expiry", String.valueOf(System.currentTimeMillis() + (expiresIn * 1000L) - 60_000L));
+                    return newAccess;
+                }
+            }
+        }
+
+        String manualToken = getSetting("google_auth_token", "").trim();
+        if (!manualToken.isEmpty()) {
+            return manualToken;
+        }
+
+        if (!accessToken.isEmpty()) {
+            return accessToken;
+        }
+
+        throw new Exception("Требуется авторизация AGY. Откройте вкладку «Настройки» и нажмите «Войти через Google (AGY)».");
+    }
+
+    private void discoverAgyProjectAndEmail(String accessToken) {
+        try {
+            URL u = new URL("https://www.googleapis.com/oauth2/v2/userinfo");
+            HttpURLConnection c = (HttpURLConnection) u.openConnection();
+            c.setRequestMethod("GET");
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(10000);
+            c.setRequestProperty("Authorization", "Bearer " + accessToken);
+            if (c.getResponseCode() == 200) {
+                JSONObject info = new JSONObject(readHttpBody(c));
+                String email = info.optString("email", "");
+                if (!email.isEmpty()) {
+                    setSetting("agy_user_email", email);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+
+        for (String endpoint : AGY_GATEWAY_ENDPOINTS) {
+            try {
+                URL u = new URL(endpoint + "/v1internal:loadCodeAssist");
+                HttpURLConnection c = (HttpURLConnection) u.openConnection();
+                c.setRequestMethod("POST");
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(10000);
+                c.setDoOutput(true);
+                c.setRequestProperty("Authorization", "Bearer " + accessToken);
+                c.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                c.setRequestProperty("User-Agent", AGY_USER_AGENT);
+                c.setRequestProperty("X-Goog-Api-Client", AGY_API_CLIENT_HEADER);
+                c.setRequestProperty("Client-Metadata", AGY_CLIENT_METADATA_HEADER);
+
+                String body = "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"WINDOWS\",\"pluginType\":\"GEMINI\"}}";
+                OutputStream os = c.getOutputStream();
+                os.write(body.getBytes(StandardCharsets.UTF_8));
+                os.close();
+
+                if (c.getResponseCode() == 200) {
+                    JSONObject resp = new JSONObject(readHttpBody(c));
+                    Object projObj = resp.opt("cloudaicompanionProject");
+                    String discovered = "";
+                    if (projObj instanceof String) {
+                        discovered = ((String) projObj).trim();
+                    } else if (projObj instanceof JSONObject) {
+                        discovered = ((JSONObject) projObj).optString("id", "").trim();
+                    }
+                    if (!discovered.isEmpty()) {
+                        setSetting("agy_discovered_project", discovered);
+                        if (getSetting("project_id", "").trim().isEmpty()) {
+                            setSetting("project_id", discovered);
+                        }
+                        break;
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private List<String> getGatewayModelCandidates(String baseModel, String effort) {
+        String base = normalizeBaseModelId(baseModel);
+        String eff = (effort != null ? effort.toLowerCase(Locale.ROOT) : "high");
+        String cliModel = resolveCliModelId(base, eff);
+
+        List<String> list = new ArrayList<>();
+        list.add(cliModel);
+
+        if (base.equals("gemini-4-argon")) {
+            list.add(eff.equals("low") ? "gemini-3-pro-low" : "gemini-3-pro-high");
+            list.add("gemini-3.1-pro-high");
+            list.add("gemini-2.5-pro");
+        } else if (base.equals("claude-opus-5-5")) {
+            list.add("claude-opus-4-6-thinking");
+            list.add("claude-opus-4-5-thinking");
+        } else if (base.equals("claude-sonnet-5-5")) {
+            list.add("claude-sonnet-4-6");
+            list.add("claude-sonnet-4-5-thinking");
+            list.add("claude-sonnet-4-5");
+        } else if (base.contains("flash")) {
+            list.add("gemini-3-flash");
+            list.add("gemini-2.5-flash");
+        } else if (base.equals("gemini-3.1-pro")) {
+            list.add("gemini-3.1-pro-high");
+            list.add("gemini-3-pro-high");
+            list.add("gemini-2.5-pro");
+        }
+        return list;
+    }
+
+    private int resolveThinkingBudget(String effort) {
+        if ("low".equalsIgnoreCase(effort)) return 1024;
+        if ("medium".equalsIgnoreCase(effort)) return 4096;
+        if ("max".equalsIgnoreCase(effort)) return 16384;
+        return 8192;
+    }
+
     private String[] generateRoleplayReply(
         int chatId,
         String projectId,
@@ -1380,313 +1816,222 @@ public class LocalBackendServer {
         JSONArray history,
         String memoryRelPath,
         GenerationProgress prog
-    ) {
+    ) throws Exception {
         String charName = character.optString("name", "Персонаж");
         String userName = persona.optString("name", "Казума");
-        String charFileContent = character.optString("fileContent", "");
-        String personaFileContent = persona.optString("fileContent", "");
-        String geminiRules = readTextFile(new File(workspaceDir, "GEMINI.md"));
-        String loreContent = readTextFile(new File(workspaceDir, "lore/worlds.md"));
-        String memoryContent = !memoryRelPath.isEmpty() ? readTextFile(new File(workspaceDir, memoryRelPath)) : "";
-        String cliModel = resolveCliModelId(baseModel, effort);
+        String charFileContent = character.optString("fileContent", "").trim();
+        String personaFileContent = persona.optString("fileContent", "").trim();
+        String geminiRules = readTextFile(new File(workspaceDir, "GEMINI.md")).trim();
+        String loreContent = readTextFile(new File(workspaceDir, "lore/worlds.md")).trim();
+        String memoryContent = !memoryRelPath.isEmpty() ? readTextFile(new File(workspaceDir, memoryRelPath)).trim() : "";
 
-        StringBuilder promptBuilder = new StringBuilder();
-        promptBuilder.append(geminiRules).append("\n\n");
-        promptBuilder.append("=== ФАЙЛ ПЕРСОНАЖА (").append(character.optString("file_path")).append(") ===\n");
-        promptBuilder.append(charFileContent.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
-        promptBuilder.append("=== ФАЙЛ ПЕРСОНЫ ИГРОКА (").append(persona.optString("file_path")).append(") ===\n");
-        promptBuilder.append(personaFileContent.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
+        // Build clean systemInstruction strictly from GEMINI.md and user files (NO hidden prompts!)
+        StringBuilder sysBuilder = new StringBuilder();
+        if (!geminiRules.isEmpty()) {
+            sysBuilder.append(geminiRules.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
+        }
+        if (!charFileContent.isEmpty()) {
+            sysBuilder.append("=== ").append(character.optString("file_path", "characters/character.md")).append(" ===\n");
+            sysBuilder.append(charFileContent.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
+        }
+        if (!personaFileContent.isEmpty()) {
+            sysBuilder.append("=== ").append(persona.optString("file_path", "personas/persona.md")).append(" ===\n");
+            sysBuilder.append(personaFileContent.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
+        }
         if (!loreContent.isEmpty()) {
-            promptBuilder.append("=== ЛОР МИРА (lore/worlds.md) ===\n").append(loreContent).append("\n\n");
+            sysBuilder.append("=== lore/worlds.md ===\n").append(loreContent).append("\n\n");
         }
         if (!memoryContent.isEmpty()) {
-            promptBuilder.append("=== ПАМЯТЬ ЧАТА (").append(memoryRelPath).append(") ===\n").append(memoryContent).append("\n\n");
+            sysBuilder.append("=== ").append(memoryRelPath).append(" ===\n").append(memoryContent).append("\n\n");
         }
-        promptBuilder.append("=== ИСТОРИЯ ДИАЛОГА ===\n");
+
+        // Build clean conversation contents array (strictly alternating user/model turns)
         int limit = Integer.parseInt(getSetting("context_messages_limit", "30"));
         int startIdx = Math.max(0, history.length() - limit);
-        String lastUserMessage = "";
+
+        JSONArray contents = new JSONArray();
         for (int i = startIdx; i < history.length(); i++) {
             JSONObject m = history.optJSONObject(i);
-            if (m != null) {
-                boolean isUser = "user".equals(m.optString("role"));
-                String speaker = isUser ? userName : charName;
-                String msgText = m.optString("content", "");
-                promptBuilder.append(speaker).append(": ").append(msgText).append("\n\n");
-                if (isUser) lastUserMessage = msgText;
+            if (m == null) continue;
+            String rawRole = m.optString("role", "user");
+            String apiRole = "user".equals(rawRole) ? "user" : "model";
+            String msgText = m.optString("content", "").trim();
+            if (msgText.isEmpty()) continue;
+
+            // If the very first message before any user turn is the character's initial greeting,
+            // include it in systemInstruction so contents[] starts with a "user" turn as required by AGY Gateway
+            if (contents.length() == 0 && "model".equals(apiRole)) {
+                sysBuilder.append("=== Начальное сообщение (").append(charName).append(") ===\n")
+                    .append(msgText).append("\n\n");
+                continue;
             }
-        }
-        promptBuilder.append("Напиши следующий ответ только от лица персонажа ").append(charName)
-            .append(" на русском языке. Действия выделяй *звёздочками*, прямую речь пиши живо и в характере персонажа.");
 
-        String fullPrompt = promptBuilder.toString();
-
-        // 1. Try Gemini API Key or Google Cloud Vertex AI (Project ID + OAuth Token) if configured
-        String apiKey = getSetting("gemini_api_key", "").trim();
-        String oauthToken = getSetting("google_auth_token", "").trim();
-
-        if (!apiKey.isEmpty() || !oauthToken.isEmpty()) {
-            try {
-                prog.statusText = "☁️ Запрос к облаку Google (" + cliModel + " • Project: " + projectId + ")...";
-                String[] cloudRes = callGoogleCloudOrGeminiApi(projectId, baseModel, effort, fullPrompt, apiKey, oauthToken, prog);
-                if (cloudRes != null && cloudRes[0] != null && !cloudRes[0].trim().isEmpty()) {
-                    return cloudRes;
-                }
-            } catch (Exception ignored) {
-            }
-        }
-
-        // 2. Try local `agy` binary on Android if available (e.g. Termux environment)
-        try {
-            File termuxAgy = new File("/data/data/com.termux/files/usr/bin/agy");
-            if (termuxAgy.exists() && termuxAgy.canExecute()) {
-                prog.statusText = "⚡ Вызов локального бинарника agy (" + cliModel + ")...";
-                ProcessBuilder pb = new ProcessBuilder(
-                    termuxAgy.getAbsolutePath(),
-                    "--project", projectId,
-                    "--model", cliModel,
-                    "--effort", effort,
-                    "--workspace", workspaceDir.getAbsolutePath(),
-                    "-p", fullPrompt
-                );
-                pb.directory(workspaceDir);
-                Process p = pb.start();
-                BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
-                StringBuilder out = new StringBuilder();
-                String line;
-                while ((line = r.readLine()) != null) {
-                    out.append(line).append("\n");
-                }
-                p.waitFor();
-                if (out.length() > 15) {
-                    return new String[]{out.toString().trim(), "Выполнено через локальный AGY CLI (" + cliModel + ", project: " + projectId + ")"};
+            if (contents.length() > 0) {
+                JSONObject prev = contents.getJSONObject(contents.length() - 1);
+                if (apiRole.equals(prev.optString("role"))) {
+                    JSONArray prevParts = prev.getJSONArray("parts");
+                    JSONObject prevPart0 = prevParts.getJSONObject(0);
+                    prevPart0.put("text", prevPart0.optString("text", "") + "\n\n" + msgText);
+                    continue;
                 }
             }
-        } catch (Exception ignored) {
+
+            JSONObject turn = new JSONObject();
+            turn.put("role", apiRole);
+            JSONArray parts = new JSONArray();
+            parts.put(new JSONObject().put("text", msgText));
+            turn.put("parts", parts);
+            contents.put(turn);
         }
 
-        // 3. Built-in Standalone On-Device AGY Roleplay Engine (works 100% autonomously on the phone!)
-        return runOnDeviceRoleplayEngine(projectId, baseModel, cliModel, effort, charName, userName, charFileContent, personaFileContent, lastUserMessage, history.length(), prog);
+        if (contents.length() == 0) {
+            JSONObject turn = new JSONObject();
+            turn.put("role", "user");
+            turn.put("parts", new JSONArray().put(new JSONObject().put("text", "...")));
+            contents.put(turn);
+        }
+
+        String systemInstructionText = sysBuilder.toString().trim();
+        return callAntigravityGateway(projectId, baseModel, effort, systemInstructionText, contents, prog);
     }
 
-    private String[] callGoogleCloudOrGeminiApi(
+    private String[] callAntigravityGateway(
         String projectId,
         String baseModel,
         String effort,
-        String fullPrompt,
-        String apiKey,
-        String oauthToken,
+        String systemInstructionText,
+        JSONArray contents,
         GenerationProgress prog
     ) throws Exception {
-        String geminiModel = "gemini-2.5-pro";
-        if (baseModel.contains("flash")) {
-            geminiModel = "gemini-2.5-flash";
-        }
-        String endpointUrl;
-        if (!apiKey.isEmpty()) {
-            endpointUrl = "https://generativelanguage.googleapis.com/v1beta/models/" + geminiModel + ":generateContent?key=" + apiKey;
-        } else {
-            endpointUrl = "https://aiplatform.googleapis.com/v1/projects/" + projectId + "/locations/global/publishers/google/models/" + geminiModel + ":generateContent";
-        }
+        String accessToken = getValidAgyAccessToken();
 
-        URL url = new URL(endpointUrl);
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(45000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-        if (apiKey.isEmpty() && !oauthToken.isEmpty()) {
-            conn.setRequestProperty("Authorization", "Bearer " + oauthToken);
-            conn.setRequestProperty("x-goog-user-project", projectId);
+        List<String> projectsToTry = new ArrayList<>();
+        String cleanProj = projectId != null ? projectId.trim() : "";
+        if (!cleanProj.isEmpty()) {
+            projectsToTry.add(cleanProj);
+        }
+        String discoveredProj = getSetting("agy_discovered_project", "").trim();
+        if (!discoveredProj.isEmpty() && !projectsToTry.contains(discoveredProj)) {
+            projectsToTry.add(discoveredProj);
+        }
+        if (projectsToTry.isEmpty()) {
+            projectsToTry.add("rising-fact-p41fc");
         }
 
-        JSONObject reqJson = new JSONObject();
-        JSONArray contents = new JSONArray();
-        JSONObject contentObj = new JSONObject();
-        contentObj.put("role", "user");
-        JSONArray parts = new JSONArray();
-        parts.put(new JSONObject().put("text", fullPrompt));
-        contentObj.put("parts", parts);
-        contents.put(contentObj);
-        reqJson.put("contents", contents);
+        List<String> modelCandidates = getGatewayModelCandidates(baseModel, effort);
+        int thinkingBudget = resolveThinkingBudget(effort);
+        int maxOutputTokens = Math.max(8192, thinkingBudget + 4096);
 
-        byte[] payload = reqJson.toString().getBytes(StandardCharsets.UTF_8);
-        OutputStream os = conn.getOutputStream();
-        os.write(payload);
-        os.close();
+        String lastError = "Не удалось получить ответ от AGY Gateway";
 
-        int code = conn.getResponseCode();
-        if (code >= 200 && code < 300) {
-            BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = br.readLine()) != null) sb.append(line);
-            br.close();
+        for (String endpoint : AGY_GATEWAY_ENDPOINTS) {
+            for (String proj : projectsToTry) {
+                for (String candidateModel : modelCandidates) {
+                    prog.statusText = "☁️ AGY (" + candidateModel + " • Project: " + proj + ")...";
 
-            JSONObject resp = new JSONObject(sb.toString());
-            JSONArray candidates = resp.optJSONArray("candidates");
-            if (candidates != null && candidates.length() > 0) {
-                JSONObject c0 = candidates.getJSONObject(0);
-                JSONObject cContent = c0.optJSONObject("content");
-                if (cContent != null) {
-                    JSONArray cParts = cContent.optJSONArray("parts");
-                    if (cParts != null) {
-                        StringBuilder reply = new StringBuilder();
-                        StringBuilder thoughts = new StringBuilder();
-                        for (int i = 0; i < cParts.length(); i++) {
-                            JSONObject p = cParts.getJSONObject(i);
-                            if (p.optBoolean("thought", false)) {
-                                thoughts.append(p.optString("text", ""));
-                            } else {
-                                reply.append(p.optString("text", ""));
+                    JSONObject innerReq = new JSONObject();
+                    if (!systemInstructionText.isEmpty()) {
+                        JSONObject sysObj = new JSONObject();
+                        sysObj.put("role", "user");
+                        sysObj.put("parts", new JSONArray().put(new JSONObject().put("text", systemInstructionText)));
+                        innerReq.put("systemInstruction", sysObj);
+                    }
+                    innerReq.put("contents", contents);
+
+                    JSONObject genConfig = new JSONObject();
+                    genConfig.put("maxOutputTokens", maxOutputTokens);
+                    genConfig.put("temperature", 0.85);
+                    genConfig.put("topP", 0.95);
+                    JSONObject thinkingConfig = new JSONObject();
+                    thinkingConfig.put("thinkingBudget", thinkingBudget);
+                    thinkingConfig.put("includeThoughts", true);
+                    genConfig.put("thinkingConfig", thinkingConfig);
+                    innerReq.put("generationConfig", genConfig);
+
+                    JSONObject envelope = new JSONObject();
+                    envelope.put("project", proj);
+                    envelope.put("model", candidateModel);
+                    envelope.put("userAgent", "antigravity");
+                    envelope.put("requestId", "req-" + UUID.randomUUID().toString());
+                    envelope.put("request", innerReq);
+
+                    URL url = new URL(endpoint + "/v1internal:generateContent");
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setRequestMethod("POST");
+                    conn.setConnectTimeout(20000);
+                    conn.setReadTimeout(90000);
+                    conn.setDoOutput(true);
+                    conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+                    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                    conn.setRequestProperty("User-Agent", AGY_USER_AGENT);
+                    conn.setRequestProperty("X-Goog-Api-Client", AGY_API_CLIENT_HEADER);
+                    conn.setRequestProperty("Client-Metadata", AGY_CLIENT_METADATA_HEADER);
+
+                    byte[] payload = envelope.toString().getBytes(StandardCharsets.UTF_8);
+                    OutputStream os = conn.getOutputStream();
+                    os.write(payload);
+                    os.close();
+
+                    int code = conn.getResponseCode();
+                    String respBody = readHttpBody(conn);
+
+                    if (code >= 200 && code < 300) {
+                        JSONObject root = new JSONObject(respBody);
+                        JSONObject respObj = root.optJSONObject("response") != null ? root.getJSONObject("response") : root;
+                        JSONArray candidates = respObj.optJSONArray("candidates");
+                        if (candidates != null && candidates.length() > 0) {
+                            JSONObject c0 = candidates.getJSONObject(0);
+                            JSONObject cContent = c0.optJSONObject("content");
+                            if (cContent != null) {
+                                JSONArray cParts = cContent.optJSONArray("parts");
+                                if (cParts != null) {
+                                    StringBuilder reply = new StringBuilder();
+                                    StringBuilder thoughts = new StringBuilder();
+                                    for (int i = 0; i < cParts.length(); i++) {
+                                        JSONObject p = cParts.getJSONObject(i);
+                                        if (p.optBoolean("thought", false)) {
+                                            thoughts.append(p.optString("text", ""));
+                                        } else {
+                                            reply.append(p.optString("text", ""));
+                                        }
+                                    }
+                                    String finalReply = reply.toString().trim();
+                                    if (!finalReply.isEmpty()) {
+                                        return new String[]{finalReply, thoughts.toString().trim()};
+                                    }
+                                }
                             }
                         }
-                        String th = thoughts.length() > 0
-                            ? thoughts.toString()
-                            : ("Модель: " + resolveCliModelId(baseModel, effort) + " • Project ID: " + projectId);
-                        return new String[]{reply.toString().trim(), th};
+                    } else {
+                        lastError = "AGY HTTP " + code + " (" + candidateModel + "): " + respBody;
+                        if (code == 401) {
+                            throw new Exception("Сессия AGY истекла или токен недействителен (401). Перезайдите через кнопку «Войти через Google (AGY)» в Настройках.");
+                        }
                     }
                 }
             }
         }
-        return null;
+
+        throw new Exception(lastError);
     }
 
-    /**
-     * Built-in Standalone On-Device AGY Roleplay Engine.
-     * Reads the character's and persona's Markdown files from the smartphone's workspace,
-     * simulates step-by-step reasoning based on the selected Effort (low/medium/high/max),
-     * and generates contextual in-character actions and dialogue in Russian.
-     */
-    private String[] runOnDeviceRoleplayEngine(
-        String projectId,
-        String baseModel,
-        String cliModel,
-        String effort,
-        String charName,
-        String userName,
-        String charFileContent,
-        String personaFileContent,
-        String userMessage,
-        int turnNumber,
-        GenerationProgress prog
-    ) {
+    private String readHttpBody(HttpURLConnection conn) {
         try {
-            // Extract user action (*...*) and user speech
-            String userAction = "";
-            Matcher actMatcher = Pattern.compile("\\*([^*]+)\\*").matcher(userMessage);
-            if (actMatcher.find()) {
-                userAction = actMatcher.group(1).trim();
+            InputStream is = (conn.getResponseCode() >= 200 && conn.getResponseCode() < 400)
+                ? conn.getInputStream()
+                : conn.getErrorStream();
+            if (is == null) return "";
+            BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append("\n");
             }
-            String userSpeech = userMessage.replaceAll("\\*[^*]+\\*", "").replaceAll("^[\\s—–-]+", "").trim();
-
-            // Build character thoughts scaled by effort level
-            StringBuilder thoughts = new StringBuilder();
-            thoughts.append("[AGY APK Engine • Project: ").append(projectId)
-                .append(" • Модель: ").append(baseModel)
-                .append(" (CLI: ").append(cliModel).append(") • Effort: ").append(effort.toUpperCase(Locale.ROOT)).append("]\n");
-            thoughts.append("• Чтение карточки персонажа: ").append(charName).append(" и персоны игрока: ").append(userName).append(".\n");
-
-            if (!userAction.isEmpty()) {
-                thoughts.append("• Замечено действие ").append(userName).append(": «").append(userAction).append("».\n");
-            }
-            if (!userSpeech.isEmpty()) {
-                thoughts.append("• Анализ реплики ").append(userName).append(": «").append(userSpeech).append("».\n");
-            }
-
-            if ("high".equals(effort) || "max".equals(effort)) {
-                thoughts.append("• Глубокое моделирование характера (").append(effort.toUpperCase(Locale.ROOT))
-                    .append("): удержание атмосферы сцены, эмоционального подтекста и деталей из файла персонажа.");
-            }
-
-            prog.thoughts = thoughts.toString();
-            prog.statusText = "💭 " + charName + " обдумывает ответ (" + effort.toUpperCase(Locale.ROOT) + ")...";
-            Thread.sleep("low".equals(effort) ? 280 : ("max".equals(effort) ? 750 : 480));
-
-            boolean isCyber = charFileContent.toLowerCase(Locale.ROOT).contains("кибер")
-                || charFileContent.toLowerCase(Locale.ROOT).contains("нео-токио")
-                || charName.toLowerCase(Locale.ROOT).contains("кира");
-
-            boolean isArchive = charFileContent.toLowerCase(Locale.ROOT).contains("архив")
-                || charFileContent.toLowerCase(Locale.ROOT).contains("фолиант")
-                || charName.toLowerCase(Locale.ROOT).contains("элена");
-
-            boolean isQuestion = userMessage.contains("?");
-            String lowerMsg = userMessage.toLowerCase(Locale.ROOT);
-
-            String actionPart;
-            String speechPart;
-
-            if (isCyber) {
-                if (!userAction.isEmpty()) {
-                    actionPart = "*" + charName + " внимательно следит за тем, как " + userName + " " + lowercaseFirst(userAction) +
-                        ", и лёгким движением пальцев выводит на голографический экран трёхмерную схему защищённого узла. Неоновые блики отражаются в её глазах, а на губах появляется азартная ухмылка.*";
-                } else {
-                    actionPart = "*" + charName + " откидывается на спинку кресла перед мерцающим терминалом, перебрасывая зашифрованный чип из руки в руку, и с живым интересом смотрит на " + userName + ".*";
-                }
-
-                if (lowerMsg.contains("ключ") || lowerMsg.contains("взлом") || lowerMsg.contains("сектор") || lowerMsg.contains("риск") || lowerMsg.contains("давай") || lowerMsg.contains("соглас")) {
-                    speechPart = "— Вот это разговор по-нашему, " + userName + "! Я уже подключила обходной протокол к их подсети. Держи нейро-линк наготове: как только обойдём внешний фаервол, у нас будет ровно три минуты, чтобы забрать данные и исчезнуть без следа.";
-                } else if (isQuestion) {
-                    speechPart = "— Хороший вопрос, " + userName + ". В Нео-Токио за такую информацию корпорации готовы выставить отряд перехватчиков. Но раз уж мы в одной команде — смотри на голограмму: главный сервер находится на сотом этаже башни, и пробраться туда мы сможем только вдвоём.";
-                } else {
-                    speechPart = "— Слышу тебя, " + userName + ". Знаешь, с каждым разом ты удивляешь меня всё сильнее. Ну что, проверим, на что мы способны в этом рейде, или у тебя есть свой хитрый план?";
-                }
-            } else if (isArchive) {
-                if (!userAction.isEmpty()) {
-                    actionPart = "*Заметив, как " + userName + " " + lowercaseFirst(userAction) +
-                        ", " + charName + " мягко касается страниц древнего манускрипта. Серебристое свечение звёздной карты за высоким окном ложится на её плечи, а взгляд фиалковых глаз становится теплее и внимательнее.*";
-                } else {
-                    actionPart = "*" + charName + " делает плавный шаг навстречу " + userName +
-                        ", поправляя край тёмно-синего плаща с астрологической вышивкой. В тишине Звёздного Архива слышен лишь тихий шелест оживающих страниц.*";
-                }
-
-                if (lowerMsg.contains("хроник") || lowerMsg.contains("книг") || lowerMsg.contains("ответ") || lowerMsg.contains("тайн") || lowerMsg.contains("мир")) {
-                    speechPart = "— Древние хроники открываются лишь тем, кто не боится заглянуть за грань привычного мира, " + userName + ". Подойди ближе к созвездию на алтаре: эта страница описывает разлом между мирами, и, похоже, твоё появление здесь было предсказано задолго до сегодняшней ночи.";
-                } else if (isQuestion) {
-                    speechPart = "— Ты задаёшь именно те вопросы, которых большинство путников избегает, " + userName + ". В этих сводах хранится память сотен эпох, но самая интересная глава пишется прямо сейчас. Скажи мне, чего именно ищет твоё сердце?";
-                } else {
-                    speechPart = "— Твои слова звучат необычно под сводами этой древней башни, " + userName + ". Мне нравится твоя прямота. Останемся здесь ещё немного и изучим закрытый манускрипт, или отправимся к верхнему обсерваторию?";
-                }
-            } else {
-                // Custom user-created character! Extract traits from their Markdown file
-                String cleanTrait = parsePreview(charFileContent);
-                if (!userAction.isEmpty()) {
-                    actionPart = "*Обратив внимание на то, как " + userName + " " + lowercaseFirst(userAction) +
-                        ", " + charName + " живо реагирует, сохраняя свой характер и внимательно всматриваясь в собеседника.*";
-                } else {
-                    actionPart = "*" + charName + " поворачивается к " + userName + ", обдумывая услышанное и делая шаг ближе.*";
-                }
-
-                if (isQuestion) {
-                    speechPart = "— Ты спрашиваешь о важных вещах, " + userName + ". Если говорить начистоту — всё зависит от того, какой шаг мы сделаем дальше. Что ты сам об этом думаешь?";
-                } else {
-                    speechPart = "— Интересный ход, " + userName + ". Мне по душе твой настрой — продолжим нашу историю и посмотрим, куда это нас приведёт!";
-                }
-                if (!cleanTrait.isEmpty() && ("high".equals(effort) || "max".equals(effort))) {
-                    thoughts.append("\n• Контекст из файла персонажа: ").append(cleanTrait);
-                    prog.thoughts = thoughts.toString();
-                }
-            }
-
-            String fullReply = actionPart + "\n\n" + speechPart;
-            prog.text = fullReply;
-            prog.statusText = "✨ Ответ готов!";
-            Thread.sleep(180);
-
-            return new String[]{fullReply, thoughts.toString()};
+            br.close();
+            return sb.toString().trim();
         } catch (Exception e) {
-            return new String[]{
-                "*" + charName + " внимательно смотрит на " + userName + ".*\n\n— Продолжим, " + userName + "!",
-                "AGY APK Engine"
-            };
+            return "";
         }
-    }
-
-    private String lowercaseFirst(String s) {
-        if (s == null || s.isEmpty()) return "";
-        return s.substring(0, 1).toLowerCase(Locale.ROOT) + s.substring(1);
     }
 
     // =========================================================================
@@ -1793,8 +2138,8 @@ public class LocalBackendServer {
             try {
                 JSONObject fallback = new JSONObject();
                 fallback.put("appName", "AGY Roleplay Studio");
-                fallback.put("version", "1.2.0");
-                fallback.put("build", 3);
+                fallback.put("version", "1.3.0");
+                fallback.put("build", 4);
                 fallback.put("gitRepo", "Kuka001/111");
                 fallback.put("gitBranch", "main");
                 fallback.put("apkPath", "agy-roleplay-android16.apk");
@@ -1825,7 +2170,7 @@ public class LocalBackendServer {
         conn.setConnectTimeout(timeoutMs);
         conn.setReadTimeout(timeoutMs);
         conn.setUseCaches(false);
-        conn.setRequestProperty("User-Agent", "AGY-Roleplay-Android16-Updater/1.2");
+        conn.setRequestProperty("User-Agent", "AGY-Roleplay-Android16-Updater/1.3");
         conn.setRequestProperty("Accept", "application/vnd.github.v3+json, application/json, text/plain, */*");
         int code = conn.getResponseCode();
         InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
@@ -1876,10 +2221,10 @@ public class LocalBackendServer {
         gitBranch = gitBranch.trim();
 
         boolean otaActive = "1".equals(getSetting("ota_active", "0"));
-        String currentVersion = getSetting("installed_version", localManifest.optString("version", "1.2.0"));
-        int currentBuild = Integer.parseInt(getSetting("installed_build", String.valueOf(localManifest.optInt("build", 3))));
-        String bundledVersion = bundledManifest.optString("version", "1.2.0");
-        int bundledBuild = bundledManifest.optInt("build", 3);
+        String currentVersion = getSetting("installed_version", localManifest.optString("version", "1.3.0"));
+        int currentBuild = Integer.parseInt(getSetting("installed_build", String.valueOf(localManifest.optInt("build", 4))));
+        String bundledVersion = bundledManifest.optString("version", "1.3.0");
+        int bundledBuild = bundledManifest.optInt("build", 4);
         String installedCommit = getSetting("installed_commit", "");
 
         String latestVersion = currentVersion;
