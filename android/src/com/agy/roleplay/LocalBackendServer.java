@@ -305,7 +305,7 @@ public class LocalBackendServer {
     // INITIALIZATION: WORKSPACE FOLDERS, DEFAULT FILES & SQLITE DATABASE
     // =========================================================================
     private synchronized void initWorkspaceAndDatabase() {
-        String[] subdirs = new String[]{"characters", "personas", "lore", "memories", "avatars"};
+        String[] subdirs = new String[]{"characters", "personas", "lore", "memories", "avatars", "exports"};
         if (!workspaceDir.exists()) {
             workspaceDir.mkdirs();
         }
@@ -2583,8 +2583,8 @@ public class LocalBackendServer {
             try {
                 JSONObject fallback = new JSONObject();
                 fallback.put("appName", "AGY Roleplay Studio");
-                fallback.put("version", "1.3.3");
-                fallback.put("build", 7);
+                fallback.put("version", "1.3.4");
+                fallback.put("build", 8);
                 fallback.put("gitRepo", "Kuka001/111");
                 fallback.put("gitBranch", "main");
                 fallback.put("apkPath", "agy-roleplay-android16.apk");
@@ -2666,8 +2666,8 @@ public class LocalBackendServer {
         gitBranch = gitBranch.trim();
 
         boolean otaActive = "1".equals(getSetting("ota_active", "0"));
-        String bundledVersion = bundledManifest.optString("version", "1.3.3");
-        int bundledBuild = bundledManifest.optInt("build", 7);
+        String bundledVersion = bundledManifest.optString("version", "1.3.4");
+        int bundledBuild = bundledManifest.optInt("build", 8);
         String currentVersion = getSetting("installed_version", localManifest.optString("version", bundledVersion));
         int currentBuild = Integer.parseInt(getSetting("installed_build", String.valueOf(localManifest.optInt("build", bundledBuild))));
         if (!otaActive || bundledBuild > currentBuild) {

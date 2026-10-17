@@ -1615,6 +1615,11 @@
     document.getElementById('modelPickerModal').classList.remove('hidden');
   }
 
+  function openModal(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('hidden');
+  }
+
   function closeModal(id) {
     const el = document.getElementById(id);
     if (el) el.classList.add('hidden');
@@ -1976,16 +1981,27 @@
     }
 
     exportChatState.chatId = targetId;
-    openModal('exportChatModal');
+    const modalEl = document.getElementById('exportChatModal');
+    if (modalEl) {
+      modalEl.classList.remove('hidden');
+    }
 
     const previewInput = document.getElementById('exportChatContentInput');
     const fileLabel = document.getElementById('exportFileNameLabel');
     const sizeBadge = document.getElementById('exportSizeBadge');
-    if (previewInput) previewInput.value = '⏳ Сборка истории чата, промтов и диагностики...';
-    if (fileLabel) fileLabel.textContent = `Файл: chat_${targetId}...`;
-    if (sizeBadge) sizeBadge.textContent = '...';
 
     updateExportFormatButtons();
+
+    // Immediately show preview if we already have the active chat in memory
+    if (Number(targetId) === Number(state.currentChatId) && state.currentChatData && state.currentChatData.chat) {
+      exportChatState.chatData = state.currentChatData;
+      exportChatState.lastGeneration = state.lastGeneration || null;
+      rebuildExportPreview();
+    } else {
+      if (previewInput) previewInput.value = '⏳ Сборка истории чата, промтов и диагностики...';
+      if (fileLabel) fileLabel.textContent = `chat_${targetId}...`;
+      if (sizeBadge) sizeBadge.textContent = '...';
+    }
 
     try {
       const chatData = await apiFetch(`/api/chats/${targetId}`);
@@ -2000,8 +2016,8 @@
       } catch {
         // ignore if endpoint not available on older runtime
       }
-      if (!genData && targetId === state.currentChatId && state.lastGenerationData) {
-        genData = state.lastGenerationData;
+      if (!genData && Number(targetId) === Number(state.currentChatId) && state.lastGeneration) {
+        genData = state.lastGeneration;
       }
       exportChatState.lastGeneration = genData;
 
@@ -2023,7 +2039,7 @@
 
       rebuildExportPreview();
     } catch (err) {
-      if (previewInput) {
+      if (!exportChatState.chatData && previewInput) {
         previewInput.value = `❌ Ошибка загрузки чата #${targetId} для экспорта: ${err.message}`;
       }
       showToast('Ошибка подготовки экспорта: ' + err.message);
@@ -2031,6 +2047,12 @@
   }
 
   function updateExportFormatButtons() {
+    document.querySelectorAll('#exportFormatGroup .effort-btn').forEach(btn => {
+      const fmt = btn.getAttribute('data-format');
+      if (fmt) {
+        btn.classList.toggle('active', fmt === exportChatState.format);
+      }
+    });
     const mdBtn = document.getElementById('exportFmtMdBtn');
     const jsonBtn = document.getElementById('exportFmtJsonBtn');
     if (mdBtn) mdBtn.classList.toggle('active', exportChatState.format === 'markdown');
@@ -2062,7 +2084,7 @@
     if (exportChatState.format === 'json') {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: state.updateInfo?.currentVersion || '1.3.3',
+        appVersion: state.updateInfo?.currentVersion || '1.3.4',
         chat: {
           id: chat.id,
           title: chat.title,
@@ -2273,7 +2295,7 @@
     const sizeBadge = document.getElementById('exportSizeBadge');
 
     if (previewInput) previewInput.value = output;
-    if (fileLabel) fileLabel.textContent = `Файл: exports/${filename}`;
+    if (fileLabel) fileLabel.textContent = `exports/${filename}`;
     if (sizeBadge) {
       const kb = (new Blob([output]).size / 1024).toFixed(1);
       const lineCount = output.split('\n').length;
@@ -2290,6 +2312,7 @@
           content,
         }),
       });
+      loadFiles(state.currentFilesPath);
       return `exports/${filename}`;
     } catch {
       return null;
@@ -2384,10 +2407,11 @@
       // ignore if WebView blocks blob download
     }
 
+    await copyExportedChat();
     if (savedWorkspacePath) {
-      showToast(`✅ Сохранено в рабочую папку: 📁 Файлы → ${savedWorkspacePath}`);
+      showToast(`✅ Сохранено в 📁 Файлы → ${savedWorkspacePath} (и скопировано в буфер!)`);
     } else {
-      showToast('💾 Файл подготовлен для сохранения');
+      showToast('💾 Экспорт скопирован в буфер обмена!');
     }
   }
 
@@ -2414,6 +2438,7 @@
   window.appUI = {
     openTab,
     openModelModal,
+    openModal,
     closeModal,
     openNewChatModal,
     onNewChatCharacterChange,

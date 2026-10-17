@@ -611,8 +611,8 @@
         <div class="modal-body">
           <label class="field-label">Формат экспорта</label>
           <div class="effort-selector" id="exportFormatGroup">
-            <button type="button" class="effort-btn active" data-format="markdown" onclick="window.appUI.setExportFormat('markdown')">📄 Markdown (.md)</button>
-            <button type="button" class="effort-btn" data-format="json" onclick="window.appUI.setExportFormat('json')">📦 JSON (.json)</button>
+            <button type="button" id="exportFmtMdBtn" class="effort-btn active" data-format="markdown" onclick="window.appUI.setExportFormat('markdown')">📄 Markdown (.md)</button>
+            <button type="button" id="exportFmtJsonBtn" class="effort-btn" data-format="json" onclick="window.appUI.setExportFormat('json')">📦 JSON (.json)</button>
           </div>
 
           <div class="export-options-grid" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--text-secondary);">
