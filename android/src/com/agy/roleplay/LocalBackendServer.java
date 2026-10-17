@@ -95,15 +95,77 @@ public class LocalBackendServer {
     private volatile String pendingOAuthState = "";
 
     private static class GenerationProgress {
-        String status = "running";
-        String statusText = "🚀 Запрос к AGY...";
-        String thoughts = "";
-        String text = "";
-        String modelId = "";
-        String effort = "";
+        volatile String status = "running";
+        volatile String phase = "init";
+        volatile String statusText = "🚀 Подготовка запроса к AGY...";
+        volatile String thoughts = "";
+        volatile String text = "";
+        volatile String modelId = "";
+        volatile String vertexModel = "";
+        volatile String effort = "";
+        volatile String thinkingConfigSummary = "";
+        volatile String projectId = "";
+        volatile String endpoint = "";
+        volatile int httpStatus = 0;
+        volatile int chunksCount = 0;
+        volatile int thoughtsChars = 0;
+        volatile int textChars = 0;
+        volatile int contextMessagesCount = 0;
+        volatile int promptChars = 0;
+        volatile String finishReason = "";
+        volatile String error = "";
+        final long startedAtMs = System.currentTimeMillis();
+        volatile long finishedAtMs = 0L;
+        final List<String> logs = Collections.synchronizedList(new ArrayList<String>());
+
+        void addLog(String message) {
+            long elapsed = System.currentTimeMillis() - startedAtMs;
+            long secs = elapsed / 1000L;
+            long tenths = (elapsed % 1000L) / 100L;
+            String ts = String.format(Locale.US, "[%02d:%02d.%d]", secs / 60L, secs % 60L, tenths);
+            logs.add(ts + " " + message);
+        }
+
+        long getElapsedMs() {
+            long end = finishedAtMs > 0L ? finishedAtMs : System.currentTimeMillis();
+            return Math.max(0L, end - startedAtMs);
+        }
+
+        JSONObject toJson() throws Exception {
+            JSONObject g = new JSONObject();
+            g.put("status", status);
+            g.put("phase", phase);
+            g.put("statusText", statusText);
+            g.put("thoughts", thoughts);
+            g.put("text", text);
+            g.put("modelId", modelId);
+            g.put("vertexModel", vertexModel);
+            g.put("effort", effort);
+            g.put("thinkingConfigSummary", thinkingConfigSummary);
+            g.put("projectId", projectId);
+            g.put("endpoint", endpoint);
+            g.put("httpStatus", httpStatus);
+            g.put("chunksCount", chunksCount);
+            g.put("thoughtsChars", thoughtsChars);
+            g.put("textChars", textChars);
+            g.put("contextMessagesCount", contextMessagesCount);
+            g.put("promptChars", promptChars);
+            g.put("finishReason", finishReason);
+            g.put("error", error);
+            g.put("elapsedMs", getElapsedMs());
+            JSONArray logsArr = new JSONArray();
+            synchronized (logs) {
+                for (String line : logs) {
+                    logsArr.put(line);
+                }
+            }
+            g.put("logs", logsArr);
+            return g;
+        }
     }
 
     private final Map<Integer, GenerationProgress> activeGenerations = new ConcurrentHashMap<>();
+    private final Map<Integer, GenerationProgress> lastGenerations = new ConcurrentHashMap<>();
 
     public LocalBackendServer(Context context, WebView webView) {
         this.context = context.getApplicationContext();
@@ -638,8 +700,20 @@ public class LocalBackendServer {
             }
             if (method.equals("POST")) {
                 if (body.has("projectId")) setSetting("project_id", body.optString("projectId").trim());
-                if (body.has("selectedModel")) setSetting("selected_model", normalizeBaseModelId(body.optString("selectedModel").trim()));
-                if (body.has("selectedEffort")) setSetting("selected_effort", body.optString("selectedEffort").trim());
+                if (body.has("selectedModel")) {
+                    String normModel = normalizeBaseModelId(body.optString("selectedModel").trim());
+                    setSetting("selected_model", normModel);
+                    ContentValues mCv = new ContentValues();
+                    mCv.put("model_id", normModel);
+                    db.update("chats", mCv, null, null);
+                }
+                if (body.has("selectedEffort")) {
+                    String eff = body.optString("selectedEffort").trim();
+                    setSetting("selected_effort", eff);
+                    ContentValues eCv = new ContentValues();
+                    eCv.put("effort", eff);
+                    db.update("chats", eCv, null, null);
+                }
                 if (body.has("activePersonaId")) setSetting("active_persona_id", String.valueOf(body.optInt("activePersonaId", 1)));
                 if (body.has("contextMessagesLimit")) setSetting("context_messages_limit", String.valueOf(body.optInt("contextMessagesLimit", 30)));
                 if (body.has("googleAuthToken")) setSetting("google_auth_token", body.optString("googleAuthToken").trim());
@@ -852,8 +926,16 @@ public class LocalBackendServer {
                 }
                 if (method.equals("PATCH")) {
                     ContentValues cv = new ContentValues();
-                    if (body.has("modelId")) cv.put("model_id", normalizeBaseModelId(body.optString("modelId")));
-                    if (body.has("effort")) cv.put("effort", body.optString("effort"));
+                    if (body.has("modelId")) {
+                        String normModel = normalizeBaseModelId(body.optString("modelId"));
+                        cv.put("model_id", normModel);
+                        setSetting("selected_model", normModel);
+                    }
+                    if (body.has("effort")) {
+                        String eff = body.optString("effort");
+                        cv.put("effort", eff);
+                        setSetting("selected_effort", eff);
+                    }
                     if (body.has("personaId")) cv.put("persona_id", body.optInt("personaId"));
                     if (cv.size() > 0) {
                         db.update("chats", cv, "id = ?", new String[]{String.valueOf(chatId)});
@@ -869,17 +951,13 @@ public class LocalBackendServer {
                 }
             } else if (parts.length == 2 && parts[1].equals("generation") && method.equals("GET")) {
                 GenerationProgress prog = activeGenerations.get(chatId);
+                GenerationProgress lastProg = lastGenerations.get(chatId);
                 JSONObject res = new JSONObject();
                 res.put("active", prog != null);
                 if (prog != null) {
-                    JSONObject g = new JSONObject();
-                    g.put("status", prog.status);
-                    g.put("statusText", prog.statusText);
-                    g.put("thoughts", prog.thoughts);
-                    g.put("text", prog.text);
-                    g.put("modelId", prog.modelId);
-                    g.put("effort", prog.effort);
-                    res.put("generation", g);
+                    res.put("generation", prog.toJson());
+                } else if (lastProg != null) {
+                    res.put("lastGeneration", lastProg.toJson());
                 }
                 return res;
             } else if (parts.length == 2 && parts[1].equals("messages") && method.equals("POST")) {
@@ -1329,16 +1407,35 @@ public class LocalBackendServer {
 
         GenerationProgress prog = new GenerationProgress();
         prog.modelId = baseModel;
+        prog.vertexModel = resolveExactVertexModelId(baseModel);
         prog.effort = effort;
-        prog.statusText = "🚀 AGY (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ") отправляет запрос...";
+        prog.projectId = projectId;
+        prog.phase = "context";
+        prog.statusText = "📋 Сборка контекста (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ")...";
+        prog.addLog("Старт запроса (строгий режим без смены модели): " + baseModel + " • Effort: " + effort.toUpperCase(Locale.ROOT));
         activeGenerations.put(chatId, prog);
+        lastGenerations.put(chatId, prog);
 
         String[] result;
         try {
             result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, history, chat.optString("memory_file_path", ""), prog);
+            prog.status = "completed";
+            prog.phase = "completed";
+            prog.finishedAtMs = System.currentTimeMillis();
+            prog.statusText = "✅ Ответ получен от " + baseModel + " (" + prog.textChars + " симв.)";
+            prog.addLog("✅ Генерация успешно завершена за " + String.format(Locale.US, "%.1f", prog.getElapsedMs() / 1000.0) + " сек");
         } catch (Exception e) {
+            String errMsg = e.getMessage() != null ? e.getMessage() : "Ошибка обращения к AGY";
+            prog.status = "error";
+            prog.phase = "error";
+            prog.error = errMsg;
+            prog.finishedAtMs = System.currentTimeMillis();
+            prog.statusText = "❌ Ошибка (" + baseModel + "): " + errMsg;
+            prog.addLog("❌ Завершено с ошибкой: " + errMsg);
             db.delete("messages", "id = ?", new String[]{String.valueOf(userMsgId)});
-            return errorJson(401, e.getMessage() != null ? e.getMessage() : "Ошибка обращения к AGY");
+            JSONObject errRes = errorJson(401, errMsg);
+            errRes.put("generation", prog.toJson());
+            return errRes;
         } finally {
             activeGenerations.remove(chatId);
         }
@@ -1360,6 +1457,7 @@ public class LocalBackendServer {
         JSONObject res = new JSONObject();
         res.put("assistantMessage", getMessageByIdJson(aiMsgId));
         res.put("messages", getChatMessagesArray(chatId));
+        res.put("generation", prog.toJson());
         return res;
     }
 
@@ -1405,15 +1503,34 @@ public class LocalBackendServer {
 
             GenerationProgress prog = new GenerationProgress();
             prog.modelId = baseModel;
+            prog.vertexModel = resolveExactVertexModelId(baseModel);
             prog.effort = effort;
-            prog.statusText = "🔄 AGY генерирует новый вариант (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ")...";
+            prog.projectId = projectId;
+            prog.phase = "context";
+            prog.statusText = "🔄 Перегенерация (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ")...";
+            prog.addLog("Старт перегенерации (строгий режим без смены модели): " + baseModel + " • Effort: " + effort.toUpperCase(Locale.ROOT));
             activeGenerations.put(chatId, prog);
+            lastGenerations.put(chatId, prog);
 
             String[] result;
             try {
                 result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, historyBefore, chat.optString("memory_file_path", ""), prog);
+                prog.status = "completed";
+                prog.phase = "completed";
+                prog.finishedAtMs = System.currentTimeMillis();
+                prog.statusText = "✅ Новый вариант получен от " + baseModel + " (" + prog.textChars + " симв.)";
+                prog.addLog("✅ Перегенерация успешно завершена за " + String.format(Locale.US, "%.1f", prog.getElapsedMs() / 1000.0) + " сек");
             } catch (Exception e) {
-                return errorJson(401, e.getMessage() != null ? e.getMessage() : "Ошибка обращения к AGY");
+                String errMsg = e.getMessage() != null ? e.getMessage() : "Ошибка обращения к AGY";
+                prog.status = "error";
+                prog.phase = "error";
+                prog.error = errMsg;
+                prog.finishedAtMs = System.currentTimeMillis();
+                prog.statusText = "❌ Ошибка (" + baseModel + "): " + errMsg;
+                prog.addLog("❌ Завершено с ошибкой: " + errMsg);
+                JSONObject errRes = errorJson(401, errMsg);
+                errRes.put("generation", prog.toJson());
+                return errRes;
             } finally {
                 activeGenerations.remove(chatId);
             }
@@ -1432,6 +1549,7 @@ public class LocalBackendServer {
 
             JSONObject res = new JSONObject();
             res.put("message", getMessageByIdJson(msgId));
+            res.put("generation", prog.toJson());
             return res;
         }
 
@@ -1796,67 +1914,12 @@ public class LocalBackendServer {
         }
     }
 
-    private List<String> getVertexGeminiModelCandidates(String baseModel) {
+    private String resolveExactVertexModelId(String baseModel) {
         String base = normalizeBaseModelId(baseModel);
-        List<String> list = new ArrayList<>();
-        if (base.equals("gemini-4-argon")) {
-            list.add("gemini-4-argon");
-            list.add("gemini-3.1-pro-preview");
-            list.add("gemini-2.5-pro");
-        } else if (base.equals("gemini-3.8-flash")) {
-            list.add("gemini-3.8-flash");
-            list.add("gemini-3.7-flash");
-            list.add("gemini-2.5-flash");
-        } else if (base.equals("gemini-3.7-flash")) {
-            list.add("gemini-3.7-flash");
-            list.add("gemini-3.8-flash");
-            list.add("gemini-2.5-flash");
-        } else if (base.equals("gemini-3.6-flash")) {
-            list.add("gemini-3.6-flash");
-            list.add("gemini-3.7-flash");
-            list.add("gemini-2.5-flash");
-        } else if (base.equals("gemini-3.5-flash-lite")) {
-            list.add("gemini-3.5-flash-lite");
-            list.add("gemini-3.6-flash");
-            list.add("gemini-2.5-flash");
-        } else if (base.equals("gemini-3.1-pro")) {
-            list.add("gemini-3.1-pro-preview");
-            list.add("gemini-4-argon");
-            list.add("gemini-2.5-pro");
-        } else {
-            list.add(base);
+        if ("gemini-3.1-pro".equals(base)) {
+            return "gemini-3.1-pro-preview";
         }
-        return list;
-    }
-
-    private List<String> getGatewayModelCandidates(String baseModel, String effort) {
-        String base = normalizeBaseModelId(baseModel);
-        String eff = (effort != null ? effort.toLowerCase(Locale.ROOT) : "high");
-        String cliModel = resolveCliModelId(base, eff);
-
-        List<String> list = new ArrayList<>();
-        list.add(cliModel);
-
-        if (base.equals("gemini-4-argon")) {
-            list.add(eff.equals("low") ? "gemini-3-pro-low" : "gemini-3-pro-high");
-            list.add("gemini-3.1-pro-high");
-            list.add("gemini-2.5-pro");
-        } else if (base.equals("claude-opus-5-5")) {
-            list.add("claude-opus-4-6-thinking");
-            list.add("claude-opus-4-5-thinking");
-        } else if (base.equals("claude-sonnet-5-5")) {
-            list.add("claude-sonnet-4-6");
-            list.add("claude-sonnet-4-5-thinking");
-            list.add("claude-sonnet-4-5");
-        } else if (base.contains("flash")) {
-            list.add("gemini-3-flash");
-            list.add("gemini-2.5-flash");
-        } else if (base.equals("gemini-3.1-pro")) {
-            list.add("gemini-3.1-pro-high");
-            list.add("gemini-3-pro-high");
-            list.add("gemini-2.5-pro");
-        }
-        return list;
+        return base;
     }
 
     private String resolveThinkingLevel(String effort) {
@@ -1870,6 +1933,46 @@ public class LocalBackendServer {
         if ("medium".equalsIgnoreCase(effort)) return 4096;
         if ("max".equalsIgnoreCase(effort)) return 16384;
         return 8192;
+    }
+
+    private String extractReadableApiError(String rawBody) {
+        if (rawBody == null || rawBody.trim().isEmpty()) {
+            return "Пустой ответ от сервера";
+        }
+        String trimmed = rawBody.trim();
+        try {
+            if (trimmed.startsWith("[")) {
+                JSONArray arr = new JSONArray(trimmed);
+                if (arr.length() > 0) {
+                    JSONObject first = arr.optJSONObject(0);
+                    if (first != null && first.has("error")) {
+                        JSONObject err = first.getJSONObject("error");
+                        String status = err.optString("status", "");
+                        String msg = err.optString("message", "");
+                        if (!msg.isEmpty()) {
+                            return (!status.isEmpty() ? ("[" + status + "] ") : "") + msg;
+                        }
+                    }
+                }
+            } else if (trimmed.startsWith("{")) {
+                JSONObject obj = new JSONObject(trimmed);
+                if (obj.has("error")) {
+                    Object errObj = obj.get("error");
+                    if (errObj instanceof JSONObject) {
+                        JSONObject err = (JSONObject) errObj;
+                        String status = err.optString("status", err.optString("type", ""));
+                        String msg = err.optString("message", "");
+                        if (!msg.isEmpty()) {
+                            return (!status.isEmpty() ? ("[" + status + "] ") : "") + msg;
+                        }
+                    } else if (errObj instanceof String) {
+                        return (String) errObj;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return trimmed.length() > 350 ? (trimmed.substring(0, 350) + "...") : trimmed;
     }
 
     private String[] generateRoleplayReply(
@@ -1916,6 +2019,7 @@ public class LocalBackendServer {
         int startIdx = Math.max(0, history.length() - limit);
 
         JSONArray contents = new JSONArray();
+        int historyChars = 0;
         for (int i = startIdx; i < history.length(); i++) {
             JSONObject m = history.optJSONObject(i);
             if (m == null) continue;
@@ -1931,6 +2035,8 @@ public class LocalBackendServer {
                     .append(msgText).append("\n\n");
                 continue;
             }
+
+            historyChars += msgText.length();
 
             if (contents.length() > 0) {
                 JSONObject prev = contents.getJSONObject(contents.length() - 1);
@@ -1958,6 +2064,12 @@ public class LocalBackendServer {
         }
 
         String systemInstructionText = sysBuilder.toString().trim();
+        prog.contextMessagesCount = contents.length();
+        prog.promptChars = systemInstructionText.length() + historyChars;
+        prog.addLog("Контекст подготовлен: системный промпт=" + systemInstructionText.length()
+            + " симв. (GEMINI.md=" + geminiRules.length() + ", перс=" + charFileContent.length()
+            + "), история=" + contents.length() + " ходов (" + historyChars + " симв., лимит=" + limit + ")");
+
         return callAntigravityGateway(projectId, baseModel, effort, systemInstructionText, contents, prog);
     }
 
@@ -1969,273 +2081,352 @@ public class LocalBackendServer {
         JSONArray contents,
         GenerationProgress prog
     ) throws Exception {
-        String accessToken = getValidAgyAccessToken();
         String normBase = normalizeBaseModelId(baseModel);
+        String vertexModel = resolveExactVertexModelId(normBase);
+        prog.modelId = normBase;
+        prog.vertexModel = vertexModel;
 
-        List<String> projectsToTry = new ArrayList<>();
-        String cleanProj = projectId != null ? projectId.trim() : "";
-        if (!cleanProj.isEmpty()) {
-            projectsToTry.add(cleanProj);
+        prog.phase = "auth";
+        prog.statusText = "🔑 Проверка OAuth-токена AGY (" + normBase + ")...";
+        prog.addLog("Проверка авторизации Google Antigravity OAuth...");
+        String accessToken = getValidAgyAccessToken();
+        String userEmail = getSetting("agy_user_email", "");
+        prog.addLog("OAuth-токен активен" + (!userEmail.isEmpty() ? (" (" + userEmail + ")") : ""));
+
+        String proj = projectId != null ? projectId.trim() : "";
+        if (proj.isEmpty()) {
+            proj = getSetting("agy_discovered_project", "").trim();
         }
-        String discoveredProj = getSetting("agy_discovered_project", "").trim();
-        if (!discoveredProj.isEmpty() && !projectsToTry.contains(discoveredProj)) {
-            projectsToTry.add(discoveredProj);
+        if (proj.isEmpty()) {
+            proj = "project-4c7a8e8a-764a-42bc-bdf";
         }
-        if (projectsToTry.isEmpty()) {
-            projectsToTry.add("project-4c7a8e8a-764a-42bc-bdf");
-        }
+        prog.projectId = proj;
 
         int thinkingBudget = resolveThinkingBudget(effort);
         String thinkingLevel = resolveThinkingLevel(effort);
-        int maxOutputTokens = 8192;
 
-        String primaryError = "";
+        // STRICT SINGLE-MODEL EXECUTION: Never switch or fall back to any other model!
+        if (normBase.startsWith("claude-")) {
+            int maxOutputTokens = 8192;
+            prog.thinkingConfigSummary = "max_tokens=" + maxOutputTokens + ", temp=0.85";
+            String urlStr = AGY_VERTEX_ENDPOINT + "/v1/projects/" + proj + "/locations/global/publishers/anthropic/models/" + vertexModel + ":rawPredict";
+            prog.endpoint = urlStr;
+            prog.phase = "connecting";
+            prog.statusText = "☁️ Запрос к Vertex AI (" + normBase + " • " + effort.toUpperCase(Locale.ROOT) + ")...";
+            prog.addLog("POST " + urlStr);
 
-        // 1. Primary: Google Cloud Vertex AI (aiplatform.googleapis.com) — exact AGY CLI (authMethod=gcp) protocol
-        for (String proj : projectsToTry) {
-            if (normBase.startsWith("claude-")) {
-                String[] claudeCandidates = normBase.equals("claude-opus-5-5")
-                    ? new String[]{"claude-opus-5-5", "claude-opus-4-6@default", "claude-opus-4-5@20251101"}
-                    : new String[]{"claude-sonnet-5-5", "claude-sonnet-4-6@default", "claude-sonnet-4-5@20250929"};
+            JSONArray anthMessages = new JSONArray();
+            for (int i = 0; i < contents.length(); i++) {
+                JSONObject c = contents.getJSONObject(i);
+                String r = "model".equals(c.optString("role")) ? "assistant" : "user";
+                JSONArray pArr = c.optJSONArray("parts");
+                String txt = (pArr != null && pArr.length() > 0) ? pArr.getJSONObject(0).optString("text", "") : "";
+                JSONObject mObj = new JSONObject();
+                mObj.put("role", r);
+                mObj.put("content", txt);
+                anthMessages.put(mObj);
+            }
 
-                for (String anthModel : claudeCandidates) {
-                    prog.statusText = "☁️ AGY Vertex (" + anthModel + " • " + proj + ")...";
+            JSONObject anthReq = new JSONObject();
+            anthReq.put("anthropic_version", "vertex-2023-10-16");
+            anthReq.put("max_tokens", maxOutputTokens);
+            anthReq.put("temperature", 0.85);
+            if (!systemInstructionText.isEmpty()) {
+                anthReq.put("system", systemInstructionText);
+            }
+            anthReq.put("messages", anthMessages);
 
-                    JSONArray anthMessages = new JSONArray();
-                    for (int i = 0; i < contents.length(); i++) {
-                        JSONObject c = contents.getJSONObject(i);
-                        String r = "model".equals(c.optString("role")) ? "assistant" : "user";
-                        JSONArray pArr = c.optJSONArray("parts");
-                        String txt = (pArr != null && pArr.length() > 0) ? pArr.getJSONObject(0).optString("text", "") : "";
-                        JSONObject mObj = new JSONObject();
-                        mObj.put("role", r);
-                        mObj.put("content", txt);
-                        anthMessages.put(mObj);
-                    }
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(25000);
+            conn.setReadTimeout(180000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+            conn.setRequestProperty("x-goog-user-project", proj);
+            conn.setRequestProperty("User-Agent", AGY_USER_AGENT);
 
-                    JSONObject anthReq = new JSONObject();
-                    anthReq.put("anthropic_version", "vertex-2023-10-16");
-                    anthReq.put("max_tokens", maxOutputTokens);
-                    anthReq.put("temperature", 0.85);
-                    if (!systemInstructionText.isEmpty()) {
-                        anthReq.put("system", systemInstructionText);
-                    }
-                    anthReq.put("messages", anthMessages);
+            byte[] payload = anthReq.toString().getBytes(StandardCharsets.UTF_8);
+            prog.addLog("Отправка тела запроса (" + payload.length + " байт)...");
+            OutputStream os = conn.getOutputStream();
+            os.write(payload);
+            os.close();
 
-                    URL url = new URL(AGY_VERTEX_ENDPOINT + "/v1/projects/" + proj + "/locations/global/publishers/anthropic/models/" + anthModel + ":rawPredict");
-                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                    conn.setRequestMethod("POST");
-                    conn.setConnectTimeout(20000);
-                    conn.setReadTimeout(90000);
-                    conn.setDoOutput(true);
-                    conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-                    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-                    conn.setRequestProperty("x-goog-user-project", proj);
-                    conn.setRequestProperty("User-Agent", AGY_USER_AGENT);
+            int code = conn.getResponseCode();
+            prog.httpStatus = code;
+            String respBody = readHttpBody(conn);
 
-                    OutputStream os = conn.getOutputStream();
-                    os.write(anthReq.toString().getBytes(StandardCharsets.UTF_8));
-                    os.close();
-
-                    int code = conn.getResponseCode();
-                    String respBody = readHttpBody(conn);
-
-                    if (code >= 200 && code < 300) {
-                        JSONObject root = new JSONObject(respBody);
-                        JSONArray contentArr = root.optJSONArray("content");
-                        if (contentArr != null && contentArr.length() > 0) {
-                            StringBuilder reply = new StringBuilder();
-                            StringBuilder thoughts = new StringBuilder();
-                            for (int i = 0; i < contentArr.length(); i++) {
-                                JSONObject block = contentArr.getJSONObject(i);
-                                String bType = block.optString("type", "text");
-                                if ("thinking".equals(bType)) {
-                                    thoughts.append(block.optString("thinking", ""));
-                                } else if ("text".equals(bType)) {
-                                    reply.append(block.optString("text", ""));
-                                }
-                            }
-                            String finalReply = reply.toString().trim();
-                            if (!finalReply.isEmpty()) {
-                                return new String[]{finalReply, thoughts.toString().trim()};
-                            }
+            if (code >= 200 && code < 300) {
+                prog.addLog("HTTP " + code + " OK — разбор ответа от " + vertexModel);
+                JSONObject root = new JSONObject(respBody);
+                JSONArray contentArr = root.optJSONArray("content");
+                StringBuilder reply = new StringBuilder();
+                StringBuilder thoughts = new StringBuilder();
+                if (contentArr != null) {
+                    for (int i = 0; i < contentArr.length(); i++) {
+                        JSONObject block = contentArr.getJSONObject(i);
+                        String bType = block.optString("type", "text");
+                        if ("thinking".equals(bType)) {
+                            thoughts.append(block.optString("thinking", ""));
+                        } else if ("text".equals(bType)) {
+                            reply.append(block.optString("text", ""));
                         }
-                    } else if (code == 401) {
-                        throw new Exception("Сессия AGY истекла или токен недействителен (401). Перезайдите через кнопку «Войти через Google (AGY)» в Настройках.");
-                    } else if (primaryError.isEmpty()) {
-                        primaryError = "AGY Vertex HTTP " + code + " (" + anthModel + "): " + respBody;
                     }
                 }
+                prog.thoughts = thoughts.toString().trim();
+                prog.thoughtsChars = prog.thoughts.length();
+                prog.text = reply.toString().trim();
+                prog.textChars = prog.text.length();
+                prog.chunksCount = 1;
+                if (!prog.text.isEmpty()) {
+                    return new String[]{prog.text, prog.thoughts};
+                }
+                throw new Exception("Модель " + normBase + " вернула пустой ответ (HTTP " + code + "). Автоматическая смена модели отключена.");
+            } else if (code == 401) {
+                throw new Exception("Сессия AGY истекла или токен недействителен (HTTP 401). Перезайдите через кнопку «Войти через Google (AGY)» в Настройках.");
             } else {
-                List<String> vertexCandidates = getVertexGeminiModelCandidates(normBase);
-                for (String vertexModel : vertexCandidates) {
-                    prog.statusText = "☁️ AGY Vertex (" + vertexModel + " • " + proj + ")...";
+                String readableErr = extractReadableApiError(respBody);
+                prog.addLog("❌ HTTP " + code + " (" + vertexModel + "): " + readableErr);
+                throw new Exception("Ошибка модели " + normBase + " (HTTP " + code + "): " + readableErr);
+            }
+        }
 
-                    JSONObject vertexReq = new JSONObject();
-                    if (!systemInstructionText.isEmpty()) {
-                        JSONObject sysObj = new JSONObject();
-                        sysObj.put("role", "user");
-                        sysObj.put("parts", new JSONArray().put(new JSONObject().put("text", systemInstructionText)));
-                        vertexReq.put("systemInstruction", sysObj);
+        // Gemini models via real-time SSE streaming (:streamGenerateContent?alt=sse) on Vertex AI
+        int maxOutputTokens = 32768;
+        JSONObject vertexReq = new JSONObject();
+        if (!systemInstructionText.isEmpty()) {
+            JSONObject sysObj = new JSONObject();
+            sysObj.put("role", "user");
+            sysObj.put("parts", new JSONArray().put(new JSONObject().put("text", systemInstructionText)));
+            vertexReq.put("systemInstruction", sysObj);
+        }
+        vertexReq.put("contents", contents);
+
+        JSONObject genConfig = new JSONObject();
+        genConfig.put("maxOutputTokens", maxOutputTokens);
+        genConfig.put("temperature", 0.85);
+        genConfig.put("topP", 0.95);
+        JSONObject thinkingConfig = new JSONObject();
+        if (vertexModel.startsWith("gemini-4") || vertexModel.startsWith("gemini-3")) {
+            thinkingConfig.put("thinkingLevel", thinkingLevel);
+            prog.thinkingConfigSummary = "thinkingLevel=" + thinkingLevel + ", maxOutputTokens=" + maxOutputTokens;
+        } else {
+            thinkingConfig.put("thinkingBudget", thinkingBudget);
+            prog.thinkingConfigSummary = "thinkingBudget=" + thinkingBudget + ", maxOutputTokens=" + maxOutputTokens;
+        }
+        thinkingConfig.put("includeThoughts", true);
+        genConfig.put("thinkingConfig", thinkingConfig);
+        vertexReq.put("generationConfig", genConfig);
+
+        String urlStr = AGY_VERTEX_ENDPOINT + "/v1/projects/" + proj + "/locations/global/publishers/google/models/" + vertexModel + ":streamGenerateContent?alt=sse";
+        prog.endpoint = urlStr;
+        prog.phase = "connecting";
+        prog.statusText = "☁️ Подключение к " + normBase + " (" + effort.toUpperCase(Locale.ROOT) + ")...";
+        prog.addLog("POST " + urlStr);
+        prog.addLog("Параметры генерации: " + prog.thinkingConfigSummary + ", project=" + proj);
+
+        URL url = new URL(urlStr);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setConnectTimeout(25000);
+        conn.setReadTimeout(180000);
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+        conn.setRequestProperty("Accept", "text/event-stream");
+        conn.setRequestProperty("x-goog-user-project", proj);
+        conn.setRequestProperty("User-Agent", AGY_USER_AGENT);
+
+        byte[] payload = vertexReq.toString().getBytes(StandardCharsets.UTF_8);
+        prog.addLog("Отправка запроса (" + payload.length + " байт) к модели " + vertexModel + "...");
+        OutputStream os = conn.getOutputStream();
+        os.write(payload);
+        os.flush();
+        os.close();
+
+        prog.statusText = "⏳ Ожидание ответа HTTP от " + normBase + "...";
+        int code = conn.getResponseCode();
+        prog.httpStatus = code;
+
+        if (code < 200 || code >= 300) {
+            String errBody = readHttpBody(conn);
+            String readableErr = extractReadableApiError(errBody);
+            prog.addLog("❌ HTTP " + code + " от " + vertexModel + ": " + readableErr);
+            if (code == 401) {
+                throw new Exception("Сессия AGY истекла или токен недействителен (HTTP 401). Перезайдите через кнопку «Войти через Google (AGY)» в Настройках.");
+            }
+            throw new Exception("Ошибка модели " + normBase + " (HTTP " + code + "): " + readableErr);
+        }
+
+        prog.phase = "streaming";
+        prog.statusText = "📡 Поток открыт (HTTP " + code + "). Модель " + normBase + " обрабатывает контекст...";
+        prog.addLog("HTTP " + code + " OK — открыт SSE-поток, ожидание первого чанка от " + vertexModel + "...");
+
+        StringBuilder replyBuilder = new StringBuilder();
+        StringBuilder thoughtsBuilder = new StringBuilder();
+        StringBuilder rawFallbackBuilder = new StringBuilder();
+        String lastFinishReason = "";
+        String blockReason = "";
+        int promptTokens = 0;
+        int thoughtsTokens = 0;
+        int outputTokens = 0;
+        boolean loggedFirstThought = false;
+        boolean loggedFirstText = false;
+
+        InputStream is = conn.getInputStream();
+        BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+        String line;
+        while ((line = br.readLine()) != null) {
+            rawFallbackBuilder.append(line).append("\n");
+            String trimmedLine = line.trim();
+            if (!trimmedLine.startsWith("data:")) {
+                continue;
+            }
+            String dataJson = trimmedLine.substring(5).trim();
+            if (dataJson.isEmpty() || "[DONE]".equals(dataJson)) {
+                continue;
+            }
+            try {
+                JSONObject root = new JSONObject(dataJson);
+                JSONObject respObj = root.optJSONObject("response") != null ? root.getJSONObject("response") : root;
+
+                JSONObject pf = respObj.optJSONObject("promptFeedback");
+                if (pf != null) {
+                    String brReason = pf.optString("blockReason", "");
+                    if (!brReason.isEmpty()) {
+                        blockReason = brReason;
+                        prog.addLog("⚠️ promptFeedback.blockReason = " + blockReason);
                     }
-                    vertexReq.put("contents", contents);
+                }
 
-                    JSONObject genConfig = new JSONObject();
-                    genConfig.put("maxOutputTokens", maxOutputTokens);
-                    genConfig.put("temperature", 0.85);
-                    genConfig.put("topP", 0.95);
-                    JSONObject thinkingConfig = new JSONObject();
-                    if (vertexModel.startsWith("gemini-4") || vertexModel.startsWith("gemini-3")) {
-                        thinkingConfig.put("thinkingLevel", thinkingLevel);
-                    } else {
-                        thinkingConfig.put("thinkingBudget", thinkingBudget);
+                JSONObject usage = respObj.optJSONObject("usageMetadata");
+                if (usage != null) {
+                    promptTokens = usage.optInt("promptTokenCount", promptTokens);
+                    thoughtsTokens = usage.optInt("thoughtsTokenCount", thoughtsTokens);
+                    outputTokens = usage.optInt("candidatesTokenCount", outputTokens);
+                }
+
+                JSONArray candidates = respObj.optJSONArray("candidates");
+                if (candidates != null && candidates.length() > 0) {
+                    JSONObject c0 = candidates.getJSONObject(0);
+                    String fr = c0.optString("finishReason", "");
+                    if (!fr.isEmpty()) {
+                        lastFinishReason = fr;
+                        prog.finishReason = fr;
                     }
-                    thinkingConfig.put("includeThoughts", true);
-                    genConfig.put("thinkingConfig", thinkingConfig);
-                    vertexReq.put("generationConfig", genConfig);
+                    JSONObject cContent = c0.optJSONObject("content");
+                    if (cContent != null) {
+                        JSONArray cParts = cContent.optJSONArray("parts");
+                        if (cParts != null) {
+                            for (int i = 0; i < cParts.length(); i++) {
+                                JSONObject p = cParts.getJSONObject(i);
+                                boolean isThought = p.optBoolean("thought", false);
+                                String partText = p.optString("text", "");
+                                if (partText.isEmpty()) continue;
 
-                    URL url = new URL(AGY_VERTEX_ENDPOINT + "/v1/projects/" + proj + "/locations/global/publishers/google/models/" + vertexModel + ":generateContent");
-                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                    conn.setRequestMethod("POST");
-                    conn.setConnectTimeout(20000);
-                    conn.setReadTimeout(90000);
-                    conn.setDoOutput(true);
-                    conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-                    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-                    conn.setRequestProperty("x-goog-user-project", proj);
-                    conn.setRequestProperty("User-Agent", AGY_USER_AGENT);
-
-                    OutputStream os = conn.getOutputStream();
-                    os.write(vertexReq.toString().getBytes(StandardCharsets.UTF_8));
-                    os.close();
-
-                    int code = conn.getResponseCode();
-                    String respBody = readHttpBody(conn);
-
-                    if (code >= 200 && code < 300) {
-                        JSONObject root = new JSONObject(respBody);
-                        JSONObject respObj = root.optJSONObject("response") != null ? root.getJSONObject("response") : root;
-                        JSONArray candidates = respObj.optJSONArray("candidates");
-                        if (candidates != null && candidates.length() > 0) {
-                            JSONObject c0 = candidates.getJSONObject(0);
-                            JSONObject cContent = c0.optJSONObject("content");
-                            if (cContent != null) {
-                                JSONArray cParts = cContent.optJSONArray("parts");
-                                if (cParts != null) {
-                                    StringBuilder reply = new StringBuilder();
-                                    StringBuilder thoughts = new StringBuilder();
-                                    for (int i = 0; i < cParts.length(); i++) {
-                                        JSONObject p = cParts.getJSONObject(i);
-                                        if (p.optBoolean("thought", false)) {
-                                            thoughts.append(p.optString("text", ""));
-                                        } else {
-                                            reply.append(p.optString("text", ""));
-                                        }
+                                prog.chunksCount++;
+                                if (isThought) {
+                                    thoughtsBuilder.append(partText);
+                                    prog.thoughts = thoughtsBuilder.toString();
+                                    prog.thoughtsChars = prog.thoughts.length();
+                                    prog.phase = "thinking";
+                                    prog.statusText = "💭 " + normBase + " размышляет (" + prog.thoughtsChars + " симв., чанк #" + prog.chunksCount + ")...";
+                                    if (!loggedFirstThought) {
+                                        loggedFirstThought = true;
+                                        prog.addLog("💭 Чанк #" + prog.chunksCount + ": начато размышление модели (" + normBase + ")");
+                                    } else if (prog.chunksCount % 12 == 0) {
+                                        prog.addLog("💭 Чанк #" + prog.chunksCount + ": размышление продолжается (" + prog.thoughtsChars + " симв.)");
                                     }
-                                    String finalReply = reply.toString().trim();
-                                    if (!finalReply.isEmpty()) {
-                                        return new String[]{finalReply, thoughts.toString().trim()};
+                                } else {
+                                    replyBuilder.append(partText);
+                                    prog.text = replyBuilder.toString();
+                                    prog.textChars = prog.text.length();
+                                    prog.phase = "generating";
+                                    prog.statusText = "✍️ " + normBase + " пишет ответ (" + prog.textChars + " симв., чанк #" + prog.chunksCount + ")...";
+                                    if (!loggedFirstText) {
+                                        loggedFirstText = true;
+                                        prog.addLog("✍️ Чанк #" + prog.chunksCount + ": начата генерация текста ответа"
+                                            + (prog.thoughtsChars > 0 ? (" (после " + prog.thoughtsChars + " симв. мыслей)") : ""));
+                                    } else if (prog.chunksCount % 15 == 0) {
+                                        prog.addLog("✍️ Чанк #" + prog.chunksCount + ": генерация ответа (" + prog.textChars + " симв.)");
                                     }
                                 }
                             }
                         }
-                    } else if (code == 401) {
-                        throw new Exception("Сессия AGY истекла или токен недействителен (401). Перезайдите через кнопку «Войти через Google (AGY)» в Настройках.");
-                    } else if (primaryError.isEmpty()) {
-                        primaryError = "AGY Vertex HTTP " + code + " (" + vertexModel + "): " + respBody;
                     }
                 }
+            } catch (Exception parseEx) {
+                prog.addLog("⚠️ Ошибка парсинга SSE-чанка: " + parseEx.getMessage());
             }
         }
+        br.close();
 
-        // 2. Fallback: CloudCode PA Gateway (for accounts with CodeAssist subscription)
-        List<String> modelCandidates = getGatewayModelCandidates(baseModel, effort);
-        for (String endpoint : AGY_GATEWAY_ENDPOINTS) {
-            for (String proj : projectsToTry) {
-                for (String candidateModel : modelCandidates) {
-                    prog.statusText = "☁️ AGY (" + candidateModel + " • Project: " + proj + ")...";
-
-                    JSONObject innerReq = new JSONObject();
-                    if (!systemInstructionText.isEmpty()) {
-                        JSONObject sysObj = new JSONObject();
-                        sysObj.put("role", "user");
-                        sysObj.put("parts", new JSONArray().put(new JSONObject().put("text", systemInstructionText)));
-                        innerReq.put("systemInstruction", sysObj);
-                    }
-                    innerReq.put("contents", contents);
-
-                    JSONObject genConfig = new JSONObject();
-                    genConfig.put("maxOutputTokens", maxOutputTokens);
-                    genConfig.put("temperature", 0.85);
-                    genConfig.put("topP", 0.95);
-                    JSONObject thinkingConfig = new JSONObject();
-                    thinkingConfig.put("thinkingBudget", thinkingBudget);
-                    thinkingConfig.put("includeThoughts", true);
-                    genConfig.put("thinkingConfig", thinkingConfig);
-                    innerReq.put("generationConfig", genConfig);
-
-                    JSONObject envelope = new JSONObject();
-                    envelope.put("project", proj);
-                    envelope.put("model", candidateModel);
-                    envelope.put("userAgent", "antigravity");
-                    envelope.put("requestId", "req-" + UUID.randomUUID().toString());
-                    envelope.put("request", innerReq);
-
-                    URL url = new URL(endpoint + "/v1internal:generateContent");
-                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                    conn.setRequestMethod("POST");
-                    conn.setConnectTimeout(20000);
-                    conn.setReadTimeout(90000);
-                    conn.setDoOutput(true);
-                    conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-                    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-                    conn.setRequestProperty("User-Agent", AGY_USER_AGENT);
-                    conn.setRequestProperty("X-Goog-Api-Client", AGY_API_CLIENT_HEADER);
-                    conn.setRequestProperty("Client-Metadata", AGY_CLIENT_METADATA_HEADER);
-
-                    byte[] payload = envelope.toString().getBytes(StandardCharsets.UTF_8);
-                    OutputStream os = conn.getOutputStream();
-                    os.write(payload);
-                    os.close();
-
-                    int code = conn.getResponseCode();
-                    String respBody = readHttpBody(conn);
-
-                    if (code >= 200 && code < 300) {
-                        JSONObject root = new JSONObject(respBody);
-                        JSONObject respObj = root.optJSONObject("response") != null ? root.getJSONObject("response") : root;
-                        JSONArray candidates = respObj.optJSONArray("candidates");
-                        if (candidates != null && candidates.length() > 0) {
-                            JSONObject c0 = candidates.getJSONObject(0);
-                            JSONObject cContent = c0.optJSONObject("content");
-                            if (cContent != null) {
-                                JSONArray cParts = cContent.optJSONArray("parts");
-                                if (cParts != null) {
-                                    StringBuilder reply = new StringBuilder();
-                                    StringBuilder thoughts = new StringBuilder();
-                                    for (int i = 0; i < cParts.length(); i++) {
-                                        JSONObject p = cParts.getJSONObject(i);
-                                        if (p.optBoolean("thought", false)) {
-                                            thoughts.append(p.optString("text", ""));
-                                        } else {
-                                            reply.append(p.optString("text", ""));
-                                        }
-                                    }
-                                    String finalReply = reply.toString().trim();
-                                    if (!finalReply.isEmpty()) {
-                                        return new String[]{finalReply, thoughts.toString().trim()};
-                                    }
+        // Fallback if server returned non-SSE JSON body on HTTP 200
+        if (prog.chunksCount == 0 && rawFallbackBuilder.length() > 0) {
+            try {
+                String rawStr = rawFallbackBuilder.toString().trim();
+                JSONObject root = new JSONObject(rawStr);
+                JSONObject respObj = root.optJSONObject("response") != null ? root.getJSONObject("response") : root;
+                JSONArray candidates = respObj.optJSONArray("candidates");
+                if (candidates != null && candidates.length() > 0) {
+                    JSONObject c0 = candidates.getJSONObject(0);
+                    lastFinishReason = c0.optString("finishReason", lastFinishReason);
+                    prog.finishReason = lastFinishReason;
+                    JSONObject cContent = c0.optJSONObject("content");
+                    if (cContent != null) {
+                        JSONArray cParts = cContent.optJSONArray("parts");
+                        if (cParts != null) {
+                            for (int i = 0; i < cParts.length(); i++) {
+                                JSONObject p = cParts.getJSONObject(i);
+                                if (p.optBoolean("thought", false)) {
+                                    thoughtsBuilder.append(p.optString("text", ""));
+                                } else {
+                                    replyBuilder.append(p.optString("text", ""));
                                 }
                             }
+                            prog.thoughts = thoughtsBuilder.toString();
+                            prog.thoughtsChars = prog.thoughts.length();
+                            prog.text = replyBuilder.toString();
+                            prog.textChars = prog.text.length();
+                            prog.chunksCount = 1;
                         }
-                    } else if (primaryError.isEmpty()) {
-                        primaryError = "AGY HTTP " + code + " (" + candidateModel + "): " + respBody;
                     }
                 }
+            } catch (Exception ignored) {
             }
         }
 
-        throw new Exception(!primaryError.isEmpty() ? primaryError : "Не удалось получить ответ от AGY");
+        String finalReply = replyBuilder.toString().trim();
+        String finalThoughts = thoughtsBuilder.toString().trim();
+        prog.thoughts = finalThoughts;
+        prog.thoughtsChars = finalThoughts.length();
+        prog.text = finalReply;
+        prog.textChars = finalReply.length();
+
+        String tokenStats = (promptTokens > 0 || thoughtsTokens > 0 || outputTokens > 0)
+            ? (", токены: вход=" + promptTokens + ", мысли=" + thoughtsTokens + ", ответ=" + outputTokens)
+            : "";
+        prog.addLog("Поток завершён: чанков=" + prog.chunksCount
+            + ", finishReason=" + (lastFinishReason.isEmpty() ? "STOP" : lastFinishReason)
+            + ", ответ=" + finalReply.length() + " симв., мысли=" + finalThoughts.length() + " симв." + tokenStats);
+
+        if (!finalReply.isEmpty()) {
+            return new String[]{finalReply, finalThoughts};
+        }
+
+        if (!blockReason.isEmpty() || ("SAFETY".equals(lastFinishReason) || "PROHIBITED_CONTENT".equals(lastFinishReason) || "BLOCKLIST".equals(lastFinishReason))) {
+            String reason = !blockReason.isEmpty() ? blockReason : lastFinishReason;
+            throw new Exception("Модель " + normBase + " заблокировала генерацию ответа (причина: " + reason + "). Измените формулировку или проверьте последние сообщения. Автоматическая смена модели отключена.");
+        }
+
+        if ("MAX_TOKENS".equals(lastFinishReason) && !finalThoughts.isEmpty()) {
+            throw new Exception("Модель " + normBase + " потратила лимит вывода на размышления (" + finalThoughts.length() + " симв. мыслей, finishReason: MAX_TOKENS). Попробуйте уменьшить Effort (например, на Medium или Low).");
+        }
+
+        throw new Exception("Модель " + normBase + " вернула пустой текстовый ответ (HTTP " + code
+            + ", finishReason=" + (lastFinishReason.isEmpty() ? "NONE" : lastFinishReason)
+            + ", мыслей=" + finalThoughts.length() + " симв.). Автоматическая смена модели отключена.");
     }
 
     private String readHttpBody(HttpURLConnection conn) {
@@ -2361,8 +2552,8 @@ public class LocalBackendServer {
             try {
                 JSONObject fallback = new JSONObject();
                 fallback.put("appName", "AGY Roleplay Studio");
-                fallback.put("version", "1.3.0");
-                fallback.put("build", 4);
+                fallback.put("version", "1.3.2");
+                fallback.put("build", 6);
                 fallback.put("gitRepo", "Kuka001/111");
                 fallback.put("gitBranch", "main");
                 fallback.put("apkPath", "agy-roleplay-android16.apk");
@@ -2444,10 +2635,16 @@ public class LocalBackendServer {
         gitBranch = gitBranch.trim();
 
         boolean otaActive = "1".equals(getSetting("ota_active", "0"));
-        String currentVersion = getSetting("installed_version", localManifest.optString("version", "1.3.0"));
-        int currentBuild = Integer.parseInt(getSetting("installed_build", String.valueOf(localManifest.optInt("build", 4))));
-        String bundledVersion = bundledManifest.optString("version", "1.3.0");
-        int bundledBuild = bundledManifest.optInt("build", 4);
+        String bundledVersion = bundledManifest.optString("version", "1.3.2");
+        int bundledBuild = bundledManifest.optInt("build", 6);
+        String currentVersion = getSetting("installed_version", localManifest.optString("version", bundledVersion));
+        int currentBuild = Integer.parseInt(getSetting("installed_build", String.valueOf(localManifest.optInt("build", bundledBuild))));
+        if (!otaActive || bundledBuild > currentBuild) {
+            currentVersion = bundledVersion;
+            currentBuild = bundledBuild;
+            setSetting("installed_version", currentVersion);
+            setSetting("installed_build", String.valueOf(currentBuild));
+        }
         String installedCommit = getSetting("installed_commit", "");
 
         String latestVersion = currentVersion;

@@ -77,14 +77,79 @@
           <!-- Messages Scroll Area -->
           <div id="chatMessagesContainer" class="chat-messages"></div>
 
-          <!-- Live Streaming / Thinking Status Banner -->
+          <!-- Live Streaming / Thinking Status Banner (Compact + Expandable Detailed Window) -->
           <div id="chatStreamingBox" class="streaming-box hidden">
-            <div class="streaming-header">
-              <span class="spinner-mini"></span>
-              <span id="streamingStatusText">Персонаж обдумывает ответ...</span>
+            <div class="streaming-header" onclick="window.appUI.toggleStreamingDetails()">
+              <div class="streaming-header-left">
+                <span id="streamingSpinner" class="spinner-mini"></span>
+                <span id="streamingStatusText">Персонаж обдумывает ответ...</span>
+              </div>
+              <div class="streaming-header-right">
+                <span id="streamingElapsedBadge" class="streaming-elapsed-badge">0.0с</span>
+                <button type="button" id="streamingExpandBtn" class="streaming-toggle-btn" onclick="event.stopPropagation(); window.appUI.toggleStreamingDetails()">⤢ Подробнее</button>
+                <button type="button" id="streamingCloseBtn" class="streaming-close-btn hidden" onclick="event.stopPropagation(); window.appUI.closeStreamingBox()" title="Скрыть статус">✕</button>
+              </div>
             </div>
-            <div id="streamingThoughtsPreview" class="streaming-thoughts hidden"></div>
-            <div id="streamingTextPreview" class="streaming-text"></div>
+
+            <!-- Compact Previews (shown when collapsed) -->
+            <div id="streamingCompactBody">
+              <div id="streamingThoughtsPreview" class="streaming-thoughts hidden"></div>
+              <div id="streamingTextPreview" class="streaming-text"></div>
+            </div>
+
+            <!-- Expanded Detailed View (shown when expanded) -->
+            <div id="streamingDetailsPanel" class="streaming-details-panel hidden">
+              <div class="streaming-meta-grid">
+                <div class="streaming-meta-item">
+                  <span class="meta-label">Модель (фиксирована)</span>
+                  <span class="meta-val" id="streamMetaModel">—</span>
+                </div>
+                <div class="streaming-meta-item">
+                  <span class="meta-label">Текущий этап</span>
+                  <span class="meta-val" id="streamMetaPhase">—</span>
+                </div>
+                <div class="streaming-meta-item">
+                  <span class="meta-label">HTTP / Поток SSE</span>
+                  <span class="meta-val" id="streamMetaHttp">—</span>
+                </div>
+                <div class="streaming-meta-item">
+                  <span class="meta-label">Контекст запроса</span>
+                  <span class="meta-val" id="streamMetaContext">—</span>
+                </div>
+                <div class="streaming-meta-item streaming-meta-wide">
+                  <span class="meta-label">Параметры генерации</span>
+                  <span class="meta-val" id="streamMetaConfig">—</span>
+                </div>
+                <div class="streaming-meta-item streaming-meta-wide">
+                  <span class="meta-label">Шлюз AGY / Endpoint</span>
+                  <span class="meta-val meta-mono" id="streamMetaEndpoint">—</span>
+                </div>
+              </div>
+
+              <div class="streaming-detail-section">
+                <div class="streaming-detail-title">
+                  <span>📋 Пошаговый журнал выполнения</span>
+                  <span id="streamLogsCountBadge" class="streaming-count-pill">0 шагов</span>
+                </div>
+                <div id="streamingLogsList" class="streaming-logs-console"></div>
+              </div>
+
+              <div id="streamingThoughtsFullWrap" class="streaming-detail-section hidden">
+                <div class="streaming-detail-title">
+                  <span>💭 Мысли модели (Thinking)</span>
+                  <span id="streamThoughtsCounter" class="streaming-count-pill">0 симв.</span>
+                </div>
+                <div id="streamingThoughtsFull" class="streaming-full-box thoughts-box"></div>
+              </div>
+
+              <div id="streamingTextFullWrap" class="streaming-detail-section hidden">
+                <div class="streaming-detail-title">
+                  <span>✍️ Генерируемый ответ</span>
+                  <span id="streamTextCounter" class="streaming-count-pill">0 симв.</span>
+                </div>
+                <div id="streamingTextFull" class="streaming-full-box text-box"></div>
+              </div>
+            </div>
           </div>
 
           <!-- Chat Input Bar -->

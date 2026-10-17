@@ -32,7 +32,10 @@
       if (status >= 200 && status < 300) {
         entry.resolve(data);
       } else {
-        entry.reject(new Error(data.error || `Ошибка встроенного сервера (${status})`));
+        const err = new Error(data.error || `Ошибка встроенного сервера (${status})`);
+        err.data = data;
+        err.status = status;
+        entry.reject(err);
       }
     } catch (err) {
       entry.reject(err);
@@ -63,6 +66,10 @@
     currentChatData: null,
     currentFilesPath: '',
     pollTimer: null,
+    elapsedTimer: null,
+    generationStartMs: 0,
+    streamingExpanded: false,
+    lastGeneration: null,
     isSending: false,
   };
 
@@ -126,7 +133,10 @@
     const res = await fetch(url, Object.assign({}, options, { headers }));
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(data.error || `Ошибка сервера (${res.status})`);
+      const err = new Error(data.error || `Ошибка сервера (${res.status})`);
+      err.data = data;
+      err.status = res.status;
+      throw err;
     }
     return data;
   }
@@ -352,11 +362,19 @@
       const data = await apiFetch(`/api/chats/${chatId}`);
       state.currentChatId = chatId;
       state.currentChatData = data;
+      if (data.chat && data.chat.model_id) {
+        state.selectedModel = data.chat.model_id;
+      }
+      if (data.chat && data.chat.effort) {
+        state.selectedEffort = data.chat.effort;
+      }
 
       document.getElementById('chatsListView').classList.add('hidden');
       document.getElementById('chatRoomView').classList.remove('hidden');
 
       renderActiveChatRoom();
+      renderModelsLists();
+      updateEffortButtons();
       updateHeaderIndicators(true);
     } catch (err) {
       showToast(err.message);
@@ -364,7 +382,7 @@
   }
 
   function closeChatRoom() {
-    stopGenerationPolling();
+    stopGenerationPolling(true);
     state.currentChatId = null;
     state.currentChatData = null;
     document.getElementById('chatRoomView').classList.add('hidden');
@@ -444,44 +462,271 @@
     msgContainer.scrollTop = msgContainer.scrollHeight;
   }
 
-  function startGenerationPolling(chatId) {
-    stopGenerationPolling();
-    const box = document.getElementById('chatStreamingBox');
-    const statusText = document.getElementById('streamingStatusText');
-    const thoughtsBox = document.getElementById('streamingThoughtsPreview');
-    const textBox = document.getElementById('streamingTextPreview');
+  const PHASE_LABELS = {
+    init: '1/6 • Инициализация запроса',
+    context: '2/6 • Сборка контекста и промтов',
+    oauth_check: '3/6 • Проверка Google OAuth сессии',
+    oauth_refresh: '3/6 • Обновление токена доступа OAuth',
+    connecting: '4/6 • Подключение к Vertex AI (SSE)',
+    waiting_first_token: '5/6 • Ожидание первого токена от модели',
+    thinking: '5/6 • Глубокое размышление (Thinking)',
+    streaming_text: '6/6 • Потоковая генерация текста (SSE)',
+    completed: '✅ Завершено успешно',
+    error: '❌ Остановлено из-за ошибки',
+  };
 
-    box.classList.remove('hidden');
-    statusText.textContent = '🚀 Запуск AGY под капотом...';
-    thoughtsBox.classList.add('hidden');
-    thoughtsBox.textContent = '';
-    textBox.textContent = '';
+  function toggleStreamingDetails() {
+    state.streamingExpanded = !state.streamingExpanded;
+    const box = document.getElementById('chatStreamingBox');
+    const panel = document.getElementById('streamingDetailsPanel');
+    const expandBtn = document.getElementById('streamingExpandBtn');
+    if (box) box.classList.toggle('expanded', state.streamingExpanded);
+    if (panel) panel.classList.toggle('hidden', !state.streamingExpanded);
+    if (expandBtn) {
+      expandBtn.textContent = state.streamingExpanded ? '⤡ Свернуть' : '⤢ Подробнее';
+    }
+    if (state.streamingExpanded && state.lastGeneration) {
+      renderGenerationProgress(state.lastGeneration);
+    }
+  }
+
+  function closeStreamingBox() {
+    stopGenerationPolling(true);
+  }
+
+  function renderGenerationProgress(g) {
+    if (!g) return;
+    state.lastGeneration = g;
+
+    const box = document.getElementById('chatStreamingBox');
+    const spinner = document.getElementById('streamingSpinner');
+    const statusText = document.getElementById('streamingStatusText');
+    const elapsedBadge = document.getElementById('streamingElapsedBadge');
+    const closeBtn = document.getElementById('streamingCloseBtn');
+    const thoughtsPreview = document.getElementById('streamingThoughtsPreview');
+    const textPreview = document.getElementById('streamingTextPreview');
+
+    const isError = g.phase === 'error' || Boolean(g.error);
+    if (box) {
+      box.classList.remove('hidden');
+      box.classList.toggle('error-state', isError);
+      box.classList.toggle('expanded', state.streamingExpanded);
+    }
+    if (spinner) {
+      spinner.classList.toggle('hidden', isError || g.phase === 'completed');
+    }
+    if (closeBtn) {
+      closeBtn.classList.toggle('hidden', !isError && g.phase !== 'completed');
+    }
+    if (statusText) {
+      statusText.textContent = g.statusText || (isError ? `❌ ${g.error}` : 'Выполнение запроса...');
+    }
+    if (elapsedBadge && typeof g.elapsedMs === 'number') {
+      elapsedBadge.textContent = (g.elapsedMs / 1000).toFixed(1) + 'с';
+    }
+
+    // Compact previews
+    if (thoughtsPreview) {
+      if (g.thoughts) {
+        thoughtsPreview.classList.remove('hidden');
+        thoughtsPreview.textContent = `💭 [${g.thoughtsChars || g.thoughts.length} симв.] ` + g.thoughts.slice(-260);
+      } else {
+        thoughtsPreview.classList.add('hidden');
+        thoughtsPreview.textContent = '';
+      }
+    }
+    if (textPreview) {
+      if (isError && g.error) {
+        textPreview.textContent = g.error;
+      } else if (g.text) {
+        textPreview.textContent = g.text.slice(-340);
+      } else {
+        textPreview.textContent = '';
+      }
+    }
+
+    // Detailed Expanded Panel
+    const metaModel = document.getElementById('streamMetaModel');
+    const metaPhase = document.getElementById('streamMetaPhase');
+    const metaHttp = document.getElementById('streamMetaHttp');
+    const metaContext = document.getElementById('streamMetaContext');
+    const metaConfig = document.getElementById('streamMetaConfig');
+    const metaEndpoint = document.getElementById('streamMetaEndpoint');
+    const logsBadge = document.getElementById('streamLogsCountBadge');
+    const logsList = document.getElementById('streamingLogsList');
+    const thoughtsFullWrap = document.getElementById('streamingThoughtsFullWrap');
+    const thoughtsFull = document.getElementById('streamingThoughtsFull');
+    const thoughtsCounter = document.getElementById('streamThoughtsCounter');
+    const textFullWrap = document.getElementById('streamingTextFullWrap');
+    const textFull = document.getElementById('streamingTextFull');
+    const textCounter = document.getElementById('streamTextCounter');
+
+    const modelName = getShortModelName(g.model);
+    const vertexSuffix = g.vertexModel && g.vertexModel !== g.model ? ` → Vertex: ${g.vertexModel}` : '';
+    if (metaModel) {
+      metaModel.textContent = `${modelName} (${g.model || '—'}) • ${String(g.effort || 'high').toUpperCase()}${vertexSuffix}`;
+    }
+    if (metaPhase) {
+      const basePhase = PHASE_LABELS[g.phase] || g.phase || '—';
+      metaPhase.textContent = g.finishReason ? `${basePhase} (finishReason: ${g.finishReason})` : basePhase;
+    }
+    if (metaHttp) {
+      const httpStr = g.httpStatus ? `HTTP ${g.httpStatus}` : 'Ожидание ответа...';
+      metaHttp.textContent = `${httpStr} • SSE чанков: ${g.chunksCount || 0} • Мысли: ${g.thoughtsChars || 0} симв. • Текст: ${g.textChars || 0} симв.`;
+    }
+    if (metaContext) {
+      metaContext.textContent = `Сообщений в контексте: ${g.contextMessagesCount || 0} • Размер промта: ${g.promptChars || 0} симв.`;
+    }
+    if (metaConfig) {
+      metaConfig.textContent = `Без автосмены модели • ${g.thinkingConfig || '—'}`;
+    }
+    if (metaEndpoint) {
+      metaEndpoint.textContent = g.endpoint || `Project: ${g.projectId || state.projectId} (ожидание соединения...)`;
+    }
+
+    const logs = Array.isArray(g.logs) ? g.logs : [];
+    if (logsBadge) {
+      logsBadge.textContent = `${logs.length} ${logs.length === 1 ? 'шаг' : (logs.length >= 2 && logs.length <= 4 ? 'шага' : 'шагов')}`;
+    }
+    if (logsList) {
+      logsList.innerHTML = logs
+        .map(line => {
+          const isErrLine = line.includes('❌') || line.includes('ОШИБКА') || line.includes('ошибк');
+          const isOkLine = line.includes('✅');
+          const cls = isErrLine ? 'stream-log-line log-error' : (isOkLine ? 'stream-log-line log-ok' : 'stream-log-line');
+          return `<div class="${cls}">${escapeHtml(line)}</div>`;
+        })
+        .join('');
+      logsList.scrollTop = logsList.scrollHeight;
+    }
+
+    if (thoughtsFullWrap && thoughtsFull && thoughtsCounter) {
+      if (g.thoughts) {
+        thoughtsFullWrap.classList.remove('hidden');
+        thoughtsCounter.textContent = `${g.thoughtsChars || g.thoughts.length} симв.`;
+        thoughtsFull.textContent = g.thoughts;
+        thoughtsFull.scrollTop = thoughtsFull.scrollHeight;
+      } else {
+        thoughtsFullWrap.classList.add('hidden');
+        thoughtsFull.textContent = '';
+      }
+    }
+
+    if (textFullWrap && textFull && textCounter) {
+      if (g.text || (isError && g.error)) {
+        textFullWrap.classList.remove('hidden');
+        const contentToShow = g.text || g.error || '';
+        textCounter.textContent = `${g.textChars || contentToShow.length} симв.`;
+        textFull.textContent = contentToShow;
+        textFull.scrollTop = textFull.scrollHeight;
+      } else {
+        textFullWrap.classList.add('hidden');
+        textFull.textContent = '';
+      }
+    }
+  }
+
+  function startGenerationPolling(chatId) {
+    stopGenerationPolling(false);
+    state.generationStartMs = Date.now();
+    const activeModel = state.currentChatData && state.currentChatData.chat
+      ? state.currentChatData.chat.model_id
+      : state.selectedModel;
+    const activeEffort = state.currentChatData && state.currentChatData.chat
+      ? state.currentChatData.chat.effort
+      : state.selectedEffort;
+
+    const initialProg = {
+      phase: 'init',
+      statusText: `🚀 Отправка запроса строго к ${getShortModelName(activeModel)} (${String(activeEffort).toUpperCase()})...`,
+      model: activeModel,
+      vertexModel: '',
+      effort: activeEffort,
+      thinkingConfig: 'Подготовка параметров...',
+      projectId: state.projectId,
+      endpoint: 'Подготовка соединения с Google Cloud AI Companion...',
+      httpStatus: 0,
+      chunksCount: 0,
+      thoughtsChars: 0,
+      textChars: 0,
+      contextMessagesCount: (state.currentChatData && Array.isArray(state.currentChatData.messages)) ? state.currentChatData.messages.length : 0,
+      promptChars: 0,
+      finishReason: '',
+      error: '',
+      elapsedMs: 0,
+      thoughts: '',
+      text: '',
+      logs: [`[00:00.0] 🚀 Инициализация запроса к модели ${activeModel} (effort=${activeEffort})...`],
+    };
+    renderGenerationProgress(initialProg);
+
+    const detailsPanel = document.getElementById('streamingDetailsPanel');
+    const expandBtn = document.getElementById('streamingExpandBtn');
+    if (detailsPanel) detailsPanel.classList.toggle('hidden', !state.streamingExpanded);
+    if (expandBtn) expandBtn.textContent = state.streamingExpanded ? '⤡ Свернуть' : '⤢ Подробнее';
+
+    // Smooth local elapsed timer (ticks every 200ms even while waiting on network chunk)
+    state.elapsedTimer = setInterval(() => {
+      const elapsedBadge = document.getElementById('streamingElapsedBadge');
+      if (elapsedBadge && state.generationStartMs > 0) {
+        const sec = (Date.now() - state.generationStartMs) / 1000;
+        elapsedBadge.textContent = sec.toFixed(1) + 'с';
+      }
+    }, 200);
 
     state.pollTimer = setInterval(async () => {
       try {
         const data = await apiFetch(`/api/chats/${chatId}/generation`);
-        if (data.active && data.generation) {
-          const g = data.generation;
-          statusText.textContent = g.statusText || 'Персонаж обдумывает ответ...';
-          if (g.thoughts) {
-            thoughtsBox.classList.remove('hidden');
-            thoughtsBox.textContent = '💭 ' + g.thoughts.slice(-260);
-          }
-          if (g.text) {
-            textBox.textContent = g.text;
-          }
+        if (data.generation) {
+          renderGenerationProgress(data.generation);
         }
       } catch (e) {}
-    }, 650);
+    }, 400);
   }
 
-  function stopGenerationPolling() {
+  function stopGenerationPolling(hideBox = true) {
     if (state.pollTimer) {
       clearInterval(state.pollTimer);
       state.pollTimer = null;
     }
-    const box = document.getElementById('chatStreamingBox');
-    if (box) box.classList.add('hidden');
+    if (state.elapsedTimer) {
+      clearInterval(state.elapsedTimer);
+      state.elapsedTimer = null;
+    }
+    state.generationStartMs = 0;
+    if (hideBox) {
+      const box = document.getElementById('chatStreamingBox');
+      if (box) {
+        box.classList.add('hidden');
+        box.classList.remove('error-state');
+      }
+    }
+  }
+
+  async function handleGenerationFailure(chatId, err) {
+    stopGenerationPolling(false);
+    if (err && err.data && err.data.generation) {
+      renderGenerationProgress(err.data.generation);
+      return;
+    }
+    try {
+      const genData = await apiFetch(`/api/chats/${chatId}/generation`);
+      if (genData && genData.lastGeneration) {
+        renderGenerationProgress(genData.lastGeneration);
+        return;
+      }
+    } catch (e) {}
+
+    // Fallback error progress if server didn't attach generation object
+    const fallbackErr = Object.assign({}, state.lastGeneration || {}, {
+      phase: 'error',
+      error: err ? err.message : 'Неизвестная ошибка',
+      statusText: '❌ Ошибка: ' + (err ? err.message : 'Неизвестная ошибка'),
+      logs: ((state.lastGeneration && state.lastGeneration.logs) || []).concat([
+        `[ошибка] ❌ ${err ? err.message : 'Сбой запроса'}`
+      ]),
+    });
+    renderGenerationProgress(fallbackErr);
   }
 
   async function sendMessage() {
@@ -515,13 +760,16 @@
         method: 'POST',
         body: JSON.stringify({ content: text }),
       });
-      stopGenerationPolling();
+      if (res && res.generation) {
+        state.lastGeneration = res.generation;
+      }
+      stopGenerationPolling(true);
       if (state.currentChatData && state.currentChatId === chatId) {
         state.currentChatData.messages = res.messages;
         renderActiveChatRoom();
       }
     } catch (err) {
-      stopGenerationPolling();
+      await handleGenerationFailure(chatId, err);
       // Remove optimistic message and restore user input so nothing is lost or polluted
       if (state.currentChatData && Array.isArray(state.currentChatData.messages)) {
         state.currentChatData.messages = state.currentChatData.messages.filter(m => m.id !== tempMsgId);
@@ -566,7 +814,10 @@
         method: 'POST',
         body: JSON.stringify({ action: 'regenerate' }),
       });
-      stopGenerationPolling();
+      if (res && res.generation) {
+        state.lastGeneration = res.generation;
+      }
+      stopGenerationPolling(true);
       if (state.currentChatData) {
         const idx = state.currentChatData.messages.findIndex(m => m.id === msgId);
         if (idx !== -1) {
@@ -576,7 +827,7 @@
       }
       showToast('✨ Сгенерирован новый вариант ответа!');
     } catch (err) {
-      stopGenerationPolling();
+      await handleGenerationFailure(chatId, err);
       showToast('Ошибка реролла: ' + err.message);
     } finally {
       state.isSending = false;
@@ -1174,6 +1425,15 @@
   async function selectModel(modelId) {
     try {
       state.selectedModel = modelId;
+      if (Array.isArray(state.chats)) {
+        state.chats.forEach(c => {
+          c.model_id = modelId;
+        });
+      }
+      if (state.currentChatData && state.currentChatData.chat) {
+        state.currentChatData.chat.model_id = modelId;
+      }
+
       await apiFetch('/api/settings', {
         method: 'POST',
         body: JSON.stringify({ selectedModel: modelId }),
@@ -1191,9 +1451,10 @@
       }
 
       renderModelsLists();
+      renderChatsList();
       updateHeaderIndicators(true);
       closeModal('modelPickerModal');
-      showToast(`Выбрана модель: ${getShortModelName(modelId)}`);
+      showToast(`Фиксирована модель: ${getShortModelName(modelId)}`);
     } catch (err) {
       showToast(err.message);
     }
@@ -1202,6 +1463,15 @@
   async function setEffort(effort) {
     try {
       state.selectedEffort = effort;
+      if (Array.isArray(state.chats)) {
+        state.chats.forEach(c => {
+          c.effort = effort;
+        });
+      }
+      if (state.currentChatData && state.currentChatData.chat) {
+        state.currentChatData.chat.effort = effort;
+      }
+
       await apiFetch('/api/settings', {
         method: 'POST',
         body: JSON.stringify({ selectedEffort: effort }),
@@ -1214,10 +1484,12 @@
         });
         if (state.currentChatData) {
           state.currentChatData.chat = res.chat;
+          renderActiveChatRoom();
         }
       }
 
       updateEffortButtons();
+      renderChatsList();
       updateHeaderIndicators(true);
       showToast(`Уровень рассуждений (Effort): ${effort.toUpperCase()}`);
     } catch (err) {
@@ -1686,6 +1958,8 @@
     confirmCreateChat,
     openChatRoom,
     closeChatRoom,
+    toggleStreamingDetails,
+    closeStreamingBox,
     sendMessage,
     insertAsterisks,
     swipeMessage,
