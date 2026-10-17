@@ -71,7 +71,31 @@
     streamingExpanded: false,
     lastGeneration: null,
     isSending: false,
+    isKeyboardOpen: false,
+    ignoreScrollEvents: false,
   };
+
+  let navTransitionUntil = 0;
+
+  function setBottomNavHidden(hidden) {
+    const nav = document.getElementById('bottomNav');
+    if (!nav) return;
+    const isCurrentlyHidden = nav.classList.contains('nav-hidden');
+    if (isCurrentlyHidden === Boolean(hidden)) return;
+    navTransitionUntil = Date.now() + 260;
+    nav.classList.toggle('nav-hidden', Boolean(hidden));
+  }
+
+  function autoResizeChatInput() {
+    const input = document.getElementById('chatInput');
+    if (!input) return;
+    input.style.height = 'auto';
+    const maxH = 125; // 5 visible lines (5 * 21px + 20px vertical padding/border)
+    const scrollH = input.scrollHeight;
+    const nextH = Math.min(Math.max(scrollH, 41), maxH);
+    input.style.height = nextH + 'px';
+    input.style.overflowY = scrollH > maxH ? 'auto' : 'hidden';
+  }
 
   // Callback invoked by Android LocalBackendServer when OAuth callback completes in background
   window.__onAgyOAuthSuccess = function (b64Json) {
@@ -94,7 +118,7 @@
   const FALLBACK_AVATAR =
     "data:image/svg+xml;utf8," +
     encodeURIComponent(
-      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><rect width="120" height="120" rx="24" fill="#1e1b4b"/><circle cx="60" cy="46" r="22" fill="#a78bfa"/><path d="M22 110 C26 76, 94 76, 98 110 Z" fill="#7c3aed"/></svg>'
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><rect width="120" height="120" rx="24" fill="#1b1f27"/><circle cx="60" cy="46" r="22" fill="#7c90c9"/><path d="M22 110 C26 76, 94 76, 98 110 Z" fill="#465685"/></svg>'
     );
 
   function resolveAvatarUrl(url) {
@@ -149,17 +173,145 @@
       .replace(/"/g, '&quot;');
   }
 
+  function stripMarkdownPreview(rawText) {
+    return String(rawText || '')
+      .replace(/```[\s\S]*?```/g, '[код]')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\*\*\*([^*]+)\*\*\*/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\*([^*]+)\*/g, '$1')
+      .replace(/~~([^~]+)~~/g, '$1')
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/\n+/g, ' ')
+      .trim();
+  }
+
+  function formatInlineMarkdown(escapedText, inlineCodes) {
+    let s = escapedText;
+    // Extract inline code `...`
+    s = s.replace(/`([^`\n]+)`/g, (_, code) => {
+      const idx = inlineCodes.length;
+      inlineCodes.push(`<code class="md-inline-code">${code}</code>`);
+      return `\u0000INLINECODE_${idx}\u0000`;
+    });
+
+    // Bold + Italic ***text*** or ___text___
+    s = s.replace(/\*\*\*([\s\S]+?)\*\*\*/g, '<strong><em class="rp-italic">$1</em></strong>');
+    s = s.replace(/___([\s\S]+?)___/g, '<strong><em class="rp-italic">$1</em></strong>');
+
+    // Bold **text** or __text__
+    s = s.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([\s\S]+?)__/g, '<strong>$1</strong>');
+
+    // Italic *text* (renders clean italic without asterisks, colored muted gray via CSS)
+    s = s.replace(/\*([^*]+?)\*/g, '<em class="rp-italic">$1</em>');
+    // Italic _text_ (word-bounded so snake_case identifiers remain untouched)
+    s = s.replace(/(^|[\s(>«"'])_([^_\n]+?)_(?=$|[\s.,!?:;)<»"'])/g, '$1<em class="rp-italic">$2</em>');
+
+    // Strikethrough ~~text~~
+    s = s.replace(/~~([\s\S]+?)~~/g, '<del>$1</del>');
+
+    // Restore inline code
+    s = s.replace(/\u0000INLINECODE_(\d+)\u0000/g, (_, idx) => inlineCodes[Number(idx)] || '');
+    return s;
+  }
+
   /**
-   * Format Roleplay text: highlight *actions in italics* and preserve paragraphs
+   * Full Markdown renderer for Roleplay messages:
+   * - *action* -> gray italic <em> without asterisks so dialogue stands out
+   * - **bold**, ***bold-italic***, ~~strikethrough~~, `inline code`, ```code blocks```
+   * - Headings, blockquotes, lists, horizontal rules, and clean paragraphs
    */
   function formatRoleplayHtml(rawText) {
-    const escaped = escapeHtml(rawText || '');
-    const withActions = escaped.replace(/\*([^*]+)\*/g, '<span class="rp-action">*$1*</span>');
-    const paragraphs = withActions
-      .split(/\n{2,}/)
-      .map(p => `<p>${p.replace(/\n/g, '<br/>')}</p>`)
-      .join('');
-    return paragraphs || `<p>${withActions}</p>`;
+    if (!rawText) return '<p></p>';
+    const normalized = String(rawText).replace(/\r\n/g, '\n');
+    const escaped = escapeHtml(normalized);
+
+    const codeBlocks = [];
+    const inlineCodes = [];
+
+    // 1. Extract fenced code blocks ```lang ... ```
+    const withoutCodeBlocks = escaped.replace(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+      const idx = codeBlocks.length;
+      const langBadge = lang ? `<div class="md-code-lang">${lang}</div>` : '';
+      codeBlocks.push(`<pre class="md-code-block">${langBadge}<code>${code.replace(/\n$/, '')}</code></pre>`);
+      return `\n\n\u0000CODEBLOCK_${idx}\u0000\n\n`;
+    });
+
+    // 2. Split into blocks by blank lines
+    const rawBlocks = withoutCodeBlocks.split(/\n{2,}/);
+    const htmlBlocks = [];
+
+    for (let block of rawBlocks) {
+      const trimmed = block.trim();
+      if (!trimmed) continue;
+
+      const codeMatch = trimmed.match(/^\u0000CODEBLOCK_(\d+)\u0000$/);
+      if (codeMatch) {
+        htmlBlocks.push(codeBlocks[Number(codeMatch[1])] || '');
+        continue;
+      }
+
+      if (/^(?:---|___|\*\*\*)$/.test(trimmed)) {
+        htmlBlocks.push('<hr class="md-hr" />');
+        continue;
+      }
+
+      const lines = trimmed.split('\n');
+
+      // Blockquote (lines starting with >)
+      if (lines.every(l => /^\s*&gt;\s?/.test(l))) {
+        const quoteInner = lines.map(l => l.replace(/^\s*&gt;\s?/, '')).join('\n');
+        htmlBlocks.push(
+          `<blockquote class="md-quote">${formatInlineMarkdown(quoteInner, inlineCodes).replace(/\n/g, '<br/>')}</blockquote>`
+        );
+        continue;
+      }
+
+      // Unordered list (- item or • item)
+      if (lines.every(l => /^\s*[-•]\s+/.test(l))) {
+        const itemsHtml = lines
+          .map(l => `<li>${formatInlineMarkdown(l.replace(/^\s*[-•]\s+/, ''), inlineCodes)}</li>`)
+          .join('');
+        htmlBlocks.push(`<ul class="md-list">${itemsHtml}</ul>`);
+        continue;
+      }
+
+      // Ordered list (1. item)
+      if (lines.every(l => /^\s*\d+[.)]\s+/.test(l))) {
+        const itemsHtml = lines
+          .map(l => `<li>${formatInlineMarkdown(l.replace(/^\s*\d+[.)]\s+/, ''), inlineCodes)}</li>`)
+          .join('');
+        htmlBlocks.push(`<ol class="md-list">${itemsHtml}</ol>`);
+        continue;
+      }
+
+      // Single-line heading (# .. ####)
+      if (lines.length === 1 && /^#{1,4}\s+/.test(lines[0])) {
+        const hMatch = lines[0].match(/^(#{1,4})\s+(.+)$/);
+        if (hMatch) {
+          const level = hMatch[1].length;
+          htmlBlocks.push(`<div class="md-heading md-h${level}">${formatInlineMarkdown(hMatch[2], inlineCodes)}</div>`);
+          continue;
+        }
+      }
+
+      const formattedPara = formatInlineMarkdown(trimmed, inlineCodes)
+        .split('\n')
+        .map(line => {
+          const hMatch = line.match(/^(#{1,4})\s+(.+)$/);
+          if (hMatch) {
+            return `<span class="md-heading-inline md-h${hMatch[1].length}">${hMatch[2]}</span>`;
+          }
+          return line;
+        })
+        .join('<br/>');
+
+      const withRestoredCode = formattedPara.replace(/\u0000CODEBLOCK_(\d+)\u0000/g, (_, idx) => codeBlocks[Number(idx)] || '');
+      htmlBlocks.push(`<p>${withRestoredCode}</p>`);
+    }
+
+    return htmlBlocks.join('') || '<p></p>';
   }
 
   function getShortModelName(modelId) {
@@ -167,6 +319,17 @@
     const found = state.models.find(m => m.id === cleanId || m.id === modelId);
     if (found) return found.name;
     return cleanId || 'Gemini 4 Argon';
+  }
+
+  function getCompactModelLabel(modelId, effort) {
+    const full = getShortModelName(modelId);
+    const shortName = full
+      .replace(/^Claude\s+/i, '')
+      .replace(/\s*\(Thinking\)/i, '')
+      .replace(/\s*\(Medium\)/i, '')
+      .trim();
+    const eff = String(effort || 'high').toUpperCase();
+    return `${shortName} · ${eff}`;
   }
 
   function renderAgyAuthStatus() {
@@ -177,10 +340,10 @@
     if (badge) {
       if (state.agyAuthenticated) {
         badge.textContent = `✅ Авторизован в Google Antigravity${state.agyEmail ? ' (' + state.agyEmail + ')' : ''} • Project ID: ${state.projectId}`;
-        badge.style.color = '#34d399';
+        badge.style.color = 'var(--success)';
       } else {
         badge.textContent = '⚠️ Вход в Google Antigravity не выполнен. Нажмите кнопку ниже, чтобы войти через аккаунт Google (без API ключа).';
-        badge.style.color = '#fbbf24';
+        badge.style.color = 'var(--warning)';
       }
     }
 
@@ -210,38 +373,27 @@
   }
 
   function updateHeaderIndicators(online = true) {
-    const dot = document.getElementById('connStatusDot');
-    const projBadge = document.getElementById('headerProjectBadge');
-    const modelLabel = document.getElementById('headerModelBtn')
-      ? document.getElementById('headerModelLabel')
-      : null;
+    const isOnlineAndAuth = Boolean(online && state.agyAuthenticated);
+    document.querySelectorAll('.js-conn-dot').forEach(dot => {
+      dot.classList.toggle('offline', !isOnlineAndAuth);
+    });
 
-    if (dot) {
-      dot.classList.toggle('offline', !online || !state.agyAuthenticated);
-    }
-    if (projBadge) {
-      if (!online) {
-        projBadge.textContent = 'Сервер недоступен';
-      } else if (state.agyAuthenticated) {
-        projBadge.textContent = `AGY: ${state.agyEmail || state.projectId} ✅`;
-      } else {
-        projBadge.textContent = `⚠️ Войти в AGY (${state.projectId})`;
-      }
-    }
-    if (modelLabel) {
-      const activeChatModel = state.currentChatData && state.currentChatData.chat
-        ? state.currentChatData.chat.model_id
-        : state.selectedModel;
-      const activeEffort = state.currentChatData && state.currentChatData.chat
-        ? state.currentChatData.chat.effort
-        : state.selectedEffort;
-      modelLabel.textContent = `${getShortModelName(activeChatModel)} • ${String(activeEffort).toUpperCase()}`;
-    }
+    const activeChatModel = state.currentChatData && state.currentChatData.chat
+      ? state.currentChatData.chat.model_id
+      : state.selectedModel;
+    const activeEffort = state.currentChatData && state.currentChatData.chat
+      ? state.currentChatData.chat.effort
+      : state.selectedEffort;
+    const compactLabel = getCompactModelLabel(activeChatModel, activeEffort);
+
+    document.querySelectorAll('.js-model-label').forEach(lbl => {
+      lbl.textContent = compactLabel;
+    });
 
     const activePersona = state.personas.find(p => p.id === Number(state.activePersonaId)) || state.personas[0];
     const banner = document.getElementById('activePersonaBanner');
     if (banner && activePersona) {
-      banner.textContent = `👤 Активная персона: ${activePersona.name} (${activePersona.file_path})`;
+      banner.textContent = `Персона: ${activePersona.name}`;
     }
   }
 
@@ -280,7 +432,7 @@
         connBadge.textContent = isEmbedded
           ? `✅ Встроенный сервер внутри APK активен • БД SQLite + чистый GEMINI.md • Моделей: ${state.models.length}`
           : `✅ Локальный сервер активен • Моделей: ${state.models.length}`;
-        connBadge.style.color = '#34d399';
+        connBadge.style.color = 'var(--success)';
       }
 
       renderAgyAuthStatus();
@@ -300,7 +452,7 @@
       const connBadge = document.getElementById('serverConnectionStatus');
       if (connBadge) {
         connBadge.textContent = `❌ Ошибка инициализации: ${err.message}`;
-        connBadge.style.color = '#f87171';
+        connBadge.style.color = 'var(--danger)';
       }
     }
   }
@@ -320,10 +472,10 @@
 
     if (!state.chats.length) {
       container.innerHTML = `
-        <div class="settings-card" style="text-align:center;padding:24px 16px;">
-          <div style="font-size:34px;margin-bottom:8px;">🎭</div>
-          <div class="card-title">Пока нет активных ролевых чатов</div>
-          <p class="card-hint">Выберите персонажа и свою персону, чтобы начать приключение с участием ИИ AGY.</p>
+        <div class="settings-card empty-state-card">
+          <div class="empty-state-icon">🎭</div>
+          <div class="card-title">Пока нет активных чатов</div>
+          <p class="card-hint">Выберите персонажа и свою персону, чтобы начать историю.</p>
           <button class="btn-primary" onclick="window.appUI.openNewChatModal()">+ Начать первый чат</button>
         </div>
       `;
@@ -332,15 +484,15 @@
 
     container.innerHTML = state.chats
       .map(c => {
-        const preview = (c.last_message || '').replace(/\n+/g, ' ').slice(0, 95);
+        const preview = stripMarkdownPreview(c.last_message || '').slice(0, 100);
         const effLabel = String(c.effort || 'high').toUpperCase();
         return `
           <div class="chat-card" onclick="window.appUI.openChatRoom(${c.id})">
             <img class="chat-card-avatar" src="${escapeHtml(resolveAvatarUrl(c.character_avatar))}" alt="" />
             <div class="chat-card-body">
               <div class="chat-card-title">
-                <span>${escapeHtml(c.character_name)}</span>
-                <div style="display:flex;gap:4px;">
+                <span class="chat-card-name">${escapeHtml(c.character_name)}</span>
+                <div class="chat-card-actions">
                   <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.openExportChatModal(${c.id})" title="Экспортировать чат">📤</button>
                   <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.deleteChat(${c.id})" title="Удалить чат">🗑</button>
                 </div>
@@ -349,7 +501,7 @@
               <div class="chat-card-meta">
                 <span>👤 ${escapeHtml(c.persona_name)}</span>
                 <span>•</span>
-                <span>🤖 ${escapeHtml(getShortModelName(c.model_id))} (${escapeHtml(effLabel)})</span>
+                <span>${escapeHtml(getShortModelName(c.model_id))} (${escapeHtml(effLabel)})</span>
                 <span>•</span>
                 <span>💬 ${c.message_count || 1}</span>
               </div>
@@ -376,6 +528,7 @@
       document.getElementById('chatRoomView').classList.remove('hidden');
 
       renderActiveChatRoom();
+      autoResizeChatInput();
       renderModelsLists();
       updateEffortButtons();
       updateHeaderIndicators(true);
@@ -390,18 +543,22 @@
     state.currentChatData = null;
     document.getElementById('chatRoomView').classList.add('hidden');
     document.getElementById('chatsListView').classList.remove('hidden');
+    setBottomNavHidden(false);
     updateHeaderIndicators(true);
     loadChatsList();
   }
 
   function renderActiveChatRoom() {
     if (!state.currentChatData) return;
-    const { chat, character, persona, messages } = state.currentChatData;
+    const { character, persona, messages } = state.currentChatData;
 
     document.getElementById('chatHeaderAvatar').src = resolveAvatarUrl(character.avatar_url);
     document.getElementById('chatHeaderCharName').textContent = character.name;
-    document.getElementById('chatHeaderSub').textContent = `Файл: ${character.file_path} • ${getShortModelName(chat.model_id)} (${String(chat.effort || 'high').toUpperCase()})`;
-    document.getElementById('chatPersonaChip').textContent = `👤 ${persona.name}`;
+    document.getElementById('chatHeaderSub').textContent = `👤 ${persona.name} • ${character.file_path}`;
+    const personaChip = document.getElementById('chatPersonaChip');
+    if (personaChip) {
+      personaChip.title = `Активная персона: ${persona.name}`;
+    }
 
     const msgContainer = document.getElementById('chatMessagesContainer');
     msgContainer.innerHTML = (messages || [])
@@ -414,8 +571,8 @@
 
         const thoughtsBlock = m.thoughts
           ? `<details class="msg-thoughts-details">
-               <summary>💭 Показать мысли персонажа</summary>
-               <div style="margin-top:6px;white-space:pre-wrap;">${escapeHtml(m.thoughts)}</div>
+               <summary>💭 Мысли персонажа</summary>
+               <div class="msg-thoughts-body">${escapeHtml(m.thoughts)}</div>
              </details>`
           : '';
 
@@ -424,9 +581,9 @@
                ${
                  swipesCount > 1
                    ? `<button class="toolbar-btn" onclick="window.appUI.swipeMessage(${m.id}, ${(m.swipe_index || 0) - 1})" ${m.swipe_index <= 0 ? 'disabled' : ''}>◀</button>
-                      <span>${curSwipe} / ${swipesCount}</span>
+                      <span class="swipe-counter">${curSwipe} / ${swipesCount}</span>
                       <button class="toolbar-btn" onclick="window.appUI.swipeMessage(${m.id}, ${(m.swipe_index || 0) + 1})" ${m.swipe_index >= swipesCount - 1 ? 'disabled' : ''}>▶</button>`
-                   : `<span>${ idx === 0 ? 'Приветствие' : 'Ответ ИИ' }</span>`
+                   : `<span class="msg-meta-label">${idx === 0 ? 'Приветствие' : 'Ответ'}</span>`
                }
                ${
                  idx > 0
@@ -434,15 +591,15 @@
                    : ''
                }
              </div>`
-          : `<div><span>Реплика игрока</span></div>`;
+          : `<div class="swipe-controls"><span class="msg-meta-label">Вы</span></div>`;
 
         return `
           <div class="msg-row ${isUser ? 'user' : 'assistant'}">
-            <img class="msg-avatar" src="${escapeHtml(avatar)}" alt="" />
+            <div class="msg-head">
+              <img class="msg-avatar" src="${escapeHtml(avatar)}" alt="" />
+              <span class="msg-sender-name">${escapeHtml(senderName)}</span>
+            </div>
             <div class="msg-bubble">
-              <div class="msg-sender">
-                <span>${escapeHtml(senderName)}</span>
-              </div>
               ${thoughtsBlock}
               <div class="msg-text">${formatRoleplayHtml(m.content)}</div>
               <div class="msg-toolbar">
@@ -462,7 +619,11 @@
       })
       .join('');
 
+    state.ignoreScrollEvents = true;
     msgContainer.scrollTop = msgContainer.scrollHeight;
+    setTimeout(() => {
+      state.ignoreScrollEvents = false;
+    }, 120);
   }
 
   const PHASE_LABELS = {
@@ -741,6 +902,7 @@
     state.isSending = true;
     document.getElementById('sendMsgBtn').disabled = true;
     input.value = '';
+    autoResizeChatInput();
 
     const tempMsgId = Date.now();
     // Optimistically append user message to UI
@@ -779,6 +941,7 @@
         renderActiveChatRoom();
       }
       input.value = text;
+      autoResizeChatInput();
       showToast(err.message);
       if (!state.agyAuthenticated) {
         openTab('settings');
@@ -1002,7 +1165,7 @@
             <div class="char-card-body">
               <div class="char-card-name">${escapeHtml(c.name)}</div>
               <div class="char-card-file">📄 ${escapeHtml(c.file_path)}</div>
-              <div class="char-card-greeting">${escapeHtml(c.first_message || c.description_preview)}</div>
+              <div class="char-card-greeting">${escapeHtml(stripMarkdownPreview(c.first_message || c.description_preview))}</div>
               <div class="char-card-actions">
                 <button class="btn-primary btn-sm" style="flex:1;" onclick="window.appUI.openNewChatModal(${c.id})">💬 Чат</button>
                 <button class="btn-secondary btn-sm" onclick="window.appUI.openCharacterEditor(${c.id})">✏️</button>
@@ -1019,11 +1182,11 @@
         .map(p => {
           const isActive = p.id === Number(state.activePersonaId);
           return `
-            <div class="chat-card" style="${isActive ? 'border-color:#a78bfa;' : ''}">
+            <div class="chat-card ${isActive ? 'active-persona-card' : ''}">
               <img class="chat-card-avatar" src="${escapeHtml(resolveAvatarUrl(p.avatar_url))}" alt="" />
               <div class="chat-card-body">
                 <div class="chat-card-title">
-                  <span>${escapeHtml(p.name)} ${isActive ? '✅' : ''}</span>
+                  <span>${escapeHtml(p.name)}</span>
                   <div class="row-gap-sm">
                     ${
                       !isActive
@@ -1033,7 +1196,7 @@
                     <button class="btn-secondary btn-sm" onclick="window.appUI.openPersonaEditor(${p.id})">✏️</button>
                   </div>
                 </div>
-                <div class="chat-card-preview">${escapeHtml(p.description_preview)}</div>
+                <div class="chat-card-preview">${escapeHtml(stripMarkdownPreview(p.description_preview))}</div>
                 <div class="chat-card-meta">📄 Файл: ${escapeHtml(p.file_path)}</div>
               </div>
             </div>
@@ -1626,6 +1789,7 @@
   }
 
   function openTab(tabName) {
+    setBottomNavHidden(false);
     document.querySelectorAll('.tab-pane').forEach(pane => {
       pane.classList.toggle('active', pane.id === `tab-${tabName}`);
     });
@@ -2415,7 +2579,7 @@
     }
   }
 
-  // Handle Enter key in chat textarea (Ctrl+Enter or Enter on desktop)
+  // Handle adaptive chat input, keyboard auto-hide, and scroll auto-hide on Chats tab
   document.addEventListener('DOMContentLoaded', () => {
     const chatInput = document.getElementById('chatInput');
     if (chatInput) {
@@ -2425,7 +2589,100 @@
           sendMessage();
         }
       });
+      chatInput.addEventListener('input', () => {
+        autoResizeChatInput();
+        state.isKeyboardOpen = true;
+        setBottomNavHidden(true);
+      });
+      chatInput.addEventListener('focus', () => {
+        autoResizeChatInput();
+        state.isKeyboardOpen = true;
+        setBottomNavHidden(true);
+      });
+      chatInput.addEventListener('click', () => {
+        state.isKeyboardOpen = true;
+        setBottomNavHidden(true);
+      });
+      chatInput.addEventListener('blur', () => {
+        setTimeout(() => {
+          if (document.activeElement !== chatInput) {
+            state.isKeyboardOpen = false;
+            setBottomNavHidden(false);
+          }
+        }, 160);
+      });
     }
+
+    window.onAndroidKeyboardVisibilityChanged = (kbOpen) => {
+      state.isKeyboardOpen = !!kbOpen;
+      const isChatsTab = document.getElementById('tab-chats')?.classList.contains('active');
+      if (isChatsTab) {
+        setBottomNavHidden(!!kbOpen);
+      }
+    };
+
+    if (window.visualViewport) {
+      let baseHeight = window.visualViewport.height || window.innerHeight;
+      window.visualViewport.addEventListener('resize', () => {
+        const curH = window.visualViewport.height;
+        if (curH > baseHeight) baseHeight = curH;
+        const isChatsTab = document.getElementById('tab-chats')?.classList.contains('active');
+        const kbActive = (baseHeight - curH) > 110;
+        state.isKeyboardOpen = kbActive;
+        if (isChatsTab) {
+          setBottomNavHidden(kbActive);
+        }
+      });
+    }
+
+    function attachChatsScrollAutoHide(el) {
+      if (!el) return;
+      let lastScrollY = el.scrollTop || 0;
+      let touchStartY = null;
+
+      el.addEventListener('touchstart', (e) => {
+        if (e.touches && e.touches.length === 1) {
+          touchStartY = e.touches[0].clientY;
+        }
+      }, { passive: true });
+
+      el.addEventListener('touchmove', (e) => {
+        if (touchStartY === null || !e.touches || e.touches.length !== 1) return;
+        const isChatsTab = document.getElementById('tab-chats')?.classList.contains('active');
+        if (!isChatsTab) return;
+        const dy = touchStartY - e.touches[0].clientY; // dy > 0 means finger moves up -> scrolling down
+        if (dy > 18) {
+          setBottomNavHidden(true);
+          touchStartY = e.touches[0].clientY;
+        } else if (dy < -18 && !state.isKeyboardOpen) {
+          setBottomNavHidden(false);
+          touchStartY = e.touches[0].clientY;
+        }
+      }, { passive: true });
+
+      el.addEventListener('scroll', () => {
+        const isChatsTab = document.getElementById('tab-chats')?.classList.contains('active');
+        if (!isChatsTab) return;
+        const curY = el.scrollTop;
+        if (state.ignoreScrollEvents || Date.now() < navTransitionUntil) {
+          lastScrollY = curY;
+          return;
+        }
+        const delta = curY - lastScrollY;
+        if (curY <= 12 && !state.isKeyboardOpen) {
+          setBottomNavHidden(false);
+        } else if (delta > 8 && curY > 24) {
+          setBottomNavHidden(true);
+        } else if (delta < -8 && !state.isKeyboardOpen) {
+          setBottomNavHidden(false);
+        }
+        lastScrollY = curY;
+      }, { passive: true });
+    }
+
+    attachChatsScrollAutoHide(document.getElementById('chatMessagesContainer'));
+    attachChatsScrollAutoHide(document.getElementById('chatsListView'));
+
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
         checkAgyAuthStatus();

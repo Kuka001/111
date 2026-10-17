@@ -3,30 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <meta name="theme-color" content="#0b0d17" />
+  <meta name="theme-color" content="#0f1115" />
   <title>AGY Roleplay Studio</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div id="app">
-    <!-- TOP STATUS HEADER -->
-    <header class="app-header" id="mainHeader">
-      <div class="header-left" onclick="window.appUI.openTab('settings')">
-        <div class="brand-logo">✦</div>
-        <div class="brand-info">
-          <div class="brand-title">AGY Roleplay</div>
-          <div class="brand-subtitle" id="headerProjectBadge">ID: загрузка...</div>
-        </div>
-      </div>
-      <div class="header-right">
-        <button class="model-pill" id="headerModelBtn" onclick="window.appUI.openModelModal()">
-          <span class="dot-online" id="connStatusDot"></span>
-          <span id="headerModelLabel">Gemini 4 Argon</span>
-          <span class="chevron">▾</span>
-        </button>
-      </div>
-    </header>
-
     <!-- AUTOMATIC GIT UPDATE NOTIFICATION BANNER (SHOWN ON STARTUP WHEN NEW VERSION IN GIT) -->
     <div id="updateBanner" class="update-banner hidden">
       <div class="update-banner-info" onclick="window.appUI.openTab('updates')">
@@ -49,12 +31,19 @@
       <section class="tab-pane active" id="tab-chats">
         <!-- Chats List View -->
         <div id="chatsListView" class="view-container">
-          <div class="section-top-bar">
-            <div>
-              <h1 class="section-title">Ролевые чаты</h1>
+          <div class="section-top-bar chats-list-topbar">
+            <div class="topbar-title-group">
+              <h1 class="section-title">Чаты</h1>
               <p class="section-desc" id="activePersonaBanner">Персона: Казума</p>
             </div>
-            <button class="btn-primary" onclick="window.appUI.openNewChatModal()">+ Новый чат</button>
+            <div class="topbar-actions-group">
+              <button class="model-pill-mini" onclick="window.appUI.openModelModal()" title="Выбрать модель ИИ и уровень Effort">
+                <span class="dot-online js-conn-dot"></span>
+                <span class="model-pill-label js-model-label">Gemini 4 Argon</span>
+                <span class="chevron">▾</span>
+              </button>
+              <button class="btn-primary btn-new-chat" onclick="window.appUI.openNewChatModal()">+ Новый</button>
+            </div>
           </div>
           <div id="chatsListContainer" class="cards-list"></div>
         </div>
@@ -63,15 +52,22 @@
         <div id="chatRoomView" class="chat-room hidden">
           <div class="chat-room-header">
             <button class="icon-btn" onclick="window.appUI.closeChatRoom()" title="К списку чатов">←</button>
-            <img id="chatHeaderAvatar" class="chat-header-avatar" src="" alt="" onclick="window.appUI.editCurrentChatCharacter()" />
-            <div class="chat-header-meta" onclick="window.appUI.editCurrentChatCharacter()">
-              <div class="chat-header-name" id="chatHeaderCharName">Персонаж</div>
-              <div class="chat-header-sub" id="chatHeaderSub">Нажмите для настройки</div>
+            <div class="chat-header-identity" onclick="window.appUI.editCurrentChatCharacter()">
+              <img id="chatHeaderAvatar" class="chat-header-avatar" src="" alt="" />
+              <div class="chat-header-meta">
+                <div class="chat-header-name" id="chatHeaderCharName">Персонаж</div>
+                <div class="chat-header-sub" id="chatHeaderSub">Настройки персонажа</div>
+              </div>
             </div>
             <div class="chat-header-actions">
-              <button class="chip-btn" onclick="window.appUI.openPersonaQuickModal()" id="chatPersonaChip" title="Выбрать мою персону">👤 Персона</button>
+              <button class="model-pill-mini" id="headerModelBtn" onclick="window.appUI.openModelModal()" title="Выбрать модель ИИ и уровень Effort">
+                <span class="dot-online js-conn-dot" id="connStatusDot"></span>
+                <span class="model-pill-label js-model-label" id="headerModelLabel">Gemini 4 Argon</span>
+                <span class="chevron">▾</span>
+              </button>
+              <button class="chip-btn" onclick="window.appUI.openPersonaQuickModal()" id="chatPersonaChip" title="Выбрать мою персону">👤</button>
               <button class="chip-btn" onclick="window.appUI.openChatMemoryFile()" title="Память чата (файл)">🧠</button>
-              <button class="chip-btn" onclick="window.appUI.openExportChatModal()" title="Экспортировать чат">📤 Экспорт</button>
+              <button class="chip-btn" onclick="window.appUI.openExportChatModal()" title="Экспортировать чат">📤</button>
             </div>
           </div>
 
@@ -155,14 +151,13 @@
 
           <!-- Chat Input Bar -->
           <div class="chat-input-bar">
-            <button class="action-asterisk-btn" onclick="window.appUI.insertAsterisks()" title="Вставить *действие*">*</button>
             <textarea
               id="chatInput"
               class="chat-textarea"
-               rows="1"
-              placeholder="Напишите реплику или *действие*..."
+              rows="1"
+              placeholder="Введите сообщение..."
             ></textarea>
-            <button class="send-btn" id="sendMsgBtn" onclick="window.appUI.sendMessage()">➤</button>
+            <button class="send-btn" id="sendMsgBtn" onclick="window.appUI.sendMessage()" title="Отправить сообщение">➤</button>
           </div>
         </div>
       </section>

@@ -59,19 +59,21 @@ public class MainActivity extends Activity {
 
         Window window = getWindow();
         if (window != null) {
-            window.setStatusBarColor(Color.parseColor("#0B0D17"));
-            window.setNavigationBarColor(Color.parseColor("#141829"));
+            window.setStatusBarColor(Color.parseColor("#0F1115"));
+            window.setNavigationBarColor(Color.parseColor("#13161C"));
         }
 
         rootLayout = new FrameLayout(this);
-        rootLayout.setBackgroundColor(Color.parseColor("#0B0D17"));
+        rootLayout.setBackgroundColor(Color.parseColor("#0F1115"));
 
         webView = new WebView(this);
-        webView.setBackgroundColor(Color.parseColor("#0B0D17"));
+        webView.setBackgroundColor(Color.parseColor("#0F1115"));
 
         // Handle Android 15 / Android 16 (API 35/36) forced Edge-to-Edge WindowInsets + Keyboard (IME)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             rootLayout.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+                private boolean lastKbOpen = false;
+
                 @Override
                 public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
                     Insets sysBars = insets.getInsets(
@@ -80,6 +82,23 @@ public class MainActivity extends Activity {
                     Insets ime = insets.getInsets(WindowInsets.Type.ime());
                     int bottomPad = Math.max(sysBars.bottom, ime.bottom);
                     v.setPadding(sysBars.left, sysBars.top, sysBars.right, bottomPad);
+
+                    final boolean kbOpen = ime.bottom > (sysBars.bottom + 80);
+                    if (kbOpen != lastKbOpen) {
+                        lastKbOpen = kbOpen;
+                        webView.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    webView.evaluateJavascript(
+                                        "window.onAndroidKeyboardVisibilityChanged && window.onAndroidKeyboardVisibilityChanged(" + (kbOpen ? "true" : "false") + ");",
+                                        null
+                                    );
+                                } catch (Exception ignored) {
+                                }
+                            }
+                        });
+                    }
                     return WindowInsets.CONSUMED;
                 }
             });
