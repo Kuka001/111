@@ -340,7 +340,10 @@
             <div class="chat-card-body">
               <div class="chat-card-title">
                 <span>${escapeHtml(c.character_name)}</span>
-                <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.deleteChat(${c.id})" title="Удалить чат">🗑</button>
+                <div style="display:flex;gap:4px;">
+                  <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.openExportChatModal(${c.id})" title="Экспортировать чат">📤</button>
+                  <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.deleteChat(${c.id})" title="Удалить чат">🗑</button>
+                </div>
               </div>
               <div class="chat-card-preview">${escapeHtml(preview || 'Начало истории...')}</div>
               <div class="chat-card-meta">
@@ -1929,6 +1932,465 @@
     if (banner) banner.classList.add('hidden');
   }
 
+  // ==================== CHAT EXPORT (MARKDOWN & JSON) ====================
+  const exportChatState = {
+    chatId: null,
+    format: 'markdown',
+    chatData: null,
+    geminiMd: '',
+    characterMd: '',
+    personaMd: '',
+    memoryMd: '',
+    lastGeneration: null,
+    filename: 'chat_export.md',
+  };
+
+  window.__onNativeFileSaved = function (success) {
+    if (success) {
+      showToast('✅ Файл экспорта успешно сохранён на устройство!');
+    }
+  };
+
+  function sanitizeFilenamePart(str) {
+    return String(str || 'chat')
+      .trim()
+      .replace(/[^\w\u0400-\u04FF-]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 32) || 'chat';
+  }
+
+  async function fetchFileContentSafe(relPath) {
+    if (!relPath) return '';
+    try {
+      const res = await apiFetch(`/api/files/file?path=${encodeURIComponent(relPath)}`);
+      return (res && typeof res.content === 'string') ? res.content : '';
+    } catch {
+      return '';
+    }
+  }
+
+  async function openExportChatModal(chatId = null) {
+    const targetId = chatId || state.currentChatId;
+    if (!targetId) {
+      return showToast('Сначала откройте или выберите чат для экспорта');
+    }
+
+    exportChatState.chatId = targetId;
+    openModal('exportChatModal');
+
+    const previewInput = document.getElementById('exportChatContentInput');
+    const fileLabel = document.getElementById('exportFileNameLabel');
+    const sizeBadge = document.getElementById('exportSizeBadge');
+    if (previewInput) previewInput.value = '⏳ Сборка истории чата, промтов и диагностики...';
+    if (fileLabel) fileLabel.textContent = `Файл: chat_${targetId}...`;
+    if (sizeBadge) sizeBadge.textContent = '...';
+
+    updateExportFormatButtons();
+
+    try {
+      const chatData = await apiFetch(`/api/chats/${targetId}`);
+      exportChatState.chatData = chatData;
+
+      let genData = null;
+      try {
+        const genRes = await apiFetch(`/api/chats/${targetId}/generation`);
+        if (genRes && genRes.generation) {
+          genData = genRes.generation;
+        }
+      } catch {
+        // ignore if endpoint not available on older runtime
+      }
+      if (!genData && targetId === state.currentChatId && state.lastGenerationData) {
+        genData = state.lastGenerationData;
+      }
+      exportChatState.lastGeneration = genData;
+
+      const charPath = chatData.character?.file_path || '';
+      const personaPath = chatData.persona?.file_path || '';
+      const memoryPath = chatData.memoryPath || `chats/chat_${targetId}/memory.md`;
+
+      const [geminiMd, characterMd, personaMd, memoryMd] = await Promise.all([
+        fetchFileContentSafe('GEMINI.md'),
+        fetchFileContentSafe(charPath),
+        fetchFileContentSafe(personaPath),
+        fetchFileContentSafe(memoryPath),
+      ]);
+
+      exportChatState.geminiMd = geminiMd;
+      exportChatState.characterMd = characterMd;
+      exportChatState.personaMd = personaMd;
+      exportChatState.memoryMd = memoryMd;
+
+      rebuildExportPreview();
+    } catch (err) {
+      if (previewInput) {
+        previewInput.value = `❌ Ошибка загрузки чата #${targetId} для экспорта: ${err.message}`;
+      }
+      showToast('Ошибка подготовки экспорта: ' + err.message);
+    }
+  }
+
+  function updateExportFormatButtons() {
+    const mdBtn = document.getElementById('exportFmtMdBtn');
+    const jsonBtn = document.getElementById('exportFmtJsonBtn');
+    if (mdBtn) mdBtn.classList.toggle('active', exportChatState.format === 'markdown');
+    if (jsonBtn) jsonBtn.classList.toggle('active', exportChatState.format === 'json');
+  }
+
+  function setExportFormat(fmt) {
+    exportChatState.format = fmt === 'json' ? 'json' : 'markdown';
+    updateExportFormatButtons();
+    rebuildExportPreview();
+  }
+
+  function rebuildExportPreview() {
+    const data = exportChatState.chatData;
+    if (!data || !data.chat) return;
+
+    const includeThoughts = !!document.getElementById('exportOptThoughts')?.checked;
+    const includePrompts = !!document.getElementById('exportOptPrompts')?.checked;
+    const includeDiagnostics = !!document.getElementById('exportOptDiagnostics')?.checked;
+
+    const { chat, character, persona, messages = [] } = data;
+    const safeChar = sanitizeFilenamePart(character?.name || 'character');
+    const ext = exportChatState.format === 'json' ? 'json' : 'md';
+    const filename = `chat_${chat.id}_${safeChar}.${ext}`;
+    exportChatState.filename = filename;
+
+    let output = '';
+
+    if (exportChatState.format === 'json') {
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        appVersion: state.updateInfo?.currentVersion || '1.3.3',
+        chat: {
+          id: chat.id,
+          title: chat.title,
+          model_id: chat.model_id,
+          model_label: getShortModelName(chat.model_id),
+          effort: chat.effort || 'high',
+          created_at: chat.created_at,
+          updated_at: chat.updated_at,
+        },
+        character: {
+          id: character?.id,
+          name: character?.name,
+          file_path: character?.file_path,
+          description: character?.description,
+          greeting: character?.greeting,
+          scenario: character?.scenario,
+        },
+        persona: {
+          id: persona?.id,
+          name: persona?.name,
+          file_path: persona?.file_path,
+          description: persona?.description,
+        },
+      };
+
+      if (includePrompts) {
+        payload.systemPrompts = {
+          'GEMINI.md': exportChatState.geminiMd || '',
+          characterCardMarkdown: exportChatState.characterMd || '',
+          personaCardMarkdown: exportChatState.personaMd || '',
+          chatMemoryMarkdown: exportChatState.memoryMd || '',
+        };
+      }
+
+      payload.messages = messages.map((m, idx) => {
+        const swipes = Array.isArray(m.swipes) && m.swipes.length ? m.swipes : [m.content || ''];
+        const swipeIdx = Math.min(Math.max(0, m.swipe_index || 0), swipes.length - 1);
+        const thoughtSwipes = Array.isArray(m.thought_swipes) ? m.thought_swipes : [];
+        const activeThought = thoughtSwipes[swipeIdx] || m.thoughts || '';
+
+        const msgObj = {
+          index: idx + 1,
+          id: m.id,
+          role: m.role,
+          author: m.role === 'user' ? (persona?.name || 'User') : (character?.name || 'Assistant'),
+          created_at: m.created_at,
+          content: swipes[swipeIdx] || m.content || '',
+        };
+
+        if (includeThoughts && activeThought) {
+          msgObj.thoughts = activeThought;
+        }
+        if (includeDiagnostics && swipes.length > 1) {
+          msgObj.swipe_index = swipeIdx;
+          msgObj.swipes = swipes;
+          if (includeThoughts && thoughtSwipes.length) {
+            msgObj.thought_swipes = thoughtSwipes;
+          }
+        }
+        return msgObj;
+      });
+
+      if (includeDiagnostics && exportChatState.lastGeneration) {
+        payload.lastGenerationDiagnostics = exportChatState.lastGeneration;
+      }
+
+      output = JSON.stringify(payload, null, 2);
+    } else {
+      const lines = [];
+      const nowStr = new Date().toLocaleString('ru-RU');
+      lines.push(`# 🎭 Экспорт чата #${chat.id}: ${character?.name || 'Персонаж'} & ${persona?.name || 'Игрок'}`);
+      lines.push('');
+      lines.push(`- **Дата экспорта:** ${nowStr}`);
+      lines.push(`- **Персонаж:** ${character?.name || '—'} (\`${character?.file_path || ''}\`)`);
+      lines.push(`- **Персона игрока:** ${persona?.name || '—'} (\`${persona?.file_path || ''}\`)`);
+      lines.push(`- **Модель AGY:** \`${chat.model_id}\` (${getShortModelName(chat.model_id)})`);
+      lines.push(`- **Reasoning Effort:** \`${String(chat.effort || 'high').toUpperCase()}\``);
+      lines.push(`- **Сообщений в чате:** ${messages.length}`);
+      lines.push('');
+
+      if (includePrompts) {
+        lines.push('---');
+        lines.push('## 📋 Системные промты и файлы контекста');
+        lines.push('');
+        lines.push('<details>');
+        lines.push('<summary><b>1. GEMINI.md (Глобальные инструкции)</b></summary>');
+        lines.push('');
+        lines.push('```markdown');
+        lines.push((exportChatState.geminiMd || '(пусто)').trim());
+        lines.push('```');
+        lines.push('</details>');
+        lines.push('');
+
+        lines.push('<details>');
+        lines.push(`<summary><b>2. Карточка персонажа: ${character?.name || ''} (${character?.file_path || ''})</b></summary>`);
+        lines.push('');
+        lines.push('```markdown');
+        lines.push((exportChatState.characterMd || character?.description || '(пусто)').trim());
+        lines.push('```');
+        lines.push('</details>');
+        lines.push('');
+
+        lines.push('<details>');
+        lines.push(`<summary><b>3. Персона игрока: ${persona?.name || ''} (${persona?.file_path || ''})</b></summary>`);
+        lines.push('');
+        lines.push('```markdown');
+        lines.push((exportChatState.personaMd || persona?.description || '(пусто)').trim());
+        lines.push('```');
+        lines.push('</details>');
+        lines.push('');
+
+        if ((exportChatState.memoryMd || '').trim()) {
+          lines.push('<details>');
+          lines.push(`<summary><b>4. Память чата (${data.memoryPath || `chats/chat_${chat.id}/memory.md`})</b></summary>`);
+          lines.push('');
+          lines.push('```markdown');
+          lines.push(exportChatState.memoryMd.trim());
+          lines.push('```');
+          lines.push('</details>');
+          lines.push('');
+        }
+      }
+
+      lines.push('---');
+      lines.push(`## 💬 История диалога (${messages.length} сообщ.)`);
+      lines.push('');
+
+      messages.forEach((m, idx) => {
+        const isUser = m.role === 'user';
+        const authorLabel = isUser
+          ? `👤 ${persona?.name || 'User'} (Игрок)`
+          : `🎭 ${character?.name || 'Character'} (ИИ)`;
+        const swipes = Array.isArray(m.swipes) && m.swipes.length ? m.swipes : [m.content || ''];
+        const swipeIdx = Math.min(Math.max(0, m.swipe_index || 0), swipes.length - 1);
+        const activeText = swipes[swipeIdx] || m.content || '';
+        const thoughtSwipes = Array.isArray(m.thought_swipes) ? m.thought_swipes : [];
+        const activeThought = (thoughtSwipes[swipeIdx] || m.thoughts || '').trim();
+
+        lines.push(`### [#${idx + 1}] ${authorLabel}`);
+        if (m.created_at) {
+          lines.push(`*Время: ${m.created_at}${swipes.length > 1 ? ` • Выбран вариант ${swipeIdx + 1}/${swipes.length}` : ''}*`);
+        }
+        lines.push('');
+
+        if (includeThoughts && activeThought) {
+          lines.push('<details>');
+          lines.push(`<summary>💭 Мысли модели (${activeThought.length} симв.)</summary>`);
+          lines.push('');
+          lines.push('```text');
+          lines.push(activeThought);
+          lines.push('```');
+          lines.push('</details>');
+          lines.push('');
+        }
+
+        lines.push(activeText || '*(пустое сообщение)*');
+        lines.push('');
+
+        if (includeDiagnostics && swipes.length > 1) {
+          lines.push('<details>');
+          lines.push(`<summary>🔄 Все варианты ответа (Swipes: ${swipes.length})</summary>`);
+          lines.push('');
+          swipes.forEach((swText, sIdx) => {
+            lines.push(`#### Вариант ${sIdx + 1}/${swipes.length}${sIdx === swipeIdx ? ' (Активный)' : ''}`);
+            const swThought = (thoughtSwipes[sIdx] || '').trim();
+            if (includeThoughts && swThought) {
+              lines.push(`> 💭 Мысли варианта ${sIdx + 1}: ${swThought.replace(/\n+/g, ' ')}`);
+              lines.push('');
+            }
+            lines.push(swText || '*(пусто)*');
+            lines.push('');
+          });
+          lines.push('</details>');
+          lines.push('');
+        }
+      });
+
+      if (includeDiagnostics && exportChatState.lastGeneration) {
+        const gen = exportChatState.lastGeneration;
+        lines.push('---');
+        lines.push('## 📡 Диагностика последней генерации AGY');
+        lines.push('');
+        lines.push(`- **Статус:** \`${gen.status || 'unknown'}\``);
+        lines.push(`- **Модель:** \`${gen.modelId || chat.model_id}\` (${gen.modelLabel || ''})`);
+        lines.push(`- **Effort:** \`${gen.effort || chat.effort || 'high'}\``);
+        lines.push(`- **HTTP статус:** \`${gen.httpStatus || 0}\``);
+        lines.push(`- **Длительность:** ${gen.elapsedSec || 0} сек.`);
+        if (gen.error) {
+          lines.push(`- **Ошибка:** \`${gen.error}\``);
+        }
+        lines.push('');
+        if (Array.isArray(gen.logs) && gen.logs.length) {
+          lines.push('### Журнал выполнения по шагам:');
+          lines.push('```text');
+          gen.logs.forEach(l => {
+            lines.push(`[+${l.t || '0.0'}s] [${l.level || 'info'}] ${l.text || ''}`);
+          });
+          lines.push('```');
+          lines.push('');
+        }
+      }
+
+      output = lines.join('\n');
+    }
+
+    const previewInput = document.getElementById('exportChatContentInput');
+    const fileLabel = document.getElementById('exportFileNameLabel');
+    const sizeBadge = document.getElementById('exportSizeBadge');
+
+    if (previewInput) previewInput.value = output;
+    if (fileLabel) fileLabel.textContent = `Файл: exports/${filename}`;
+    if (sizeBadge) {
+      const kb = (new Blob([output]).size / 1024).toFixed(1);
+      const lineCount = output.split('\n').length;
+      sizeBadge.textContent = `${kb} KB • ${lineCount} строк`;
+    }
+  }
+
+  async function saveExportToWorkspaceSilently(filename, content) {
+    try {
+      await apiFetch('/api/files/file', {
+        method: 'POST',
+        body: JSON.stringify({
+          path: `exports/${filename}`,
+          content,
+        }),
+      });
+      return `exports/${filename}`;
+    } catch {
+      return null;
+    }
+  }
+
+  async function copyExportedChat() {
+    const previewInput = document.getElementById('exportChatContentInput');
+    const text = previewInput ? previewInput.value : '';
+    if (!text) return showToast('Нет данных для копирования');
+
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        showToast('📋 Экспорт чата скопирован в буфер обмена!');
+        return;
+      }
+    } catch {
+      // Fallback below
+    }
+
+    try {
+      if (previewInput) {
+        previewInput.focus();
+        previewInput.select();
+        document.execCommand('copy');
+        showToast('📋 Экспорт чата скопирован в буфер обмена!');
+      }
+    } catch (err) {
+      showToast('Не удалось скопировать: ' + err.message);
+    }
+  }
+
+  async function shareExportedChat() {
+    const previewInput = document.getElementById('exportChatContentInput');
+    const text = previewInput ? previewInput.value : '';
+    const filename = exportChatState.filename || 'chat_export.md';
+    if (!text) return showToast('Нет данных для отправки');
+
+    await saveExportToWorkspaceSilently(filename, text);
+
+    if (typeof window.AndroidServer !== 'undefined' && typeof window.AndroidServer.shareExportText === 'function') {
+      window.AndroidServer.shareExportText(filename, text);
+      return;
+    }
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: filename,
+          text,
+        });
+        return;
+      } catch {
+        // User cancelled or share failed
+      }
+    }
+
+    await copyExportedChat();
+  }
+
+  async function downloadExportedChat() {
+    const previewInput = document.getElementById('exportChatContentInput');
+    const text = previewInput ? previewInput.value : '';
+    const filename = exportChatState.filename || 'chat_export.md';
+    if (!text) return showToast('Нет данных для сохранения');
+
+    const savedWorkspacePath = await saveExportToWorkspaceSilently(filename, text);
+    const mimeType = exportChatState.format === 'json' ? 'application/json' : 'text/markdown';
+
+    if (typeof window.AndroidServer !== 'undefined' && typeof window.AndroidServer.saveExportFile === 'function') {
+      window.AndroidServer.saveExportFile(filename, text, mimeType);
+      if (savedWorkspacePath) {
+        showToast(`💾 Также сохранено в 📁 Файлы → ${savedWorkspacePath}`);
+      }
+      return;
+    }
+
+    try {
+      const blob = new Blob([text], { type: `${mimeType};charset=utf-8` });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 300);
+    } catch {
+      // ignore if WebView blocks blob download
+    }
+
+    if (savedWorkspacePath) {
+      showToast(`✅ Сохранено в рабочую папку: 📁 Файлы → ${savedWorkspacePath}`);
+    } else {
+      showToast('💾 Файл подготовлен для сохранения');
+    }
+  }
+
   // Handle Enter key in chat textarea (Ctrl+Enter or Enter on desktop)
   document.addEventListener('DOMContentLoaded', () => {
     const chatInput = document.getElementById('chatInput');
@@ -1958,6 +2420,12 @@
     confirmCreateChat,
     openChatRoom,
     closeChatRoom,
+    openExportChatModal,
+    setExportFormat,
+    rebuildExportPreview,
+    copyExportedChat,
+    shareExportedChat,
+    downloadExportedChat,
     toggleStreamingDetails,
     closeStreamingBox,
     sendMessage,

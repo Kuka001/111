@@ -83,6 +83,7 @@ public class LocalBackendServer {
     private static final String AGY_CLIENT_METADATA_HEADER = "{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"WINDOWS\",\"pluginType\":\"GEMINI\"}";
 
     private final Context context;
+    private final MainActivity activity;
     private final WebView webView;
     private final Handler mainHandler;
     private final ExecutorService executor;
@@ -169,6 +170,7 @@ public class LocalBackendServer {
 
     public LocalBackendServer(Context context, WebView webView) {
         this.context = context.getApplicationContext();
+        this.activity = (context instanceof MainActivity) ? (MainActivity) context : null;
         this.webView = webView;
         this.mainHandler = new Handler(Looper.getMainLooper());
         this.executor = Executors.newCachedThreadPool();
@@ -215,6 +217,35 @@ public class LocalBackendServer {
                 }
             }
         });
+    }
+
+    @JavascriptInterface
+    public void shareExportText(final String filename, final String content) {
+        if (content == null) return;
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Intent sendIntent = new Intent(Intent.ACTION_SEND);
+                    sendIntent.setType("text/plain");
+                    sendIntent.putExtra(Intent.EXTRA_SUBJECT, filename != null ? filename : "AGY Roleplay Chat Export");
+                    sendIntent.putExtra(Intent.EXTRA_TEXT, content);
+                    Intent chooser = Intent.createChooser(sendIntent, "Поделиться экспортированным чатом");
+                    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    context.startActivity(chooser);
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public void saveExportFile(final String filename, final String content, final String mimeType) {
+        if (activity != null) {
+            activity.startSaveDocument(filename, content, mimeType);
+        } else {
+            shareExportText(filename, content);
+        }
     }
 
     @JavascriptInterface
@@ -2552,8 +2583,8 @@ public class LocalBackendServer {
             try {
                 JSONObject fallback = new JSONObject();
                 fallback.put("appName", "AGY Roleplay Studio");
-                fallback.put("version", "1.3.2");
-                fallback.put("build", 6);
+                fallback.put("version", "1.3.3");
+                fallback.put("build", 7);
                 fallback.put("gitRepo", "Kuka001/111");
                 fallback.put("gitBranch", "main");
                 fallback.put("apkPath", "agy-roleplay-android16.apk");
@@ -2635,8 +2666,8 @@ public class LocalBackendServer {
         gitBranch = gitBranch.trim();
 
         boolean otaActive = "1".equals(getSetting("ota_active", "0"));
-        String bundledVersion = bundledManifest.optString("version", "1.3.2");
-        int bundledBuild = bundledManifest.optInt("build", 6);
+        String bundledVersion = bundledManifest.optString("version", "1.3.3");
+        int bundledBuild = bundledManifest.optInt("build", 7);
         String currentVersion = getSetting("installed_version", localManifest.optString("version", bundledVersion));
         int currentBuild = Integer.parseInt(getSetting("installed_build", String.valueOf(localManifest.optInt("build", bundledBuild))));
         if (!otaActive || bundledBuild > currentBuild) {

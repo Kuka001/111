@@ -24,12 +24,34 @@ import android.webkit.WebViewClient;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+
 public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_RESULT_CODE = 1001;
+    private static final int SAVE_DOCUMENT_RESULT_CODE = 1002;
     private WebView webView;
     private FrameLayout rootLayout;
     private ValueCallback<Uri[]> filePathCallback;
     private LocalBackendServer localBackendServer;
+    private String pendingSaveContent;
+
+    public void startSaveDocument(final String filename, final String content, final String mimeType) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    pendingSaveContent = content != null ? content : "";
+                    Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    intent.setType(mimeType != null && !mimeType.isEmpty() ? mimeType : "text/plain");
+                    intent.putExtra(Intent.EXTRA_TITLE, filename != null && !filename.isEmpty() ? filename : "chat_export.md");
+                    startActivityForResult(intent, SAVE_DOCUMENT_RESULT_CODE);
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -204,6 +226,27 @@ public class MainActivity extends Activity {
             }
             filePathCallback.onReceiveValue(results);
             filePathCallback = null;
+            return;
+        }
+        if (requestCode == SAVE_DOCUMENT_RESULT_CODE) {
+            if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null && pendingSaveContent != null) {
+                try {
+                    OutputStream os = getContentResolver().openOutputStream(data.getData());
+                    if (os != null) {
+                        os.write(pendingSaveContent.getBytes(StandardCharsets.UTF_8));
+                        os.flush();
+                        os.close();
+                        if (webView != null) {
+                            webView.evaluateJavascript("if(window.__onNativeFileSaved)window.__onNativeFileSaved(true);", null);
+                        }
+                    }
+                } catch (Exception e) {
+                    if (webView != null) {
+                        webView.evaluateJavascript("if(window.__onNativeFileSaved)window.__onNativeFileSaved(false);", null);
+                    }
+                }
+            }
+            pendingSaveContent = null;
             return;
         }
         super.onActivityResult(requestCode, resultCode, data);

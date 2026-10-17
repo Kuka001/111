@@ -71,6 +71,7 @@
             <div class="chat-header-actions">
               <button class="chip-btn" onclick="window.appUI.openPersonaQuickModal()" id="chatPersonaChip" title="Выбрать мою персону">👤 Персона</button>
               <button class="chip-btn" onclick="window.appUI.openChatMemoryFile()" title="Память чата (файл)">🧠</button>
+              <button class="chip-btn" onclick="window.appUI.openExportChatModal()" title="Экспортировать чат">📤 Экспорт</button>
             </div>
           </div>
 
@@ -596,6 +597,49 @@
         <div class="modal-footer">
           <button class="btn-secondary" onclick="window.appUI.closeModal('editMessageModal')">Отмена</button>
           <button class="btn-primary" onclick="window.appUI.saveEditedMessage()">Сохранить</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL 7: EXPORT CHAT MODAL -->
+    <div id="exportChatModal" class="modal-overlay hidden">
+      <div class="modal-sheet">
+        <div class="modal-header">
+          <h3 id="exportChatModalTitle">📤 Экспорт чата</h3>
+          <button class="close-btn" onclick="window.appUI.closeModal('exportChatModal')">✕</button>
+        </div>
+        <div class="modal-body">
+          <label class="field-label">Формат экспорта</label>
+          <div class="effort-selector" id="exportFormatGroup">
+            <button type="button" class="effort-btn active" data-format="markdown" onclick="window.appUI.setExportFormat('markdown')">📄 Markdown (.md)</button>
+            <button type="button" class="effort-btn" data-format="json" onclick="window.appUI.setExportFormat('json')">📦 JSON (.json)</button>
+          </div>
+
+          <div class="export-options-grid" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--text-secondary);">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <input type="checkbox" id="exportOptThoughts" checked onchange="window.appUI.rebuildExportPreview()" />
+              <span>Включить мысли модели (💭 Thinking)</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <input type="checkbox" id="exportOptPrompts" checked onchange="window.appUI.rebuildExportPreview()" />
+              <span>Включить GEMINI.md, карточку персонажа, персону и память</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <input type="checkbox" id="exportOptDiagnostics" checked onchange="window.appUI.rebuildExportPreview()" />
+              <span>Включить все варианты (свайпы) и лог последнего запроса</span>
+            </label>
+          </div>
+
+          <div class="row-between" style="margin-top:10px;">
+            <label class="field-label" style="margin:0;">Предпросмотр (<span id="exportFileNameLabel">chat.md</span>)</label>
+            <span id="exportSizeBadge" class="model-badge">0 симв.</span>
+          </div>
+          <textarea id="exportChatContentInput" class="text-area code-area" rows="10" readonly style="margin-top:6px;font-size:11.5px;"></textarea>
+        </div>
+        <div class="modal-footer" style="flex-wrap:wrap;gap:8px;">
+          <button class="btn-secondary" style="flex:1 1 auto;" onclick="window.appUI.copyExportedChat()">📋 Скопировать</button>
+          <button class="btn-secondary" style="flex:1 1 auto;" onclick="window.appUI.shareExportedChat()">📤 Поделиться</button>
+          <button class="btn-primary" style="flex:1 1 100%;" onclick="window.appUI.downloadExportedChat()">💾 Сохранить файл (.md / .json)</button>
         </div>
       </div>
     </div>
