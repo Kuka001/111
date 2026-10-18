@@ -2503,7 +2503,7 @@
         lines.push(`<summary><b>2. Карточка персонажа: ${character?.name || ''} (${character?.file_path || ''})</b></summary>`);
         lines.push('');
         lines.push('```markdown');
-        lines.push((exportChatState.characterMd || character?.description || '(пусто)').trim());
+        lines.push((exportChatState.characterMd || character?.fileContent || character?.description || '(пусто)').trim());
         lines.push('```');
         lines.push('</details>');
         lines.push('');
@@ -2512,7 +2512,7 @@
         lines.push(`<summary><b>3. Персона игрока: ${persona?.name || ''} (${persona?.file_path || ''})</b></summary>`);
         lines.push('');
         lines.push('```markdown');
-        lines.push((exportChatState.personaMd || persona?.description || '(пусто)').trim());
+        lines.push((exportChatState.personaMd || persona?.fileContent || persona?.description || '(пусто)').trim());
         lines.push('```');
         lines.push('</details>');
         lines.push('');
@@ -2601,7 +2601,11 @@
           lines.push('### Журнал выполнения по шагам:');
           lines.push('```text');
           gen.logs.forEach(l => {
-            lines.push(`[+${l.t || '0.0'}s] [${l.level || 'info'}] ${l.text || ''}`);
+            if (typeof l === 'string') {
+              lines.push(l);
+            } else {
+              lines.push(`[+${l.t || '0.0'}s] [${l.level || 'info'}] ${l.text || l.message || ''}`);
+            }
           });
           lines.push('```');
           lines.push('');
