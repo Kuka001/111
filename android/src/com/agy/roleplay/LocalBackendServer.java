@@ -305,166 +305,186 @@ public class LocalBackendServer {
     // INITIALIZATION: WORKSPACE FOLDERS, DEFAULT FILES & SQLITE DATABASE
     // =========================================================================
     private synchronized void initWorkspaceAndDatabase() {
-        String[] subdirs = new String[]{"characters", "personas", "lore", "memories", "avatars", "exports"};
-        if (!workspaceDir.exists()) {
-            workspaceDir.mkdirs();
-        }
-        for (String sub : subdirs) {
-            File d = new File(workspaceDir, sub);
-            if (!d.exists()) d.mkdirs();
-        }
-
-        seedDefaultWorkspaceFiles();
-
-        File dbFile = context.getDatabasePath("agy_roleplay.db");
-        if (dbFile.getParentFile() != null && !dbFile.getParentFile().exists()) {
-            dbFile.getParentFile().mkdirs();
-        }
-        db = SQLiteDatabase.openOrCreateDatabase(dbFile, null);
-        db.execSQL("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-        db.execSQL("CREATE TABLE IF NOT EXISTS characters (" +
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
-            "name TEXT NOT NULL, " +
-            "file_path TEXT NOT NULL UNIQUE, " +
-            "avatar_url TEXT DEFAULT '', " +
-            "first_message TEXT DEFAULT '', " +
-            "description_preview TEXT DEFAULT '', " +
-            "created_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
-            "updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
-        db.execSQL("CREATE TABLE IF NOT EXISTS personas (" +
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
-            "name TEXT NOT NULL, " +
-            "file_path TEXT NOT NULL UNIQUE, " +
-            "avatar_url TEXT DEFAULT '', " +
-            "description_preview TEXT DEFAULT '', " +
-            "is_default INTEGER DEFAULT 0, " +
-            "created_at TEXT DEFAULT CURRENT_TIMESTAMP)");
-        db.execSQL("CREATE TABLE IF NOT EXISTS chats (" +
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
-            "title TEXT NOT NULL, " +
-            "character_id INTEGER NOT NULL, " +
-            "persona_id INTEGER NOT NULL, " +
-            "model_id TEXT NOT NULL, " +
-            "effort TEXT DEFAULT 'high', " +
-            "memory_file_path TEXT DEFAULT '', " +
-            "created_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
-            "updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
-        db.execSQL("CREATE TABLE IF NOT EXISTS messages (" +
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
-            "chat_id INTEGER NOT NULL, " +
-            "role TEXT NOT NULL, " +
-            "content TEXT NOT NULL, " +
-            "thoughts TEXT DEFAULT '', " +
-            "swipes_json TEXT DEFAULT '[]', " +
-            "swipe_index INTEGER DEFAULT 0, " +
-            "created_at TEXT DEFAULT CURRENT_TIMESTAMP)");
-
-        setDefaultSetting("project_id", "project-4c7a8e8a-764a-42bc-bdf");
-        setDefaultSetting("selected_model", "gemini-4-argon");
-        setDefaultSetting("selected_effort", "high");
-        setDefaultSetting("active_persona_id", "1");
-        setDefaultSetting("context_messages_limit", "30");
-        setDefaultSetting("safety_threshold", "OFF");
-        setDefaultSetting("google_auth_token", "");
-        setDefaultSetting("agy_access_token", "");
-        setDefaultSetting("agy_refresh_token", "");
-        setDefaultSetting("agy_token_expiry", "0");
-        setDefaultSetting("agy_user_email", "");
-        setDefaultSetting("agy_discovered_project", "");
-        setDefaultSetting("git_repo", "Kuka001/111");
-        setDefaultSetting("git_branch", "main");
-        setDefaultSetting("installed_version", "1.4.2");
-        setDefaultSetting("installed_build", "11");
-        setDefaultSetting("installed_commit", "");
-        setDefaultSetting("ota_active", "0");
-
-        // Reconcile bundled APK version with any cached OTA bundle
         try {
-            JSONObject bundled = readBundledVersionManifest();
-            int bundledBuild = bundled.optInt("build", 11);
-            String bundledVer = bundled.optString("version", "1.4.2");
-            int savedBuild = Integer.parseInt(getSetting("installed_build", "0"));
-            if (bundledBuild > savedBuild) {
-                deleteRecursive(otaWwwDir);
-                setSetting("ota_active", "0");
-                setSetting("installed_version", bundledVer);
-                setSetting("installed_build", String.valueOf(bundledBuild));
+            String[] subdirs = new String[]{"characters", "personas", "lore", "memories", "avatars", "exports"};
+            if (!workspaceDir.exists()) {
+                workspaceDir.mkdirs();
             }
+            for (String sub : subdirs) {
+                File d = new File(workspaceDir, sub);
+                if (!d.exists()) d.mkdirs();
+            }
+
+            File dbFile = context.getDatabasePath("agy_roleplay.db");
+            if (dbFile.getParentFile() != null && !dbFile.getParentFile().exists()) {
+                dbFile.getParentFile().mkdirs();
+            }
+            db = SQLiteDatabase.openOrCreateDatabase(dbFile, null);
+            db.execSQL("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+            db.execSQL("CREATE TABLE IF NOT EXISTS characters (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                "name TEXT NOT NULL, " +
+                "file_path TEXT NOT NULL UNIQUE, " +
+                "avatar_url TEXT DEFAULT '', " +
+                "first_message TEXT DEFAULT '', " +
+                "description_preview TEXT DEFAULT '', " +
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
+                "updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+            db.execSQL("CREATE TABLE IF NOT EXISTS personas (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                "name TEXT NOT NULL, " +
+                "file_path TEXT NOT NULL UNIQUE, " +
+                "avatar_url TEXT DEFAULT '', " +
+                "description_preview TEXT DEFAULT '', " +
+                "is_default INTEGER DEFAULT 0, " +
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+            db.execSQL("CREATE TABLE IF NOT EXISTS chats (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                "title TEXT NOT NULL, " +
+                "character_id INTEGER NOT NULL, " +
+                "persona_id INTEGER NOT NULL, " +
+                "model_id TEXT NOT NULL, " +
+                "effort TEXT DEFAULT 'high', " +
+                "memory_file_path TEXT DEFAULT '', " +
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
+                "updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+            db.execSQL("CREATE TABLE IF NOT EXISTS messages (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                "chat_id INTEGER NOT NULL, " +
+                "role TEXT NOT NULL, " +
+                "content TEXT NOT NULL, " +
+                "thoughts TEXT DEFAULT '', " +
+                "swipes_json TEXT DEFAULT '[]', " +
+                "swipe_index INTEGER DEFAULT 0, " +
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+
+            setDefaultSetting("project_id", "project-4c7a8e8a-764a-42bc-bdf");
+            setDefaultSetting("selected_model", "gemini-4-argon");
+            setDefaultSetting("selected_effort", "high");
+            setDefaultSetting("active_persona_id", "1");
+            setDefaultSetting("context_messages_limit", "30");
+            setDefaultSetting("safety_threshold", "OFF");
+            setDefaultSetting("google_auth_token", "");
+            setDefaultSetting("agy_access_token", "");
+            setDefaultSetting("agy_refresh_token", "");
+            setDefaultSetting("agy_token_expiry", "0");
+            setDefaultSetting("agy_user_email", "");
+            setDefaultSetting("agy_discovered_project", "");
+            setDefaultSetting("git_repo", "Kuka001/111");
+            setDefaultSetting("git_branch", "main");
+            setDefaultSetting("installed_version", "1.4.3");
+            setDefaultSetting("installed_build", "12");
+            setDefaultSetting("installed_commit", "");
+            setDefaultSetting("ota_active", "0");
+
+            // Now that SQLite db and tables are initialized, seed GEMINI.md and clean up untouched stock files
+            seedDefaultWorkspaceFiles();
+
+            // Reconcile bundled APK version with any cached OTA bundle
+            try {
+                JSONObject bundled = readBundledVersionManifest();
+                int bundledBuild = bundled.optInt("build", 12);
+                String bundledVer = bundled.optString("version", "1.4.3");
+                int savedBuild = Integer.parseInt(getSetting("installed_build", "0"));
+                if (bundledBuild > savedBuild) {
+                    deleteRecursive(otaWwwDir);
+                    setSetting("ota_active", "0");
+                    setSetting("installed_version", bundledVer);
+                    setSetting("installed_build", String.valueOf(bundledBuild));
+                }
+            } catch (Exception ignored) {
+            }
+
+            // Normalize any legacy model IDs with effort suffixes (-low, -medium, -high, -max)
+            String curModel = getSetting("selected_model", "gemini-4-argon");
+            String normModel = normalizeBaseModelId(curModel);
+            if (!normModel.equals(curModel)) {
+                setSetting("selected_model", normModel);
+            }
+
+            syncWorkspaceFilesWithDb();
         } catch (Exception ignored) {
         }
-
-        // Normalize any legacy model IDs with effort suffixes (-low, -medium, -high, -max)
-        String curModel = getSetting("selected_model", "gemini-4-argon");
-        String normModel = normalizeBaseModelId(curModel);
-        if (!normModel.equals(curModel)) {
-            setSetting("selected_model", normModel);
-        }
-
-        syncWorkspaceFilesWithDb();
     }
 
     private void setDefaultSetting(String key, String value) {
-        Cursor c = db.rawQuery("SELECT value FROM settings WHERE key = ?", new String[]{key});
-        boolean exists = c.moveToFirst();
-        c.close();
-        if (!exists) {
-            ContentValues cv = new ContentValues();
-            cv.put("key", key);
-            cv.put("value", value);
-            db.insert("settings", null, cv);
+        if (db == null) return;
+        try {
+            Cursor c = db.rawQuery("SELECT value FROM settings WHERE key = ?", new String[]{key});
+            boolean exists = c.moveToFirst();
+            c.close();
+            if (!exists) {
+                ContentValues cv = new ContentValues();
+                cv.put("key", key);
+                cv.put("value", value);
+                db.insert("settings", null, cv);
+            }
+        } catch (Exception ignored) {
         }
     }
 
     private String getSetting(String key, String fallback) {
-        Cursor c = db.rawQuery("SELECT value FROM settings WHERE key = ?", new String[]{key});
-        String val = fallback;
-        if (c.moveToFirst()) {
-            val = c.getString(0);
+        if (db == null) return fallback;
+        try {
+            Cursor c = db.rawQuery("SELECT value FROM settings WHERE key = ?", new String[]{key});
+            String val = fallback;
+            if (c.moveToFirst()) {
+                val = c.getString(0);
+            }
+            c.close();
+            return val != null ? val : fallback;
+        } catch (Exception e) {
+            return fallback;
         }
-        c.close();
-        return val != null ? val : fallback;
     }
 
     private void setSetting(String key, String value) {
-        ContentValues cv = new ContentValues();
-        cv.put("key", key);
-        cv.put("value", value != null ? value : "");
-        db.insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+        if (db == null) return;
+        try {
+            ContentValues cv = new ContentValues();
+            cv.put("key", key);
+            cv.put("value", value != null ? value : "");
+            db.insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+        } catch (Exception ignored) {
+        }
     }
 
     private void seedDefaultWorkspaceFiles() {
-        File geminiMd = new File(workspaceDir, "GEMINI.md");
-        if (!geminiMd.exists()) {
-            writeTextFile(geminiMd, "# GEMINI.md\n\n");
-        } else {
-            String existingGemini = readTextFile(geminiMd);
-            if (existingGemini.startsWith("# Системные правила ролевой игры (AGY Roleplay Engine)")) {
+        try {
+            File geminiMd = new File(workspaceDir, "GEMINI.md");
+            if (!geminiMd.exists()) {
                 writeTextFile(geminiMd, "# GEMINI.md\n\n");
+            } else {
+                String existingGemini = readTextFile(geminiMd);
+                if (existingGemini.startsWith("# Системные правила ролевой игры (AGY Roleplay Engine)")) {
+                    writeTextFile(geminiMd, "# GEMINI.md\n\n");
+                }
             }
-        }
 
-        // One-time cleanup of previously auto-seeded stock templates if untouched by user
-        if (!"1".equals(getSetting("stock_cleaned_v141", "0"))) {
-            File elenaMd = new File(workspaceDir, "characters/elena.md");
-            if (elenaMd.exists() && readTextFile(elenaMd).contains("Хранительница Звёздного Архива")) {
-                elenaMd.delete();
-                db.delete("characters", "file_path = ?", new String[]{"characters/elena.md"});
+            // One-time cleanup of previously auto-seeded stock templates if untouched by user
+            if (db != null && !"1".equals(getSetting("stock_cleaned_v141", "0"))) {
+                File elenaMd = new File(workspaceDir, "characters/elena.md");
+                if (elenaMd.exists() && readTextFile(elenaMd).contains("Хранительница Звёздного Архива")) {
+                    elenaMd.delete();
+                    db.delete("characters", "file_path = ?", new String[]{"characters/elena.md"});
+                }
+                File kiraMd = new File(workspaceDir, "characters/kira.md");
+                if (kiraMd.exists() && readTextFile(kiraMd).contains("Кибер-нетраннер из Нео-Токио")) {
+                    kiraMd.delete();
+                    db.delete("characters", "file_path = ?", new String[]{"characters/kira.md"});
+                }
+                File kazumaMd = new File(workspaceDir, "personas/kazuma.md");
+                if (kazumaMd.exists() && readTextFile(kazumaMd).contains("Опытный путешественник между мирами")) {
+                    kazumaMd.delete();
+                    db.delete("personas", "file_path = ?", new String[]{"personas/kazuma.md"});
+                }
+                File worldsMd = new File(workspaceDir, "lore/worlds.md");
+                if (worldsMd.exists() && readTextFile(worldsMd).contains("Древняя цитадель на границе астрального разлома")) {
+                    worldsMd.delete();
+                }
+                setSetting("stock_cleaned_v141", "1");
             }
-            File kiraMd = new File(workspaceDir, "characters/kira.md");
-            if (kiraMd.exists() && readTextFile(kiraMd).contains("Кибер-нетраннер из Нео-Токио")) {
-                kiraMd.delete();
-                db.delete("characters", "file_path = ?", new String[]{"characters/kira.md"});
-            }
-            File kazumaMd = new File(workspaceDir, "personas/kazuma.md");
-            if (kazumaMd.exists() && readTextFile(kazumaMd).contains("Опытный путешественник между мирами")) {
-                kazumaMd.delete();
-                db.delete("personas", "file_path = ?", new String[]{"personas/kazuma.md"});
-            }
-            File worldsMd = new File(workspaceDir, "lore/worlds.md");
-            if (worldsMd.exists() && readTextFile(worldsMd).contains("Древняя цитадель на границе астрального разлома")) {
-                worldsMd.delete();
-            }
-            setSetting("stock_cleaned_v141", "1");
+        } catch (Exception ignored) {
         }
     }
 
@@ -2715,8 +2735,8 @@ public class LocalBackendServer {
             try {
                 JSONObject fallback = new JSONObject();
                 fallback.put("appName", "AGY Roleplay Studio");
-                fallback.put("version", "1.4.2");
-                fallback.put("build", 11);
+                fallback.put("version", "1.4.3");
+                fallback.put("build", 12);
                 fallback.put("gitRepo", "Kuka001/111");
                 fallback.put("gitBranch", "main");
                 fallback.put("apkPath", "agy-roleplay-android16.apk");

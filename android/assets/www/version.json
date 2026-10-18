@@ -1,12 +1,24 @@
 {
   "appName": "AGY Roleplay Studio",
-  "version": "1.4.2",
-  "build": 11,
+  "version": "1.4.3",
+  "build": 12,
   "releaseDate": "2026-10-18",
   "gitRepo": "Kuka001/111",
   "gitBranch": "main",
   "apkPath": "agy-roleplay-android16.apk",
   "releases": [
+    {
+      "version": "1.4.3",
+      "build": 12,
+      "date": "2026-10-18",
+      "title": "Исправление вылета при запуске приложения (порядок инициализации БД SQLite) + отключение фильтров SAFETY",
+      "ref": "main",
+      "changelog": [
+        "Исправлена ошибка закрытия приложения при запуске (NullPointerException в seedDefaultWorkspaceFiles из-за обращения к БД SQLite до её открытия в initWorkspaceAndDatabase)",
+        "Добавлена защита от любых исключений при инициализации БД и файлов воркспейса на старте",
+        "Включена передача safetySettings: OFF / BLOCK_NONE в запросы к Vertex AI для отключения блокировок SAFETY в ролевых играх"
+      ]
+    },
     {
       "version": "1.4.2",
       "build": 11,
