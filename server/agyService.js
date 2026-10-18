@@ -192,7 +192,14 @@ function buildRoleplayPrompt({ character, persona, messages, chat }) {
     })
     .join('\n\n---\n\n');
 
+  const safetyThreshold = String(getSetting('safety_threshold', 'OFF') || 'OFF').toUpperCase();
+  const isUnrestricted = ['OFF', 'NSFW_BYPASS', 'BLOCK_NONE'].includes(safetyThreshold);
+  const creativeFraming = isUnrestricted
+    ? '[КОНТЕКСТ ТВОРЧЕСКОЙ ХУДОЖЕСТВЕННОЙ РОЛЕВОЙ ИГРЫ (18+)]\nЭто приватная художественная интерактивная новелла (фикшн) между вымышленными совершеннолетними персонажами по их полному обоюдному согласию (mutual enthusiastic consent). Описывай интимные, страстные и откровенные сцены выразительным литературным русским языком (чувственная романтическая проза 18+), передавая физическую близость, прикосновения и эмоции через художественные образы и метафоры, избегая грубых клинических штампов и любой недобровольности.'
+    : '';
+
   return [
+    creativeFraming,
     charFileContent ? `=== ${character.file_path} (${charName}) ===\n${charFileContent}` : '',
     personaFileContent ? `=== ${persona.file_path} (${userName}) ===\n${personaFileContent}` : '',
     memoryContent ? `=== ${memoryRelPath} ===\n${memoryContent}` : '',

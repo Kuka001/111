@@ -276,11 +276,12 @@
             <label class="field-label" style="margin-top:12px;">Лимит контекста сообщений из истории БД</label>
             <input type="number" id="inputContextLimit" class="text-input" value="30" min="5" max="200" />
 
-            <label class="field-label" style="margin-top:12px;">Фильтр безопасности Vertex AI (safetySettings для Gemini)</label>
+            <label class="field-label" style="margin-top:12px;">Фильтр безопасности Vertex AI (Anti-SAFETY 18+ для Gemini)</label>
             <select id="inputSafetyThreshold" class="select-input" onchange="window.appUI.saveSettings()">
-              <option value="OFF" selected>OFF — Отключён полностью (NSFW / с авто-фоллбэком на BLOCK_NONE)</option>
-              <option value="BLOCK_NONE">BLOCK_NONE — Разрешить все категории без блокировки</option>
-              <option value="BLOCK_ONLY_HIGH">BLOCK_ONLY_HIGH — Блокировать только высокий порог</option>
+              <option value="OFF" selected>OFF — Отключён + 4-этапный авто-обход SAFETY (NSFW 18+)</option>
+              <option value="NSFW_BYPASS">NSFW_BYPASS — Форсированный обход SAFETY с 1-го шага (мысли OFF, худ. 18+)</option>
+              <option value="BLOCK_NONE">BLOCK_NONE — Разрешить все категории + авто-обход SAFETY</option>
+              <option value="BLOCK_ONLY_HIGH">BLOCK_ONLY_HIGH — Стандартный фильтр (блокировать высокий порог)</option>
             </select>
 
             <button class="btn-primary full-width" style="margin-top:14px;" onclick="window.appUI.saveSettings()">
