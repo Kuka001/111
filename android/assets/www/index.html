@@ -34,7 +34,7 @@
           <div class="section-top-bar chats-list-topbar">
             <div class="topbar-title-group">
               <h1 class="section-title">Чаты</h1>
-              <p class="section-desc" id="activePersonaBanner">Персона: Казума</p>
+              <p class="section-desc" id="activePersonaBanner">Персона не выбрана</p>
             </div>
             <div class="topbar-actions-group">
               <button class="model-pill-mini" onclick="window.appUI.openModelModal()" title="Выбрать модель ИИ и уровень Effort">
@@ -53,7 +53,7 @@
           <div class="chat-room-header">
             <button class="icon-btn" onclick="window.appUI.closeChatRoom()" title="К списку чатов">←</button>
             <div class="chat-header-identity" onclick="window.appUI.editCurrentChatCharacter()">
-              <img id="chatHeaderAvatar" class="chat-header-avatar" src="" alt="" />
+              <img id="chatHeaderAvatar" class="chat-header-avatar" src="" alt="" title="Нажмите, чтобы открыть аватар" onclick="event.stopPropagation(); window.appUI.openAvatarViewer(this.src, document.getElementById('chatHeaderCharName')?.textContent || 'Аватар')" />
               <div class="chat-header-meta">
                 <div class="chat-header-name" id="chatHeaderCharName">Персонаж</div>
                 <div class="chat-header-sub" id="chatHeaderSub">Настройки персонажа</div>
@@ -438,16 +438,16 @@
           </div>
 
           <label class="field-label">Имя персонажа</label>
-          <input type="text" id="charNameInput" class="text-input" placeholder="Например: Элена Вальд" />
+          <input type="text" id="charNameInput" class="text-input" placeholder="Введите имя персонажа" />
 
           <label class="field-label">Путь к текстовому файлу в <code>workspace/</code></label>
-          <input type="text" id="charFilePathInput" class="text-input" placeholder="characters/elena.md (создастся автоматически)" />
+          <input type="text" id="charFilePathInput" class="text-input" placeholder="characters/character.md (создастся автоматически)" />
 
           <label class="field-label">
-            Начальное сообщение (Приветствие в начале чата)
+            Начальное сообщение (Приветствие в начале чата, необязательно)
             <span class="macro-hint">Доступны макросы <code>{{char}}</code> и <code>{{user}}</code></span>
           </label>
-          <textarea id="charFirstMessageInput" class="text-area" rows="4" placeholder="*Персонаж встречает {{user}}...* &#10;— Привет, {{user}}!"></textarea>
+          <textarea id="charFirstMessageInput" class="text-area" rows="4" placeholder="Оставьте пустым или введите начальное сообщение..."></textarea>
 
           <label class="field-label">Содержимое текстового файла персонажа (Характер, Внешность, Лор)</label>
           <textarea id="charFileContentInput" class="text-area code-area" rows="8" placeholder="Опишите личность, внешность, манеру речи и лор персонажа..."></textarea>
@@ -482,10 +482,10 @@
           </div>
 
           <label class="field-label">Имя вашей персоны (`{{user}}`)</label>
-          <input type="text" id="personaNameInput" class="text-input" placeholder="Например: Казума" />
+          <input type="text" id="personaNameInput" class="text-input" placeholder="Введите имя персоны" />
 
           <label class="field-label">Путь к файлу в <code>workspace/</code></label>
-          <input type="text" id="personaFilePathInput" class="text-input" placeholder="personas/kazuma.md" />
+          <input type="text" id="personaFilePathInput" class="text-input" placeholder="personas/persona.md (создастся автоматически)" />
 
           <label class="field-label">Описание вашей персоны (текст файла)</label>
           <textarea id="personaFileContentInput" class="text-area code-area" rows="7" placeholder="Опишите своего героя: внешность, характер, способности..."></textarea>
@@ -524,9 +524,9 @@
           </select>
 
           <label class="field-label">
-            Начальное сообщение персонажа (можно изменить перед стартом)
+            Начальное сообщение персонажа (необязательно)
           </label>
-          <textarea id="newChatGreetingInput" class="text-area" rows="5"></textarea>
+          <textarea id="newChatGreetingInput" class="text-area" rows="5" placeholder="Оставьте пустым, чтобы начать чат без приветствия, или укажите текст..."></textarea>
         </div>
         <div class="modal-footer">
           <button class="btn-secondary" onclick="window.appUI.closeModal('newChatModal')">Отмена</button>
@@ -637,6 +637,22 @@
           <button class="btn-primary" style="flex:1 1 100%;" onclick="window.appUI.downloadExportedChat()">💾 Сохранить файл (.md / .json)</button>
         </div>
       </div>
+    </div>
+
+    <!-- MODAL 8: POPUP IMAGE VIEWER WITH PINCH-TO-ZOOM (2 FINGERS) -->
+    <div id="imageViewerModal" class="image-viewer-overlay hidden">
+      <div class="image-viewer-topbar">
+        <div class="image-viewer-title" id="imageViewerTitle">Аватар</div>
+        <div class="image-viewer-controls">
+          <span class="image-viewer-zoom-badge" id="imageViewerZoomBadge">100%</span>
+          <button type="button" class="image-viewer-btn" onclick="window.appUI.resetAvatarZoom()" title="Сбросить масштаб">1:1</button>
+          <button type="button" class="image-viewer-btn close" onclick="window.appUI.closeAvatarViewer()" title="Закрыть">✕</button>
+        </div>
+      </div>
+      <div class="image-viewer-stage" id="imageViewerStage">
+        <img id="imageViewerImg" class="image-viewer-img" src="" alt="Аватар" draggable="false" />
+      </div>
+      <div class="image-viewer-hint">Жест двумя пальцами — масштаб • Двойной тап — 2.5× / 1× • Перетаскивание — панорама</div>
     </div>
 
     <!-- TOAST NOTIFICATION -->

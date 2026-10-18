@@ -472,8 +472,8 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 7px;
-  height: 46px;
+  gap: 8px;
+  height: 52px;
   padding: 0 10px;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border-color);
@@ -484,7 +484,7 @@ html, body {
 .chat-header-identity {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   flex: 1;
   min-width: 0;
   cursor: pointer;
@@ -492,13 +492,20 @@ html, body {
 
 .avatar-sm,
 .chat-header-avatar {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
   object-fit: cover;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   flex-shrink: 0;
+  cursor: zoom-in;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.chat-header-avatar:active {
+  transform: scale(0.95);
+  border-color: var(--primary-border);
 }
 
 .chat-room-char-meta,
@@ -551,7 +558,7 @@ html, body {
 .msg-row {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
   width: 100%;
   min-width: 0;
 }
@@ -559,7 +566,7 @@ html, body {
 .msg-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   padding: 0 2px;
   min-width: 0;
 }
@@ -569,13 +576,20 @@ html, body {
 }
 
 .msg-avatar {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   object-fit: cover;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   flex-shrink: 0;
+  cursor: zoom-in;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.msg-avatar:active {
+  transform: scale(0.95);
+  border-color: var(--primary-border);
 }
 
 .msg-sender-name {
@@ -1806,3 +1820,276 @@ html, body {
   justify-content: space-between;
   gap: 8px;
 }
+
+/* ==========================================================================
+   CHARACTER-GROUPED CHATS (COLLAPSIBLE CHARACTER GROUPS)
+   ========================================================================== */
+.chat-group-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition: border-color 0.15s ease;
+}
+
+.chat-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 11px;
+  padding: 11px 12px;
+  background: var(--bg-surface);
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.chat-group-card.collapsed .chat-group-header {
+  border-bottom-color: transparent;
+}
+
+.chat-group-header:active {
+  background: var(--bg-elevated);
+}
+
+.chat-group-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 11px;
+  object-fit: cover;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  flex-shrink: 0;
+  cursor: zoom-in;
+}
+
+.chat-group-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-group-title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.chat-group-name {
+  font-weight: 600;
+  font-size: 14.5px;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-group-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-light);
+  border: 1px solid var(--primary-border);
+  flex-shrink: 0;
+}
+
+.chat-group-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+.chat-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.chat-group-chevron {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+  transition: transform 0.2s ease;
+}
+
+.chat-group-card.collapsed .chat-group-chevron {
+  transform: rotate(-90deg);
+}
+
+.chat-group-items {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-group-card.collapsed .chat-group-items {
+  display: none;
+}
+
+.chat-group-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px 10px 16px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: background-color 0.14s ease;
+}
+
+.chat-group-item:last-child {
+  border-bottom: none;
+}
+
+.chat-group-item:active {
+  background: var(--bg-elevated);
+}
+
+.chat-group-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-group-item-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--primary-light);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-group-item-preview {
+  font-size: 13px;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
+}
+
+.chat-group-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+/* ==========================================================================
+   POPUP IMAGE VIEWER WITH 2-FINGER PINCH-TO-ZOOM
+   ========================================================================== */
+.image-viewer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  background: rgba(8, 10, 14, 0.94);
+  backdrop-filter: blur(8px);
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+  touch-action: none;
+}
+
+.image-viewer-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: calc(var(--safe-top) + 10px) 14px 10px;
+  background: rgba(15, 17, 21, 0.85);
+  border-bottom: 1px solid var(--border-color);
+  z-index: 2;
+}
+
+.image-viewer-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.image-viewer-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.image-viewer-zoom-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--primary-light);
+  background: var(--primary-soft);
+  border: 1px solid var(--primary-border);
+  padding: 3px 8px;
+  border-radius: 6px;
+  min-width: 48px;
+  text-align: center;
+}
+
+.image-viewer-btn {
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 7px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  color: var(--text-main);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.image-viewer-btn:active {
+  background: var(--bg-elevated);
+}
+
+.image-viewer-stage {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.image-viewer-img {
+  max-width: 90vw;
+  max-height: 78vh;
+  border-radius: 14px;
+  object-fit: contain;
+  border: 1px solid var(--border-color);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.65);
+  transform-origin: center center;
+  will-change: transform;
+  touch-action: none;
+  pointer-events: auto;
+}
+
+.image-viewer-hint {
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  padding: 8px 14px calc(var(--safe-bottom) + 12px);
+  background: rgba(15, 17, 21, 0.85);
+  border-top: 1px solid var(--border-subtle);
+  z-index: 2;
+}
+

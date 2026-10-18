@@ -62,6 +62,7 @@
     characters: [],
     personas: [],
     chats: [],
+    collapsedChatGroups: {},
     currentChatId: null,
     currentChatData: null,
     currentFilesPath: '',
@@ -392,8 +393,10 @@
 
     const activePersona = state.personas.find(p => p.id === Number(state.activePersonaId)) || state.personas[0];
     const banner = document.getElementById('activePersonaBanner');
-    if (banner && activePersona) {
-      banner.textContent = `Персона: ${activePersona.name}`;
+    if (banner) {
+      banner.textContent = activePersona
+        ? `Персона: ${activePersona.name}`
+        : 'Персона не выбрана';
     }
   }
 
@@ -458,11 +461,26 @@
   }
 
   // ==========================================================================
-  // CHATS LIST & ACTIVE CHAT ROOM
+  // CHATS LIST (GROUPED BY CHARACTER) & ACTIVE CHAT ROOM
   // ==========================================================================
   async function loadChatsList() {
     const data = await apiFetch('/api/chats');
     state.chats = data.chats || [];
+    renderChatsList();
+  }
+
+  function formatChatCountLabel(count) {
+    const n = Math.abs(Number(count) || 0);
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return `${n} чат`;
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${n} чата`;
+    return `${n} чатов`;
+  }
+
+  function toggleChatGroup(groupKey) {
+    if (!groupKey) return;
+    state.collapsedChatGroups[groupKey] = !state.collapsedChatGroups[groupKey];
     renderChatsList();
   }
 
@@ -471,40 +489,112 @@
     if (!container) return;
 
     if (!state.chats.length) {
+      const hasChars = state.characters.length > 0;
       container.innerHTML = `
         <div class="settings-card empty-state-card">
           <div class="empty-state-icon">🎭</div>
           <div class="card-title">Пока нет активных чатов</div>
-          <p class="card-hint">Выберите персонажа и свою персону, чтобы начать историю.</p>
-          <button class="btn-primary" onclick="window.appUI.openNewChatModal()">+ Начать первый чат</button>
+          <p class="card-hint">${
+            hasChars
+              ? 'Выберите своего персонажа и персону, чтобы начать новый диалог.'
+              : 'Сначала добавьте своего персонажа во вкладке «Персонажи», чтобы начать общение.'
+          }</p>
+          <button class="btn-primary" onclick="${
+            hasChars
+              ? 'window.appUI.openNewChatModal()'
+              : "window.appUI.openTab('characters'); window.appUI.openCharacterEditor(null);"
+          }">${hasChars ? '+ Начать новый чат' : '+ Создать персонажа'}</button>
         </div>
       `;
       return;
     }
 
-    container.innerHTML = state.chats
-      .map(c => {
-        const preview = stripMarkdownPreview(c.last_message || '').slice(0, 100);
-        const effLabel = String(c.effort || 'high').toUpperCase();
-        return `
-          <div class="chat-card" onclick="window.appUI.openChatRoom(${c.id})">
-            <img class="chat-card-avatar" src="${escapeHtml(resolveAvatarUrl(c.character_avatar))}" alt="" />
-            <div class="chat-card-body">
-              <div class="chat-card-title">
-                <span class="chat-card-name">${escapeHtml(c.character_name)}</span>
-                <div class="chat-card-actions">
-                  <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.openExportChatModal(${c.id})" title="Экспортировать чат">📤</button>
-                  <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.deleteChat(${c.id})" title="Удалить чат">🗑</button>
+    // Group chats by character so all chats with the same character are united
+    const groupsMap = new Map();
+    for (const c of state.chats) {
+      const charId = Number(c.character_id) || 0;
+      const charName = (c.character_name || 'Персонаж').trim();
+      const key = charId > 0 ? `char_${charId}` : `name_${charName.toLowerCase()}`;
+      if (!groupsMap.has(key)) {
+        groupsMap.set(key, {
+          key,
+          characterId: charId,
+          characterName: charName,
+          characterAvatar: c.character_avatar || '',
+          chats: [],
+          totalMessages: 0,
+        });
+      }
+      const g = groupsMap.get(key);
+      g.chats.push(c);
+      g.totalMessages += Number(c.message_count || 0);
+      if (!g.characterAvatar && c.character_avatar) {
+        g.characterAvatar = c.character_avatar;
+      }
+    }
+
+    const groups = Array.from(groupsMap.values());
+    container.innerHTML = groups
+      .map(group => {
+        const isCollapsed = Boolean(state.collapsedChatGroups[group.key]);
+        const avatarSrc = resolveAvatarUrl(group.characterAvatar);
+        const countBadge = formatChatCountLabel(group.chats.length);
+
+        const itemsHtml = group.chats
+          .map((c, idx) => {
+            const preview = stripMarkdownPreview(c.last_message || '').slice(0, 110);
+            const effLabel = String(c.effort || 'high').toUpperCase();
+            const sessionLabel = group.chats.length > 1
+              ? `Диалог #${group.chats.length - idx} (ID ${c.id})`
+              : `Диалог #${c.id}`;
+            return `
+              <div class="chat-group-item" onclick="window.appUI.openChatRoom(${c.id})">
+                <div class="chat-group-item-top">
+                  <span class="chat-group-item-title">${escapeHtml(sessionLabel)} • 👤 ${escapeHtml(c.persona_name || 'Игрок')}</span>
+                  <div class="chat-card-actions">
+                    <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.openExportChatModal(${c.id})" title="Экспортировать чат">📤</button>
+                    <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.deleteChat(${c.id})" title="Удалить чат">🗑</button>
+                  </div>
+                </div>
+                <div class="chat-group-item-preview">${escapeHtml(preview || 'Нет сообщений — нажмите, чтобы написать первым')}</div>
+                <div class="chat-group-item-meta">
+                  <span>${escapeHtml(getShortModelName(c.model_id))} (${escapeHtml(effLabel)})</span>
+                  <span>•</span>
+                  <span>💬 ${c.message_count || 0} сообщ.</span>
                 </div>
               </div>
-              <div class="chat-card-preview">${escapeHtml(preview || 'Начало истории...')}</div>
-              <div class="chat-card-meta">
-                <span>👤 ${escapeHtml(c.persona_name)}</span>
-                <span>•</span>
-                <span>${escapeHtml(getShortModelName(c.model_id))} (${escapeHtml(effLabel)})</span>
-                <span>•</span>
-                <span>💬 ${c.message_count || 1}</span>
+            `;
+          })
+          .join('');
+
+        return `
+          <div class="chat-group-card ${isCollapsed ? 'collapsed' : ''}">
+            <div class="chat-group-header" onclick="window.appUI.toggleChatGroup('${escapeHtml(group.key)}')">
+              <img
+                class="chat-group-avatar"
+                src="${escapeHtml(avatarSrc)}"
+                alt="${escapeHtml(group.characterName)}"
+                onclick="event.stopPropagation(); window.appUI.openAvatarViewer(this.src, '${escapeHtml(group.characterName)}')"
+                title="Нажмите, чтобы открыть изображение персонажа"
+              />
+              <div class="chat-group-info">
+                <div class="chat-group-title-row">
+                  <span class="chat-group-name">${escapeHtml(group.characterName)}</span>
+                  <span class="chat-group-badge">${escapeHtml(countBadge)}</span>
+                </div>
+                <div class="chat-group-sub">Всего сообщений: ${group.totalMessages} • Нажмите для сворачивания</div>
               </div>
+              <div class="chat-group-actions">
+                ${
+                  group.characterId > 0
+                    ? `<button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.openNewChatModal(${group.characterId})" title="Новый чат с этим персонажем">+ Чат</button>`
+                    : ''
+                }
+                <span class="chat-group-chevron">▾</span>
+              </div>
+            </div>
+            <div class="chat-group-items">
+              ${itemsHtml}
             </div>
           </div>
         `;
@@ -550,21 +640,35 @@
 
   function renderActiveChatRoom() {
     if (!state.currentChatData) return;
-    const { character, persona, messages } = state.currentChatData;
+    const character = state.currentChatData.character || { name: 'Персонаж', avatar_url: '', file_path: '' };
+    const persona = state.currentChatData.persona || { name: 'Игрок', avatar_url: '', file_path: '' };
+    const messages = state.currentChatData.messages || [];
 
-    document.getElementById('chatHeaderAvatar').src = resolveAvatarUrl(character.avatar_url);
-    document.getElementById('chatHeaderCharName').textContent = character.name;
-    document.getElementById('chatHeaderSub').textContent = `👤 ${persona.name} • ${character.file_path}`;
+    const headerAvatar = document.getElementById('chatHeaderAvatar');
+    if (headerAvatar) {
+      headerAvatar.src = resolveAvatarUrl(character.avatar_url);
+    }
+    document.getElementById('chatHeaderCharName').textContent = character.name || 'Персонаж';
+    document.getElementById('chatHeaderSub').textContent = `👤 ${persona.name || 'Игрок'}${character.file_path ? ' • ' + character.file_path : ''}`;
     const personaChip = document.getElementById('chatPersonaChip');
     if (personaChip) {
-      personaChip.title = `Активная персона: ${persona.name}`;
+      personaChip.title = `Активная персона: ${persona.name || 'Игрок'}`;
     }
 
     const msgContainer = document.getElementById('chatMessagesContainer');
-    msgContainer.innerHTML = (messages || [])
+    if (!messages.length) {
+      msgContainer.innerHTML = `
+        <div class="card-hint" style="text-align:center; padding: 28px 16px;">
+          Начальное сообщение не задано. Напишите первую реплику ниже, чтобы начать диалог с <b>${escapeHtml(character.name || 'персонажем')}</b>.
+        </div>
+      `;
+      return;
+    }
+
+    msgContainer.innerHTML = messages
       .map((m, idx) => {
         const isUser = m.role === 'user';
-        const senderName = isUser ? persona.name : character.name;
+        const senderName = isUser ? (persona.name || 'Игрок') : (character.name || 'Персонаж');
         const avatar = resolveAvatarUrl(isUser ? persona.avatar_url : character.avatar_url);
         const swipesCount = Array.isArray(m.swipes) ? m.swipes.length : 1;
         const curSwipe = (m.swipe_index || 0) + 1;
@@ -596,7 +700,13 @@
         return `
           <div class="msg-row ${isUser ? 'user' : 'assistant'}">
             <div class="msg-head">
-              <img class="msg-avatar" src="${escapeHtml(avatar)}" alt="" />
+              <img
+                class="msg-avatar"
+                src="${escapeHtml(avatar)}"
+                alt="${escapeHtml(senderName)}"
+                onclick="event.stopPropagation(); window.appUI.openAvatarViewer(this.src, '${escapeHtml(senderName)}')"
+                title="Нажмите, чтобы открыть и увеличить аватар"
+              />
               <span class="msg-sender-name">${escapeHtml(senderName)}</span>
             </div>
             <div class="msg-bubble">
@@ -1067,8 +1177,9 @@
   // ==========================================================================
   function openNewChatModal(preselectedCharId) {
     if (!state.characters.length) {
-      showToast('Сначала создайте хотя бы одного персонажа');
+      showToast('Сначала создайте персонажа во вкладке «Персонажи»');
       openTab('characters');
+      switchCharSubtab('characters');
       return;
     }
 
@@ -1078,9 +1189,13 @@
       .join('');
 
     const personaSel = document.getElementById('newChatPersonaSelect');
-    personaSel.innerHTML = state.personas
-      .map(p => `<option value="${p.id}" ${p.id === Number(state.activePersonaId) ? 'selected' : ''}>👤 ${escapeHtml(p.name)} (${escapeHtml(p.file_path)})</option>`)
-      .join('');
+    if (state.personas.length) {
+      personaSel.innerHTML = state.personas
+        .map(p => `<option value="${p.id}" ${p.id === Number(state.activePersonaId) ? 'selected' : ''}>👤 ${escapeHtml(p.name)} (${escapeHtml(p.file_path)})</option>`)
+        .join('');
+    } else {
+      personaSel.innerHTML = `<option value="0" selected>👤 Игрок (без карточки персоны)</option>`;
+    }
 
     const modelSel = document.getElementById('newChatModelSelect');
     modelSel.innerHTML = state.models
@@ -1099,9 +1214,7 @@
   function onNewChatCharacterChange() {
     const charId = Number(document.getElementById('newChatCharSelect').value);
     const char = state.characters.find(c => c.id === charId) || state.characters[0];
-    if (char) {
-      document.getElementById('newChatGreetingInput').value = char.first_message || '';
-    }
+    document.getElementById('newChatGreetingInput').value = char ? (char.first_message || '') : '';
   }
 
   async function confirmCreateChat() {
@@ -1144,6 +1257,7 @@
     state.personas = personasData.personas || [];
     state.activePersonaId = personasData.activePersonaId || state.activePersonaId;
     renderCharactersAndPersonas();
+    renderChatsList();
     updateHeaderIndicators(true);
   }
 
@@ -1158,51 +1272,87 @@
   function renderCharactersAndPersonas() {
     const charGrid = document.getElementById('charactersGrid');
     if (charGrid) {
-      charGrid.innerHTML = state.characters
-        .map(c => `
-          <div class="char-card">
-            <img class="char-card-img" src="${escapeHtml(resolveAvatarUrl(c.avatar_url))}" alt="${escapeHtml(c.name)}" />
-            <div class="char-card-body">
-              <div class="char-card-name">${escapeHtml(c.name)}</div>
-              <div class="char-card-file">📄 ${escapeHtml(c.file_path)}</div>
-              <div class="char-card-greeting">${escapeHtml(stripMarkdownPreview(c.first_message || c.description_preview))}</div>
-              <div class="char-card-actions">
-                <button class="btn-primary btn-sm" style="flex:1;" onclick="window.appUI.openNewChatModal(${c.id})">💬 Чат</button>
-                <button class="btn-secondary btn-sm" onclick="window.appUI.openCharacterEditor(${c.id})">✏️</button>
+      if (!state.characters.length) {
+        charGrid.innerHTML = `
+          <div class="settings-card empty-state-card" style="grid-column: 1 / -1;">
+            <div class="empty-state-icon">🎭</div>
+            <div class="card-title">Список персонажей пуст</div>
+            <p class="card-hint">Стоковые персонажи отключены. Создайте собственного персонажа или добавьте .md файл в папку <code>characters/</code>.</p>
+            <button class="btn-primary" onclick="window.appUI.openCharacterEditor(null)">+ Добавить персонажа</button>
+          </div>
+        `;
+      } else {
+        charGrid.innerHTML = state.characters
+          .map(c => `
+            <div class="char-card">
+              <img
+                class="char-card-img"
+                src="${escapeHtml(resolveAvatarUrl(c.avatar_url))}"
+                alt="${escapeHtml(c.name)}"
+                style="cursor:zoom-in;"
+                onclick="event.stopPropagation(); window.appUI.openAvatarViewer(this.src, '${escapeHtml(c.name)}')"
+                title="Нажмите, чтобы увеличить изображение"
+              />
+              <div class="char-card-body">
+                <div class="char-card-name">${escapeHtml(c.name)}</div>
+                <div class="char-card-file">📄 ${escapeHtml(c.file_path)}</div>
+                <div class="char-card-greeting">${escapeHtml(stripMarkdownPreview(c.first_message || c.description_preview || 'Нет описания'))}</div>
+                <div class="char-card-actions">
+                  <button class="btn-primary btn-sm" style="flex:1;" onclick="window.appUI.openNewChatModal(${c.id})">💬 Чат</button>
+                  <button class="btn-secondary btn-sm" onclick="window.appUI.openCharacterEditor(${c.id})">✏️</button>
+                </div>
               </div>
             </div>
-          </div>
-        `)
-        .join('');
+          `)
+          .join('');
+      }
     }
 
     const personasList = document.getElementById('personasList');
     if (personasList) {
-      personasList.innerHTML = state.personas
-        .map(p => {
-          const isActive = p.id === Number(state.activePersonaId);
-          return `
-            <div class="chat-card ${isActive ? 'active-persona-card' : ''}">
-              <img class="chat-card-avatar" src="${escapeHtml(resolveAvatarUrl(p.avatar_url))}" alt="" />
-              <div class="chat-card-body">
-                <div class="chat-card-title">
-                  <span>${escapeHtml(p.name)}</span>
-                  <div class="row-gap-sm">
-                    ${
-                      !isActive
-                        ? `<button class="btn-primary btn-sm" onclick="window.appUI.activatePersona(${p.id})">Выбрать</button>`
-                        : `<span class="model-badge">Активна</span>`
-                    }
-                    <button class="btn-secondary btn-sm" onclick="window.appUI.openPersonaEditor(${p.id})">✏️</button>
+      if (!state.personas.length) {
+        personasList.innerHTML = `
+          <div class="settings-card empty-state-card">
+            <div class="empty-state-icon">👤</div>
+            <div class="card-title">Список персон пуст</div>
+            <p class="card-hint">Добавьте свою персону (описание вашего персонажа/игрока), чтобы ИИ знал, с кем ведёт диалог.</p>
+            <button class="btn-primary" onclick="window.appUI.openPersonaEditor(null)">+ Добавить персону</button>
+          </div>
+        `;
+      } else {
+        personasList.innerHTML = state.personas
+          .map(p => {
+            const isActive = p.id === Number(state.activePersonaId);
+            return `
+              <div class="chat-card ${isActive ? 'active-persona-card' : ''}">
+                <img
+                  class="chat-card-avatar"
+                  src="${escapeHtml(resolveAvatarUrl(p.avatar_url))}"
+                  alt="${escapeHtml(p.name)}"
+                  style="cursor:zoom-in;"
+                  onclick="event.stopPropagation(); window.appUI.openAvatarViewer(this.src, '${escapeHtml(p.name)}')"
+                  title="Нажмите, чтобы увеличить аватар"
+                />
+                <div class="chat-card-body">
+                  <div class="chat-card-title">
+                    <span>${escapeHtml(p.name)}</span>
+                    <div class="row-gap-sm">
+                      ${
+                        !isActive
+                          ? `<button class="btn-primary btn-sm" onclick="window.appUI.activatePersona(${p.id})">Выбрать</button>`
+                          : `<span class="model-badge">Активна</span>`
+                      }
+                      <button class="btn-secondary btn-sm" onclick="window.appUI.openPersonaEditor(${p.id})">✏️</button>
+                    </div>
                   </div>
+                  <div class="chat-card-preview">${escapeHtml(stripMarkdownPreview(p.description_preview || 'Нет описания'))}</div>
+                  <div class="chat-card-meta">📄 Файл: ${escapeHtml(p.file_path)}</div>
                 </div>
-                <div class="chat-card-preview">${escapeHtml(stripMarkdownPreview(p.description_preview))}</div>
-                <div class="chat-card-meta">📄 Файл: ${escapeHtml(p.file_path)}</div>
               </div>
-            </div>
-          `;
-        })
-        .join('');
+            `;
+          })
+          .join('');
+      }
     }
   }
 
@@ -1214,9 +1364,7 @@
     document.getElementById('charFilePathInput').value = char ? char.file_path : '';
     document.getElementById('charAvatarUrlInput').value = char ? (char.avatar_url || '') : '';
     document.getElementById('charAvatarPreview').src = resolveAvatarUrl(char ? char.avatar_url : '');
-    document.getElementById('charFirstMessageInput').value = char
-      ? (char.first_message || '')
-      : `*Смотрит на {{user}} с лёгким интересом.*\n\n— Здравствуй, {{user}}!`;
+    document.getElementById('charFirstMessageInput').value = char ? (char.first_message || '') : '';
     document.getElementById('charFileContentInput').value = char
       ? (char.fileContent || char.description_preview || '')
       : '';
@@ -1225,7 +1373,7 @@
   }
 
   function editCurrentChatCharacter() {
-    if (state.currentChatData && state.currentChatData.character) {
+    if (state.currentChatData && state.currentChatData.character && state.currentChatData.character.id) {
       openCharacterEditor(state.currentChatData.character.id);
     }
   }
@@ -1325,7 +1473,7 @@
     document.getElementById('personaAvatarUrlInput').value = p ? (p.avatar_url || '') : '';
     document.getElementById('personaAvatarPreview').src = resolveAvatarUrl(p ? p.avatar_url : '');
     document.getElementById('personaFileContentInput').value = p ? (p.fileContent || p.description_preview || '') : '';
-    document.getElementById('personaDeleteBtn').classList.toggle('hidden', !p || state.personas.length <= 1);
+    document.getElementById('personaDeleteBtn').classList.toggle('hidden', !p);
     document.getElementById('personaModal').classList.remove('hidden');
   }
 
@@ -1367,6 +1515,7 @@
       await apiFetch(`/api/personas/${editId}`, { method: 'DELETE' });
       closeModal('personaModal');
       await reloadCharactersAndPersonas();
+      loadFiles(state.currentFilesPath);
       showToast('Персона удалена');
     } catch (err) {
       showToast(err.message);
@@ -2579,8 +2728,240 @@
     }
   }
 
+  // ==================== POPUP IMAGE VIEWER (2-FINGER PINCH-TO-ZOOM & PAN) ====================
+  const viewerState = {
+    scale: 1,
+    tx: 0,
+    ty: 0,
+    mode: null,
+    startDist: 0,
+    startScale: 1,
+    startMidX: 0,
+    startMidY: 0,
+    startTx: 0,
+    startTy: 0,
+    panStartX: 0,
+    panStartY: 0,
+    lastTapTime: 0,
+    moved: false,
+  };
+
+  function applyViewerTransform(animate = false) {
+    const img = document.getElementById('imageViewerImg');
+    const badge = document.getElementById('imageViewerZoomBadge');
+    if (img) {
+      img.style.transition = animate ? 'transform 0.18s ease-out' : 'none';
+      img.style.transform = `translate3d(${viewerState.tx}px, ${viewerState.ty}px, 0) scale(${viewerState.scale})`;
+    }
+    if (badge) {
+      badge.textContent = `${Math.round(viewerState.scale * 100)}%`;
+    }
+  }
+
+  function resetAvatarZoom(animate = true) {
+    viewerState.scale = 1;
+    viewerState.tx = 0;
+    viewerState.ty = 0;
+    viewerState.mode = null;
+    applyViewerTransform(animate);
+  }
+
+  function openAvatarViewer(src, title = 'Изображение персонажа') {
+    const modal = document.getElementById('imageViewerModal');
+    const img = document.getElementById('imageViewerImg');
+    const titleEl = document.getElementById('imageViewerTitle');
+    if (!modal || !img) return;
+
+    const resolvedSrc = src ? resolveAvatarUrl(src) : FALLBACK_AVATAR;
+    img.src = resolvedSrc;
+    if (titleEl) {
+      titleEl.textContent = title || 'Изображение';
+    }
+    resetAvatarZoom(false);
+    modal.classList.remove('hidden');
+  }
+
+  function closeAvatarViewer() {
+    const modal = document.getElementById('imageViewerModal');
+    if (modal) {
+      modal.classList.add('hidden');
+    }
+    resetAvatarZoom(false);
+  }
+
+  function initImageViewerGestures() {
+    const stage = document.getElementById('imageViewerStage');
+    const img = document.getElementById('imageViewerImg');
+    if (!stage || !img) return;
+
+    function getTouchDistance(t0, t1) {
+      return Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+    }
+
+    function getTouchMidpoint(t0, t1) {
+      return {
+        x: (t0.clientX + t1.clientX) / 2,
+        y: (t0.clientY + t1.clientY) / 2,
+      };
+    }
+
+    stage.addEventListener(
+      'touchstart',
+      (e) => {
+        if (e.touches.length === 2) {
+          e.preventDefault();
+          viewerState.mode = 'pinch';
+          viewerState.moved = true;
+          viewerState.startDist = Math.max(getTouchDistance(e.touches[0], e.touches[1]), 10);
+          viewerState.startScale = viewerState.scale;
+          const mid = getTouchMidpoint(e.touches[0], e.touches[1]);
+          viewerState.startMidX = mid.x;
+          viewerState.startMidY = mid.y;
+          viewerState.startTx = viewerState.tx;
+          viewerState.startTy = viewerState.ty;
+        } else if (e.touches.length === 1) {
+          viewerState.mode = 'pan';
+          viewerState.moved = false;
+          viewerState.panStartX = e.touches[0].clientX;
+          viewerState.panStartY = e.touches[0].clientY;
+          viewerState.startTx = viewerState.tx;
+          viewerState.startTy = viewerState.ty;
+        }
+      },
+      { passive: false }
+    );
+
+    stage.addEventListener(
+      'touchmove',
+      (e) => {
+        if (e.touches.length === 2) {
+          e.preventDefault();
+          if (viewerState.mode !== 'pinch') {
+            viewerState.mode = 'pinch';
+            viewerState.startDist = Math.max(getTouchDistance(e.touches[0], e.touches[1]), 10);
+            viewerState.startScale = viewerState.scale;
+            const midInit = getTouchMidpoint(e.touches[0], e.touches[1]);
+            viewerState.startMidX = midInit.x;
+            viewerState.startMidY = midInit.y;
+            viewerState.startTx = viewerState.tx;
+            viewerState.startTy = viewerState.ty;
+          }
+          const curDist = Math.max(getTouchDistance(e.touches[0], e.touches[1]), 10);
+          const ratio = curDist / viewerState.startDist;
+          const nextScale = Math.min(Math.max(viewerState.startScale * ratio, 0.5), 6);
+
+          const rect = stage.getBoundingClientRect();
+          const centerX = rect.left + rect.width / 2;
+          const centerY = rect.top + rect.height / 2;
+          const mid = getTouchMidpoint(e.touches[0], e.touches[1]);
+
+          const scaleRatio = nextScale / viewerState.startScale;
+          const focalOffsetX = viewerState.startMidX - centerX;
+          const focalOffsetY = viewerState.startMidY - centerY;
+          const panDx = mid.x - viewerState.startMidX;
+          const panDy = mid.y - viewerState.startMidY;
+
+          viewerState.scale = nextScale;
+          viewerState.tx = focalOffsetX - (focalOffsetX - viewerState.startTx) * scaleRatio + panDx;
+          viewerState.ty = focalOffsetY - (focalOffsetY - viewerState.startTy) * scaleRatio + panDy;
+          viewerState.moved = true;
+          applyViewerTransform(false);
+        } else if (e.touches.length === 1 && viewerState.mode === 'pan') {
+          const dx = e.touches[0].clientX - viewerState.panStartX;
+          const dy = e.touches[0].clientY - viewerState.panStartY;
+          if (Math.hypot(dx, dy) > 6) {
+            viewerState.moved = true;
+          }
+          if (viewerState.moved) {
+            e.preventDefault();
+            viewerState.tx = viewerState.startTx + dx;
+            viewerState.ty = viewerState.startTy + dy;
+            applyViewerTransform(false);
+          }
+        }
+      },
+      { passive: false }
+    );
+
+    stage.addEventListener(
+      'touchend',
+      (e) => {
+        if (e.touches.length === 1) {
+          // Smooth transition from 2-finger pinch to 1-finger drag without jump
+          viewerState.mode = 'pan';
+          viewerState.panStartX = e.touches[0].clientX;
+          viewerState.panStartY = e.touches[0].clientY;
+          viewerState.startTx = viewerState.tx;
+          viewerState.startTy = viewerState.ty;
+          return;
+        }
+
+        if (e.touches.length === 0) {
+          const wasMoved = viewerState.moved;
+          viewerState.mode = null;
+
+          // Snap back gently if zoomed out below 1x and user released fingers
+          if (viewerState.scale < 0.85) {
+            resetAvatarZoom(true);
+            return;
+          }
+
+          if (!wasMoved && e.changedTouches && e.changedTouches.length === 1) {
+            const now = Date.now();
+            const tapTouch = e.changedTouches[0];
+            if (now - viewerState.lastTapTime < 280) {
+              // Double-tap toggles 1x <-> 2.5x zoom around tap point
+              viewerState.lastTapTime = 0;
+              if (viewerState.scale > 1.2) {
+                resetAvatarZoom(true);
+              } else {
+                const rect = stage.getBoundingClientRect();
+                const cx = rect.left + rect.width / 2;
+                const cy = rect.top + rect.height / 2;
+                const targetScale = 2.5;
+                viewerState.tx = (cx - tapTouch.clientX) * (targetScale - 1) * 0.6;
+                viewerState.ty = (cy - tapTouch.clientY) * (targetScale - 1) * 0.6;
+                viewerState.scale = targetScale;
+                applyViewerTransform(true);
+              }
+            } else {
+              viewerState.lastTapTime = now;
+              // Close if user tapped outside the image on dark backdrop while at 1x zoom
+              if (e.target === stage && viewerState.scale <= 1.05) {
+                setTimeout(() => {
+                  if (viewerState.lastTapTime === now) {
+                    closeAvatarViewer();
+                  }
+                }, 260);
+              }
+            }
+          }
+        }
+      },
+      { passive: false }
+    );
+
+    // Desktop / mouse wheel zoom support
+    stage.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        const factor = e.deltaY < 0 ? 1.15 : 0.87;
+        const nextScale = Math.min(Math.max(viewerState.scale * factor, 0.5), 6);
+        viewerState.scale = nextScale;
+        if (nextScale <= 1.02) {
+          viewerState.tx = 0;
+          viewerState.ty = 0;
+        }
+        applyViewerTransform(false);
+      },
+      { passive: false }
+    );
+  }
+
   // Handle adaptive chat input, keyboard auto-hide, and scroll auto-hide on Chats tab
   document.addEventListener('DOMContentLoaded', () => {
+    initImageViewerGestures();
     const chatInput = document.getElementById('chatInput');
     if (chatInput) {
       chatInput.addEventListener('keydown', (e) => {
@@ -2700,8 +3081,12 @@
     openNewChatModal,
     onNewChatCharacterChange,
     confirmCreateChat,
+    toggleChatGroup,
     openChatRoom,
     closeChatRoom,
+    openAvatarViewer,
+    closeAvatarViewer,
+    resetAvatarZoom,
     openExportChatModal,
     setExportFormat,
     rebuildExportPreview,

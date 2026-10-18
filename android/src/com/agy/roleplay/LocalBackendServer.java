@@ -442,54 +442,28 @@ public class LocalBackendServer {
             }
         }
 
-        File elenaMd = new File(workspaceDir, "characters/elena.md");
-        if (!elenaMd.exists()) {
-            writeTextFile(elenaMd,
-                "# Имя: Элена Вальд\n" +
-                "## Роль: Хранительница Звёздного Архива\n\n" +
-                "### Внешность\n" +
-                "Высокая девушка с длинными серебристо-пепельными волосами и выразительными фиалковыми глазами. Носит тёмно-синий плащ с астрологической вышивкой.\n\n" +
-                "### Характер\n" +
-                "Проницательная, загадочная, с тонким чувством юмора и лёгкой иронией. Ценит искренность и смелость.\n\n" +
-                "### Лор и обстановка\n" +
-                "Находится в башне Звёздного Архива, где хранятся древние манускрипты и хроники забытых миров.\n\n" +
-                "### Начальное сообщение\n" +
-                "*Тяжёлые дубовые двери Звёздного Архива бесшумно приоткрываются. Элена стоит у высокого стрельчатого окна, перелистывая светящийся фолиант. Заметив {{user}}, она плавно захлопывает книгу и поворачивается с мягкой, изучающей улыбкой.*\n\n" +
-                "— Редко кто решается подняться на верхний ярус башни в такой час, {{user}}. Ты пришёл за ответами из древних хроник... или просто ищешь компанию среди звёзд?\n"
-            );
-        }
-
-        File kiraMd = new File(workspaceDir, "characters/kira.md");
-        if (!kiraMd.exists()) {
-            writeTextFile(kiraMd,
-                "# Имя: Кира Вэнс\n" +
-                "## Роль: Кибер-нетраннер из Нео-Токио\n\n" +
-                "### Внешность\n" +
-                "Короткие неоново-розовые волосы, кожаная куртка с голографическим воротником, тонкий кибер-имплант у виска.\n\n" +
-                "### Характер\n" +
-                "Дерзкая, энергичная, преданная своим напарникам, обожает сарказм, ночные гонки и взлом защищённых серверов мегакорпораций.\n\n" +
-                "### Начальное сообщение\n" +
-                "*Неоновые вывески за окном подземного бара отбрасывают розовые и голубые блики на стол, заваленный нейро-чипами. Кира отрывает взгляд от голографического терминала, поправляет куртку и подвигает к {{user}} зашифрованный накопитель.*\n\n" +
-                "— Вовремя ты, {{user}}! Защита корпорации «Арасака-Прайм» оказалась крепче, чем я думала, но у меня есть обходной ключ. Ну что, рискнём войти в закрытый сектор?\n"
-            );
-        }
-
-        File kazumaMd = new File(workspaceDir, "personas/kazuma.md");
-        if (!kazumaMd.exists()) {
-            writeTextFile(kazumaMd,
-                "# Имя: Казума\n" +
-                "## Описание персоны игрока\n" +
-                "Опытный путешественник между мирами с острым умом, наблюдательностью и харизмой. Быстро ориентируется в сложных и опасных ситуациях, умеет находить общий язык как с хранителями древних тайн, так и с наёмниками мегаполисов.\n"
-            );
-        }
-
-        File worldsMd = new File(workspaceDir, "lore/worlds.md");
-        if (!worldsMd.exists()) {
-            writeTextFile(worldsMd,
-                "# Лор миров\n\n" +
-                "- **Звёздный Архив**: Древняя цитадель на границе астрального разлома, где каждое слово в книгах способно менять реальность.\n" +
-                "- **Нео-Токио 2099**: Киберпанк-мегаполис, управляемый ИИ-синдикатами и подпольными нетраннерами.\n"
-            );
+        // One-time cleanup of previously auto-seeded stock templates if untouched by user
+        if (!"1".equals(getSetting("stock_cleaned_v141", "0"))) {
+            File elenaMd = new File(workspaceDir, "characters/elena.md");
+            if (elenaMd.exists() && readTextFile(elenaMd).contains("Хранительница Звёздного Архива")) {
+                elenaMd.delete();
+                db.delete("characters", "file_path = ?", new String[]{"characters/elena.md"});
+            }
+            File kiraMd = new File(workspaceDir, "characters/kira.md");
+            if (kiraMd.exists() && readTextFile(kiraMd).contains("Кибер-нетраннер из Нео-Токио")) {
+                kiraMd.delete();
+                db.delete("characters", "file_path = ?", new String[]{"characters/kira.md"});
+            }
+            File kazumaMd = new File(workspaceDir, "personas/kazuma.md");
+            if (kazumaMd.exists() && readTextFile(kazumaMd).contains("Опытный путешественник между мирами")) {
+                kazumaMd.delete();
+                db.delete("personas", "file_path = ?", new String[]{"personas/kazuma.md"});
+            }
+            File worldsMd = new File(workspaceDir, "lore/worlds.md");
+            if (worldsMd.exists() && readTextFile(worldsMd).contains("Древняя цитадель на границе астрального разлома")) {
+                worldsMd.delete();
+            }
+            setSetting("stock_cleaned_v141", "1");
         }
     }
 
@@ -500,11 +474,21 @@ public class LocalBackendServer {
             "<stop offset=\"100%\" stop-color=\"" + bg2 + "\"/>" +
             "</linearGradient></defs>" +
             "<rect width=\"240\" height=\"240\" rx=\"48\" fill=\"url(#g)\"/>" +
-            "<circle cx=\"120\" cy=\"95\" r=\"44\" fill=\"" + accent + "\" opacity=\"0.9\"/>" +
-            "<path d=\"M48 215 C55 155, 185 155, 192 215\" fill=\"" + accent + "\" opacity=\"0.75\"/>" +
+            "<circle cx=\"120\" cy=\"95\" r=\"44\" fill=\"" + accent + "\" opacity=\"0.85\"/>" +
+            "<path d=\"M48 215 C55 155, 185 155, 192 215\" fill=\"" + accent + "\" opacity=\"0.7\"/>" +
             "<text x=\"120\" y=\"110\" font-family=\"sans-serif\" font-size=\"40\" font-weight=\"bold\" fill=\"#ffffff\" text-anchor=\"middle\">" + label + "</text>" +
             "</svg>";
         return "data:image/svg+xml;utf8," + UriEncode(svg);
+    }
+
+    private String buildInitials(String name, String fallback) {
+        if (name == null || name.trim().isEmpty()) return fallback;
+        String trimmed = name.trim();
+        String[] parts = trimmed.split("\\s+");
+        if (parts.length >= 2 && !parts[0].isEmpty() && !parts[1].isEmpty()) {
+            return (parts[0].substring(0, 1) + parts[1].substring(0, 1)).toUpperCase(Locale.ROOT);
+        }
+        return trimmed.substring(0, Math.min(2, trimmed.length())).toUpperCase(Locale.ROOT);
     }
 
     private String UriEncode(String s) {
@@ -522,9 +506,27 @@ public class LocalBackendServer {
     }
 
     private synchronized void syncWorkspaceFilesWithDb() {
-        String defaultChar1Avatar = makeSvgDataUri("#1e1b4b", "#311042", "#a78bfa", "ЭВ");
-        String defaultChar2Avatar = makeSvgDataUri("#0f172a", "#3b0764", "#f472b6", "КВ");
-        String defaultPersonaAvatar = makeSvgDataUri("#042f2e", "#0f172a", "#34d399", "К");
+        // Prune DB rows for character files that were removed from disk
+        Cursor existingChars = db.rawQuery("SELECT id, file_path FROM characters", null);
+        while (existingChars.moveToNext()) {
+            int cid = existingChars.getInt(0);
+            String fp = existingChars.getString(1);
+            if (fp == null || fp.isEmpty() || !new File(workspaceDir, fp).exists()) {
+                db.delete("characters", "id = ?", new String[]{String.valueOf(cid)});
+            }
+        }
+        existingChars.close();
+
+        // Prune DB rows for persona files that were removed from disk
+        Cursor existingPersonas = db.rawQuery("SELECT id, file_path FROM personas", null);
+        while (existingPersonas.moveToNext()) {
+            int pid = existingPersonas.getInt(0);
+            String fp = existingPersonas.getString(1);
+            if (fp == null || fp.isEmpty() || !new File(workspaceDir, fp).exists()) {
+                db.delete("personas", "id = ?", new String[]{String.valueOf(pid)});
+            }
+        }
+        existingPersonas.close();
 
         File charsDir = new File(workspaceDir, "characters");
         File[] charFiles = charsDir.listFiles();
@@ -542,7 +544,7 @@ public class LocalBackendServer {
                     String name = parseHeaderName(content, f.getName().replaceFirst("\\.[^.]+$", ""));
                     String firstMsg = parseFirstMessage(content, name);
                     String preview = parsePreview(content);
-                    String avatar = f.getName().contains("kira") ? defaultChar2Avatar : defaultChar1Avatar;
+                    String avatar = makeSvgDataUri("#1b1f27", "#252b37", "#7c90c9", buildInitials(name, "П"));
 
                     Cursor c = db.rawQuery("SELECT id, avatar_url FROM characters WHERE file_path = ?", new String[]{relPath});
                     if (!c.moveToFirst()) {
@@ -575,6 +577,7 @@ public class LocalBackendServer {
                     String content = readTextFile(f);
                     String name = parseHeaderName(content, f.getName().replaceFirst("\\.[^.]+$", ""));
                     String preview = parsePreview(content);
+                    String defaultPersonaAvatar = makeSvgDataUri("#182226", "#1e293b", "#64748b", buildInitials(name, "И"));
 
                     Cursor c = db.rawQuery("SELECT id, avatar_url FROM personas WHERE file_path = ?", new String[]{relPath});
                     if (!c.moveToFirst()) {
@@ -612,7 +615,7 @@ public class LocalBackendServer {
         if (m.find()) {
             return m.group(1).trim();
         }
-        return "*" + charName + " внимательно смотрит на {{user}}.*\n\n— Здравствуй, {{user}}. Начнём нашу историю?";
+        return "";
     }
 
     private String parsePreview(String content) {
@@ -927,6 +930,15 @@ public class LocalBackendServer {
                 return saveOrUpdatePersona(pid, body);
             }
             if (method.equals("DELETE")) {
+                Cursor c = db.rawQuery("SELECT file_path FROM personas WHERE id = ?", new String[]{String.valueOf(pid)});
+                if (c.moveToFirst()) {
+                    String fp = c.getString(0);
+                    if (fp != null && !fp.isEmpty()) {
+                        File f = new File(workspaceDir, fp);
+                        if (f.exists()) f.delete();
+                    }
+                }
+                c.close();
                 db.delete("personas", "id = ?", new String[]{String.valueOf(pid)});
                 JSONObject res = new JSONObject();
                 res.put("ok", true);
@@ -1130,16 +1142,22 @@ public class LocalBackendServer {
 
         String avatarUrl = body.optString("avatarUrl", "").trim();
         if (avatarUrl.isEmpty()) {
-            String initials = name.length() >= 2 ? name.substring(0, 2).toUpperCase(Locale.ROOT) : name.toUpperCase(Locale.ROOT);
-            avatarUrl = makeSvgDataUri("#1e1b4b", "#3b0764", "#a78bfa", initials);
+            avatarUrl = makeSvgDataUri("#1b1f27", "#252b37", "#7c90c9", buildInitials(name, "П"));
         }
         String firstMsg = body.optString("firstMessage", "").trim();
         String desc = body.optString("description", "").trim();
         String rawFileContent = body.optString("rawFileContent", "").trim();
 
-        String fileText = !rawFileContent.isEmpty()
-            ? rawFileContent
-            : ("# Имя: " + name + "\n\n### Описание и Характер\n" + desc + "\n\n### Начальное сообщение\n" + firstMsg + "\n");
+        String fileText;
+        if (!rawFileContent.isEmpty()) {
+            fileText = rawFileContent;
+        } else {
+            StringBuilder fb = new StringBuilder("# Имя: ").append(name).append("\n\n### Описание и Характер\n").append(desc).append("\n");
+            if (!firstMsg.isEmpty()) {
+                fb.append("\n### Начальное сообщение\n").append(firstMsg).append("\n");
+            }
+            fileText = fb.toString();
+        }
 
         writeTextFile(new File(workspaceDir, relPath), fileText);
 
@@ -1218,8 +1236,7 @@ public class LocalBackendServer {
 
         String avatarUrl = body.optString("avatarUrl", "").trim();
         if (avatarUrl.isEmpty()) {
-            String initials = name.substring(0, 1).toUpperCase(Locale.ROOT);
-            avatarUrl = makeSvgDataUri("#042f2e", "#0f172a", "#34d399", initials);
+            avatarUrl = makeSvgDataUri("#182226", "#1e293b", "#64748b", buildInitials(name, "И"));
         }
         String desc = body.optString("description", "").trim();
         String rawFileContent = body.optString("rawFileContent", "").trim();
@@ -1282,24 +1299,24 @@ public class LocalBackendServer {
     }
 
     private JSONObject createNewChat(JSONObject body) throws Exception {
-        int charId = body.optInt("characterId", 1);
-        int personaId = body.optInt("personaId", Integer.parseInt(getSetting("active_persona_id", "1")));
+        int charId = body.optInt("characterId", 0);
+        int personaId = body.optInt("personaId", Integer.parseInt(getSetting("active_persona_id", "0")));
         String modelId = normalizeBaseModelId(body.optString("modelId", getSetting("selected_model", "gemini-4-argon")));
         String effort = body.optString("effort", getSetting("selected_effort", "high"));
         String customFirst = body.optString("customFirstMessage", "").trim();
 
         JSONObject character = getCharacterByIdJson(charId);
-        if (character == null) return errorJson(404, "Персонаж не найден");
+        if (character == null) return errorJson(404, "Персонаж не найден. Сначала создайте персонажа.");
         JSONObject persona = getPersonaByIdJson(personaId);
         if (persona == null) {
             JSONArray allP = queryPersonasArray();
-            persona = allP.length() > 0 ? allP.getJSONObject(0) : new JSONObject().put("id", 1).put("name", "Казума");
+            persona = allP.length() > 0 ? allP.getJSONObject(0) : new JSONObject().put("id", 0).put("name", "Игрок");
         }
 
         ContentValues cv = new ContentValues();
         cv.put("title", "Чат: " + character.optString("name"));
         cv.put("character_id", charId);
-        cv.put("persona_id", persona.optInt("id", 1));
+        cv.put("persona_id", persona.optInt("id", 0));
         cv.put("model_id", modelId);
         cv.put("effort", effort);
         int chatId = (int) db.insert("chats", null, cv);
@@ -1311,25 +1328,27 @@ public class LocalBackendServer {
 
         File memFile = new File(workspaceDir, memRelPath);
         if (!memFile.exists()) {
-            writeTextFile(memFile, "# Память ролевого чата #" + chatId + " (" + character.optString("name") + " & " + persona.optString("name") + ")\n\n- Чат начат.\n");
+            writeTextFile(memFile, "# Память чата #" + chatId + "\n\n");
         }
 
-        String rawGreeting = !customFirst.isEmpty() ? customFirst : character.optString("first_message", "Привет, {{user}}!");
-        String greeting = rawGreeting
-            .replace("{{char}}", character.optString("name"))
-            .replace("{{user}}", persona.optString("name"));
+        String rawGreeting = !customFirst.isEmpty() ? customFirst : character.optString("first_message", "").trim();
+        if (!rawGreeting.isEmpty()) {
+            String greeting = rawGreeting
+                .replace("{{char}}", character.optString("name", "Персонаж"))
+                .replace("{{user}}", persona.optString("name", "Игрок"));
 
-        JSONArray swipes = new JSONArray();
-        swipes.put(greeting);
+            JSONArray swipes = new JSONArray();
+            swipes.put(greeting);
 
-        ContentValues msgCv = new ContentValues();
-        msgCv.put("chat_id", chatId);
-        msgCv.put("role", "assistant");
-        msgCv.put("content", greeting);
-        msgCv.put("thoughts", "");
-        msgCv.put("swipes_json", swipes.toString());
-        msgCv.put("swipe_index", 0);
-        db.insert("messages", null, msgCv);
+            ContentValues msgCv = new ContentValues();
+            msgCv.put("chat_id", chatId);
+            msgCv.put("role", "assistant");
+            msgCv.put("content", greeting);
+            msgCv.put("thoughts", "");
+            msgCv.put("swipes_json", swipes.toString());
+            msgCv.put("swipe_index", 0);
+            db.insert("messages", null, msgCv);
+        }
 
         return getChatDetailsJson(chatId);
     }
@@ -1353,10 +1372,30 @@ public class LocalBackendServer {
         c.close();
 
         JSONObject character = getCharacterByIdJson(charId);
+        if (character == null) {
+            character = new JSONObject()
+                .put("id", 0)
+                .put("name", "Персонаж")
+                .put("file_path", "")
+                .put("avatar_url", makeSvgDataUri("#1b1f27", "#252b37", "#7c90c9", "П"))
+                .put("first_message", "")
+                .put("description_preview", "")
+                .put("fileContent", "");
+        }
         JSONObject persona = getPersonaByIdJson(personaId);
         if (persona == null) {
             JSONArray allP = queryPersonasArray();
-            if (allP.length() > 0) persona = allP.getJSONObject(0);
+            if (allP.length() > 0) {
+                persona = allP.getJSONObject(0);
+            } else {
+                persona = new JSONObject()
+                    .put("id", 0)
+                    .put("name", "Игрок")
+                    .put("file_path", "")
+                    .put("avatar_url", makeSvgDataUri("#182226", "#1e293b", "#64748b", "И"))
+                    .put("description_preview", "")
+                    .put("fileContent", "");
+            }
         }
 
         JSONObject res = new JSONObject();
@@ -2018,7 +2057,7 @@ public class LocalBackendServer {
         GenerationProgress prog
     ) throws Exception {
         String charName = character.optString("name", "Персонаж");
-        String userName = persona.optString("name", "Казума");
+        String userName = persona.optString("name", "Игрок");
         String charFileContent = character.optString("fileContent", "").trim();
         String personaFileContent = persona.optString("fileContent", "").trim();
         String geminiRules = readTextFile(new File(workspaceDir, "GEMINI.md")).trim();
@@ -2583,8 +2622,8 @@ public class LocalBackendServer {
             try {
                 JSONObject fallback = new JSONObject();
                 fallback.put("appName", "AGY Roleplay Studio");
-                fallback.put("version", "1.4.0");
-                fallback.put("build", 9);
+                fallback.put("version", "1.4.1");
+                fallback.put("build", 10);
                 fallback.put("gitRepo", "Kuka001/111");
                 fallback.put("gitBranch", "main");
                 fallback.put("apkPath", "agy-roleplay-android16.apk");
