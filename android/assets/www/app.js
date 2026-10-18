@@ -1980,22 +1980,53 @@
       // Update top notification banner & bottom nav badge
       const banner = document.getElementById('updateBanner');
       const navBadge = document.getElementById('navUpdateBadge');
+      const bannerBtn = document.getElementById('updateBannerApplyBtn');
+      const nativeUpdateRequired = Boolean(
+        data.nativeUpdateRequired ||
+          (data.remoteReachable && Number(data.latestBuild || 0) > Number(data.bundledBuild || 0))
+      );
 
-      if (data.updateAvailable) {
+      if (data.updateAvailable || nativeUpdateRequired) {
         if (navBadge) navBadge.classList.remove('hidden');
         if (banner && !updateBannerDismissed) {
           const titleEl = document.getElementById('updateBannerTitle');
           const subEl = document.getElementById('updateBannerSub');
-          if (titleEl) {
-            titleEl.textContent = `🚀 Доступна новая версия в Git: v${data.latestVersion}${data.latestCommit ? ' (' + data.latestCommit + ')' : ''}`;
-          }
-          if (subEl) {
-            subEl.textContent = data.latestReleaseTitle || data.latestCommitMessage || `Текущая: v${data.currentVersion} → Новая: v${data.latestVersion}`;
+          const onlyApkOutdated =
+            nativeUpdateRequired &&
+            data.otaActive &&
+            Number(data.currentBuild || 0) >= Number(data.latestBuild || 0);
+
+          if (onlyApkOutdated) {
+            if (titleEl) {
+              titleEl.textContent = `📦 Требуется обновление APK-движка до v${data.latestVersion} (Build #${data.latestBuild})`;
+            }
+            if (subEl) {
+              subEl.textContent = `Веб-UI обновлён (OTA), но Java-движок APK устарел (Build #${data.bundledBuild || '?'}). Скачайте свежий APK.`;
+            }
+            if (bannerBtn) {
+              bannerBtn.textContent = '📦 Скачать APK';
+              bannerBtn.onclick = () => downloadLatestApkFromGit();
+            }
+          } else {
+            if (titleEl) {
+              titleEl.textContent = `🚀 Доступна новая версия в Git: v${data.latestVersion}${data.latestCommit ? ' (' + data.latestCommit + ')' : ''}`;
+            }
+            if (subEl) {
+              subEl.textContent = data.latestReleaseTitle || data.latestCommitMessage || `Текущая: v${data.currentVersion} → Новая: v${data.latestVersion}`;
+            }
+            if (bannerBtn) {
+              bannerBtn.textContent = '⚡ Обновить';
+              bannerBtn.onclick = () => applyGitUpdate();
+            }
           }
           banner.classList.remove('hidden');
         }
         if (manualTrigger) {
-          showToast(`🚀 Найдено обновление в Git: v${data.latestVersion}!`);
+          showToast(
+            nativeUpdateRequired
+              ? `📦 Доступен новый APK-движок v${data.latestVersion} (Build #${data.latestBuild})!`
+              : `🚀 Найдено обновление в Git: v${data.latestVersion}!`
+          );
         }
       } else {
         if (navBadge) navBadge.classList.add('hidden');
@@ -2036,9 +2067,16 @@
     const resetBtn = document.getElementById('resetOtaBtn');
     const applyBtn = document.getElementById('applyOtaUpdateBtn');
 
+    const nativeUpdateRequired = Boolean(
+      data.nativeUpdateRequired ||
+        (data.remoteReachable && Number(data.latestBuild || 0) > Number(data.bundledBuild || 0))
+    );
+
     if (curVerEl) curVerEl.textContent = `v${data.currentVersion || '1.2.0'}`;
     if (curMetaEl) {
-      const modeStr = data.otaActive ? '⚡ OTA из Git' : '📦 Базовая APK';
+      const modeStr = data.otaActive
+        ? `⚡ OTA (APK движок: Build #${data.bundledBuild || '?'})`
+        : '📦 Базовая APK';
       const commitPart = data.installedCommit ? ` • ${data.installedCommit}` : '';
       curMetaEl.textContent = `Build #${data.currentBuild || 3} • ${modeStr}${commitPart}`;
     }
@@ -2058,11 +2096,14 @@
       if (!data.remoteReachable) {
         statusBadge.textContent = `⚠️ Git (${data.gitRepo}): ${data.remoteError || 'ожидание публикации репозитория'}`;
         statusBadge.style.color = '#fbbf24';
+      } else if (nativeUpdateRequired && data.otaActive && Number(data.currentBuild || 0) >= Number(data.latestBuild || 0)) {
+        statusBadge.textContent = `⚠️ Внимание: Веб-интерфейс обновлён через OTA, но Java-движок APK устарел (Build #${data.bundledBuild} < Build #${data.latestBuild}). Нажмите «📦 Скачать и установить свежий APK» ниже!`;
+        statusBadge.style.color = '#fbbf24';
       } else if (data.updateAvailable) {
         statusBadge.textContent = `🚀 В Git доступна новая версия v${data.latestVersion}${data.latestCommit ? ' (' + data.latestCommit + ')' : ''}! Нажмите кнопку ниже для обновления.`;
         statusBadge.style.color = '#34d399';
       } else {
-        statusBadge.textContent = `✅ Приложение обновлено до последней версии из Git (${data.gitRepo}@${data.gitBranch})`;
+        statusBadge.textContent = `✅ Приложение и APK-движок обновлены до последней версии из Git (${data.gitRepo}@${data.gitBranch})`;
         statusBadge.style.color = '#34d399';
       }
     }
@@ -2288,8 +2329,14 @@
   async function fetchFileContentSafe(relPath) {
     if (!relPath) return '';
     try {
-      const res = await apiFetch(`/api/files/file?path=${encodeURIComponent(relPath)}`);
-      return (res && typeof res.content === 'string') ? res.content : '';
+      const res = await apiFetch(`/api/files/content?path=${encodeURIComponent(relPath)}`);
+      if (res && typeof res.content === 'string') return res.content;
+    } catch {
+      // Fallback below
+    }
+    try {
+      const res2 = await apiFetch(`/api/files/file?path=${encodeURIComponent(relPath)}`);
+      return (res2 && typeof res2.content === 'string') ? res2.content : '';
     } catch {
       return '';
     }
@@ -2592,7 +2639,8 @@
         lines.push(`- **Модель:** \`${gen.modelId || chat.model_id}\` (${gen.modelLabel || ''})`);
         lines.push(`- **Effort:** \`${gen.effort || chat.effort || 'high'}\``);
         lines.push(`- **HTTP статус:** \`${gen.httpStatus || 0}\``);
-        lines.push(`- **Длительность:** ${gen.elapsedSec || 0} сек.`);
+        const elapsedSecVal = gen.elapsedSec || (gen.elapsedMs ? (gen.elapsedMs / 1000).toFixed(1) : 0);
+        lines.push(`- **Длительность:** ${elapsedSecVal} сек.`);
         if (gen.error) {
           lines.push(`- **Ошибка:** \`${gen.error}\``);
         }
