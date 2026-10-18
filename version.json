@@ -1,12 +1,25 @@
 {
   "appName": "AGY Roleplay Studio",
-  "version": "1.4.1",
-  "build": 10,
+  "version": "1.4.2",
+  "build": 11,
   "releaseDate": "2026-10-18",
   "gitRepo": "Kuka001/111",
   "gitBranch": "main",
   "apkPath": "agy-roleplay-android16.apk",
   "releases": [
+    {
+      "version": "1.4.2",
+      "build": 11,
+      "date": "2026-10-18",
+      "title": "Отключение фильтров SAFETY на Vertex AI (safetySettings: OFF / BLOCK_NONE) для ролевых игр без блокировок",
+      "ref": "main",
+      "changelog": [
+        "Отключены стандартные фильтры безопасности Vertex AI (HARM_CATEGORY_SEXUALLY_EXPLICIT, HARASSMENT, HATE_SPEECH, DANGEROUS_CONTENT) путём прямой передачи массива safetySettings в каждый запрос к моделям Gemini (включая Gemini 4 Argon)",
+        "Реализован автоматический фоллбэк порога безопасности между OFF и BLOCK_NONE на одной и той же модели (без смены выбранной модели) в случае срабатывания SAFETY или отклонения порога",
+        "В раздел «Настройки» добавлен переключатель порога фильтра безопасности Vertex AI (OFF / BLOCK_NONE / BLOCK_ONLY_HIGH) со значением OFF по умолчанию",
+        "В подробное окно статуса генерации добавлен вывод активного режима safetySettings и деталей safetyRatings"
+      ]
+    },
     {
       "version": "1.4.1",
       "build": 10,

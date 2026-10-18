@@ -56,6 +56,7 @@
     agyEmail: '',
     selectedModel: 'gemini-4-argon',
     selectedEffort: 'high',
+    safetyThreshold: 'OFF',
     contextMessagesLimit: 30,
     activePersonaId: 1,
     models: [],
@@ -418,6 +419,7 @@
       state.agyEmail = settingsData.agyEmail || '';
       state.selectedModel = settingsData.selectedModel || state.selectedModel;
       state.selectedEffort = settingsData.selectedEffort || state.selectedEffort;
+      state.safetyThreshold = settingsData.safetyThreshold || 'OFF';
       state.activePersonaId = settingsData.activePersonaId || state.activePersonaId;
       state.contextMessagesLimit = settingsData.contextMessagesLimit || 30;
 
@@ -428,6 +430,8 @@
 
       document.getElementById('inputProjectId').value = state.projectId;
       document.getElementById('inputContextLimit').value = state.contextMessagesLimit;
+      const safetySelect = document.getElementById('inputSafetyThreshold');
+      if (safetySelect) safetySelect.value = state.safetyThreshold;
 
       const connBadge = document.getElementById('serverConnectionStatus');
       if (connBadge) {
@@ -1890,11 +1894,14 @@
   async function saveSettings() {
     const projectId = document.getElementById('inputProjectId').value.trim();
     const contextMessagesLimit = Number(document.getElementById('inputContextLimit').value || 30);
+    const safetySelect = document.getElementById('inputSafetyThreshold');
+    const safetyThreshold = safetySelect ? safetySelect.value : (state.safetyThreshold || 'OFF');
     if (!projectId) return showToast('Введите Project ID');
 
     const payload = {
       projectId,
       contextMessagesLimit,
+      safetyThreshold,
     };
 
     try {
@@ -1904,9 +1911,10 @@
       });
       state.projectId = res.projectId;
       state.contextMessagesLimit = res.contextMessagesLimit;
+      state.safetyThreshold = res.safetyThreshold || safetyThreshold;
       renderAgyAuthStatus();
       updateHeaderIndicators(true);
-      showToast(`✅ Настройки сохранены! Project ID: ${state.projectId}`);
+      showToast(`✅ Настройки сохранены! Safety: ${state.safetyThreshold}`);
     } catch (err) {
       showToast(err.message);
     }

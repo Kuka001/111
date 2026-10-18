@@ -364,6 +364,7 @@ public class LocalBackendServer {
         setDefaultSetting("selected_effort", "high");
         setDefaultSetting("active_persona_id", "1");
         setDefaultSetting("context_messages_limit", "30");
+        setDefaultSetting("safety_threshold", "OFF");
         setDefaultSetting("google_auth_token", "");
         setDefaultSetting("agy_access_token", "");
         setDefaultSetting("agy_refresh_token", "");
@@ -372,16 +373,16 @@ public class LocalBackendServer {
         setDefaultSetting("agy_discovered_project", "");
         setDefaultSetting("git_repo", "Kuka001/111");
         setDefaultSetting("git_branch", "main");
-        setDefaultSetting("installed_version", "1.3.1");
-        setDefaultSetting("installed_build", "5");
+        setDefaultSetting("installed_version", "1.4.2");
+        setDefaultSetting("installed_build", "11");
         setDefaultSetting("installed_commit", "");
         setDefaultSetting("ota_active", "0");
 
         // Reconcile bundled APK version with any cached OTA bundle
         try {
             JSONObject bundled = readBundledVersionManifest();
-            int bundledBuild = bundled.optInt("build", 5);
-            String bundledVer = bundled.optString("version", "1.3.1");
+            int bundledBuild = bundled.optInt("build", 11);
+            String bundledVer = bundled.optString("version", "1.4.2");
             int savedBuild = Integer.parseInt(getSetting("installed_build", "0"));
             if (bundledBuild > savedBuild) {
                 deleteRecursive(otaWwwDir);
@@ -724,6 +725,7 @@ public class LocalBackendServer {
                 res.put("selectedEffort", getSetting("selected_effort", "high"));
                 res.put("activePersonaId", Integer.parseInt(getSetting("active_persona_id", "1")));
                 res.put("contextMessagesLimit", Integer.parseInt(getSetting("context_messages_limit", "30")));
+                res.put("safetyThreshold", getSetting("safety_threshold", "OFF"));
                 res.put("googleAuthToken", getSetting("google_auth_token", ""));
                 res.put("agyAuthenticated", isAgyAuthenticated());
                 res.put("agyUserEmail", getSetting("agy_user_email", ""));
@@ -750,6 +752,13 @@ public class LocalBackendServer {
                 }
                 if (body.has("activePersonaId")) setSetting("active_persona_id", String.valueOf(body.optInt("activePersonaId", 1)));
                 if (body.has("contextMessagesLimit")) setSetting("context_messages_limit", String.valueOf(body.optInt("contextMessagesLimit", 30)));
+                if (body.has("safetyThreshold")) {
+                    String st = body.optString("safetyThreshold", "OFF").trim().toUpperCase(Locale.ROOT);
+                    if (!"OFF".equals(st) && !"BLOCK_NONE".equals(st) && !"BLOCK_ONLY_HIGH".equals(st)) {
+                        st = "OFF";
+                    }
+                    setSetting("safety_threshold", st);
+                }
                 if (body.has("googleAuthToken")) setSetting("google_auth_token", body.optString("googleAuthToken").trim());
                 return routeRequest("GET", "/api/settings", null);
             }
@@ -2264,239 +2273,323 @@ public class LocalBackendServer {
 
         // Gemini models via real-time SSE streaming (:streamGenerateContent?alt=sse) on Vertex AI
         int maxOutputTokens = 32768;
-        JSONObject vertexReq = new JSONObject();
-        if (!systemInstructionText.isEmpty()) {
-            JSONObject sysObj = new JSONObject();
-            sysObj.put("role", "user");
-            sysObj.put("parts", new JSONArray().put(new JSONObject().put("text", systemInstructionText)));
-            vertexReq.put("systemInstruction", sysObj);
-        }
-        vertexReq.put("contents", contents);
+        String configuredSafety = getSetting("safety_threshold", "OFF").trim().toUpperCase(Locale.ROOT);
+        if (configuredSafety.isEmpty()) configuredSafety = "OFF";
 
-        JSONObject genConfig = new JSONObject();
-        genConfig.put("maxOutputTokens", maxOutputTokens);
-        genConfig.put("temperature", 0.85);
-        genConfig.put("topP", 0.95);
-        JSONObject thinkingConfig = new JSONObject();
-        if (vertexModel.startsWith("gemini-4") || vertexModel.startsWith("gemini-3")) {
-            thinkingConfig.put("thinkingLevel", thinkingLevel);
-            prog.thinkingConfigSummary = "thinkingLevel=" + thinkingLevel + ", maxOutputTokens=" + maxOutputTokens;
+        String[] thresholdsToTry;
+        if ("OFF".equals(configuredSafety)) {
+            thresholdsToTry = new String[]{"OFF", "BLOCK_NONE"};
+        } else if ("BLOCK_NONE".equals(configuredSafety)) {
+            thresholdsToTry = new String[]{"BLOCK_NONE", "OFF"};
         } else {
-            thinkingConfig.put("thinkingBudget", thinkingBudget);
-            prog.thinkingConfigSummary = "thinkingBudget=" + thinkingBudget + ", maxOutputTokens=" + maxOutputTokens;
-        }
-        thinkingConfig.put("includeThoughts", true);
-        genConfig.put("thinkingConfig", thinkingConfig);
-        vertexReq.put("generationConfig", genConfig);
-
-        String urlStr = AGY_VERTEX_ENDPOINT + "/v1/projects/" + proj + "/locations/global/publishers/google/models/" + vertexModel + ":streamGenerateContent?alt=sse";
-        prog.endpoint = urlStr;
-        prog.phase = "connecting";
-        prog.statusText = "☁️ Подключение к " + normBase + " (" + effort.toUpperCase(Locale.ROOT) + ")...";
-        prog.addLog("POST " + urlStr);
-        prog.addLog("Параметры генерации: " + prog.thinkingConfigSummary + ", project=" + proj);
-
-        URL url = new URL(urlStr);
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(25000);
-        conn.setReadTimeout(180000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-        conn.setRequestProperty("Accept", "text/event-stream");
-        conn.setRequestProperty("x-goog-user-project", proj);
-        conn.setRequestProperty("User-Agent", AGY_USER_AGENT);
-
-        byte[] payload = vertexReq.toString().getBytes(StandardCharsets.UTF_8);
-        prog.addLog("Отправка запроса (" + payload.length + " байт) к модели " + vertexModel + "...");
-        OutputStream os = conn.getOutputStream();
-        os.write(payload);
-        os.flush();
-        os.close();
-
-        prog.statusText = "⏳ Ожидание ответа HTTP от " + normBase + "...";
-        int code = conn.getResponseCode();
-        prog.httpStatus = code;
-
-        if (code < 200 || code >= 300) {
-            String errBody = readHttpBody(conn);
-            String readableErr = extractReadableApiError(errBody);
-            prog.addLog("❌ HTTP " + code + " от " + vertexModel + ": " + readableErr);
-            if (code == 401) {
-                throw new Exception("Сессия AGY истекла или токен недействителен (HTTP 401). Перезайдите через кнопку «Войти через Google (AGY)» в Настройках.");
-            }
-            throw new Exception("Ошибка модели " + normBase + " (HTTP " + code + "): " + readableErr);
+            thresholdsToTry = new String[]{configuredSafety};
         }
 
-        prog.phase = "streaming";
-        prog.statusText = "📡 Поток открыт (HTTP " + code + "). Модель " + normBase + " обрабатывает контекст...";
-        prog.addLog("HTTP " + code + " OK — открыт SSE-поток, ожидание первого чанка от " + vertexModel + "...");
-
-        StringBuilder replyBuilder = new StringBuilder();
-        StringBuilder thoughtsBuilder = new StringBuilder();
-        StringBuilder rawFallbackBuilder = new StringBuilder();
-        String lastFinishReason = "";
-        String blockReason = "";
-        int promptTokens = 0;
-        int thoughtsTokens = 0;
-        int outputTokens = 0;
-        boolean loggedFirstThought = false;
-        boolean loggedFirstText = false;
-
-        InputStream is = conn.getInputStream();
-        BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
-        String line;
-        while ((line = br.readLine()) != null) {
-            rawFallbackBuilder.append(line).append("\n");
-            String trimmedLine = line.trim();
-            if (!trimmedLine.startsWith("data:")) {
-                continue;
+        String lastSafetyError = "";
+        for (int attemptIdx = 0; attemptIdx < thresholdsToTry.length; attemptIdx++) {
+            String activeSafetyThreshold = thresholdsToTry[attemptIdx];
+            JSONObject vertexReq = new JSONObject();
+            if (!systemInstructionText.isEmpty()) {
+                JSONObject sysObj = new JSONObject();
+                sysObj.put("role", "user");
+                sysObj.put("parts", new JSONArray().put(new JSONObject().put("text", systemInstructionText)));
+                vertexReq.put("systemInstruction", sysObj);
             }
-            String dataJson = trimmedLine.substring(5).trim();
-            if (dataJson.isEmpty() || "[DONE]".equals(dataJson)) {
-                continue;
+            vertexReq.put("contents", contents);
+            vertexReq.put("safetySettings", buildSafetySettingsArray(activeSafetyThreshold));
+
+            JSONObject genConfig = new JSONObject();
+            genConfig.put("maxOutputTokens", maxOutputTokens);
+            genConfig.put("temperature", 0.85);
+            genConfig.put("topP", 0.95);
+            JSONObject thinkingConfig = new JSONObject();
+            if (vertexModel.startsWith("gemini-4") || vertexModel.startsWith("gemini-3")) {
+                thinkingConfig.put("thinkingLevel", thinkingLevel);
+                prog.thinkingConfigSummary = "thinkingLevel=" + thinkingLevel + ", maxOutputTokens=" + maxOutputTokens + ", safety=" + activeSafetyThreshold;
+            } else {
+                thinkingConfig.put("thinkingBudget", thinkingBudget);
+                prog.thinkingConfigSummary = "thinkingBudget=" + thinkingBudget + ", maxOutputTokens=" + maxOutputTokens + ", safety=" + activeSafetyThreshold;
             }
-            try {
-                JSONObject root = new JSONObject(dataJson);
-                JSONObject respObj = root.optJSONObject("response") != null ? root.getJSONObject("response") : root;
+            thinkingConfig.put("includeThoughts", true);
+            genConfig.put("thinkingConfig", thinkingConfig);
+            vertexReq.put("generationConfig", genConfig);
 
-                JSONObject pf = respObj.optJSONObject("promptFeedback");
-                if (pf != null) {
-                    String brReason = pf.optString("blockReason", "");
-                    if (!brReason.isEmpty()) {
-                        blockReason = brReason;
-                        prog.addLog("⚠️ promptFeedback.blockReason = " + blockReason);
-                    }
+            String urlStr = AGY_VERTEX_ENDPOINT + "/v1/projects/" + proj + "/locations/global/publishers/google/models/" + vertexModel + ":streamGenerateContent?alt=sse";
+            prog.endpoint = urlStr;
+            prog.phase = "connecting";
+            prog.statusText = "☁️ Подключение к " + normBase + " (" + effort.toUpperCase(Locale.ROOT) + ", safety=" + activeSafetyThreshold + ")...";
+            if (attemptIdx == 0) {
+                prog.addLog("POST " + urlStr);
+            } else {
+                prog.addLog("🔄 Повтор запроса к той же модели " + vertexModel + " с safetySettings=" + activeSafetyThreshold + "...");
+            }
+            prog.addLog("Параметры генерации: " + prog.thinkingConfigSummary + ", project=" + proj);
+
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(25000);
+            conn.setReadTimeout(180000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+            conn.setRequestProperty("Accept", "text/event-stream");
+            conn.setRequestProperty("x-goog-user-project", proj);
+            conn.setRequestProperty("User-Agent", AGY_USER_AGENT);
+
+            byte[] payload = vertexReq.toString().getBytes(StandardCharsets.UTF_8);
+            prog.addLog("Отправка запроса (" + payload.length + " байт, safety=" + activeSafetyThreshold + ") к модели " + vertexModel + "...");
+            OutputStream os = conn.getOutputStream();
+            os.write(payload);
+            os.flush();
+            os.close();
+
+            prog.statusText = "⏳ Ожидание ответа HTTP от " + normBase + "...";
+            int code = conn.getResponseCode();
+            prog.httpStatus = code;
+
+            if (code < 200 || code >= 300) {
+                String errBody = readHttpBody(conn);
+                String readableErr = extractReadableApiError(errBody);
+                prog.addLog("❌ HTTP " + code + " от " + vertexModel + " (safety=" + activeSafetyThreshold + "): " + readableErr);
+                if (code == 401) {
+                    throw new Exception("Сессия AGY истекла или токен недействителен (HTTP 401). Перезайдите через кнопку «Войти через Google (AGY)» в Настройках.");
                 }
-
-                JSONObject usage = respObj.optJSONObject("usageMetadata");
-                if (usage != null) {
-                    promptTokens = usage.optInt("promptTokenCount", promptTokens);
-                    thoughtsTokens = usage.optInt("thoughtsTokenCount", thoughtsTokens);
-                    outputTokens = usage.optInt("candidatesTokenCount", outputTokens);
+                if (code == 400 && attemptIdx + 1 < thresholdsToTry.length) {
+                    prog.addLog("⚠️ Порог safety=" + activeSafetyThreshold + " отклонён (HTTP 400), переключаем порог фильтра на " + thresholdsToTry[attemptIdx + 1] + " без смены модели...");
+                    continue;
                 }
+                throw new Exception("Ошибка модели " + normBase + " (HTTP " + code + "): " + readableErr);
+            }
 
-                JSONArray candidates = respObj.optJSONArray("candidates");
-                if (candidates != null && candidates.length() > 0) {
-                    JSONObject c0 = candidates.getJSONObject(0);
-                    String fr = c0.optString("finishReason", "");
-                    if (!fr.isEmpty()) {
-                        lastFinishReason = fr;
-                        prog.finishReason = fr;
+            prog.phase = "streaming";
+            prog.statusText = "📡 Поток открыт (HTTP " + code + "). Модель " + normBase + " обрабатывает контекст...";
+            prog.addLog("HTTP " + code + " OK — открыт SSE-поток, ожидание первого чанка от " + vertexModel + "...");
+
+            StringBuilder replyBuilder = new StringBuilder();
+            StringBuilder thoughtsBuilder = new StringBuilder();
+            StringBuilder rawFallbackBuilder = new StringBuilder();
+            String lastFinishReason = "";
+            String blockReason = "";
+            String safetyRatingsSummary = "";
+            int promptTokens = 0;
+            int thoughtsTokens = 0;
+            int outputTokens = 0;
+            boolean loggedFirstThought = false;
+            boolean loggedFirstText = false;
+
+            InputStream is = conn.getInputStream();
+            BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+            String line;
+            while ((line = br.readLine()) != null) {
+                rawFallbackBuilder.append(line).append("\n");
+                String trimmedLine = line.trim();
+                if (!trimmedLine.startsWith("data:")) {
+                    continue;
+                }
+                String dataJson = trimmedLine.substring(5).trim();
+                if (dataJson.isEmpty() || "[DONE]".equals(dataJson)) {
+                    continue;
+                }
+                try {
+                    JSONObject root = new JSONObject(dataJson);
+                    JSONObject respObj = root.optJSONObject("response") != null ? root.getJSONObject("response") : root;
+
+                    JSONObject pf = respObj.optJSONObject("promptFeedback");
+                    if (pf != null) {
+                        String brReason = pf.optString("blockReason", "");
+                        if (!brReason.isEmpty()) {
+                            blockReason = brReason;
+                            prog.addLog("⚠️ promptFeedback.blockReason = " + blockReason);
+                        }
+                        JSONArray pfRatings = pf.optJSONArray("safetyRatings");
+                        if (pfRatings != null && pfRatings.length() > 0) {
+                            safetyRatingsSummary = summarizeSafetyRatings(pfRatings);
+                        }
                     }
-                    JSONObject cContent = c0.optJSONObject("content");
-                    if (cContent != null) {
-                        JSONArray cParts = cContent.optJSONArray("parts");
-                        if (cParts != null) {
-                            for (int i = 0; i < cParts.length(); i++) {
-                                JSONObject p = cParts.getJSONObject(i);
-                                boolean isThought = p.optBoolean("thought", false);
-                                String partText = p.optString("text", "");
-                                if (partText.isEmpty()) continue;
 
-                                prog.chunksCount++;
-                                if (isThought) {
-                                    thoughtsBuilder.append(partText);
-                                    prog.thoughts = thoughtsBuilder.toString();
-                                    prog.thoughtsChars = prog.thoughts.length();
-                                    prog.phase = "thinking";
-                                    prog.statusText = "💭 " + normBase + " размышляет (" + prog.thoughtsChars + " симв., чанк #" + prog.chunksCount + ")...";
-                                    if (!loggedFirstThought) {
-                                        loggedFirstThought = true;
-                                        prog.addLog("💭 Чанк #" + prog.chunksCount + ": начато размышление модели (" + normBase + ")");
-                                    } else if (prog.chunksCount % 12 == 0) {
-                                        prog.addLog("💭 Чанк #" + prog.chunksCount + ": размышление продолжается (" + prog.thoughtsChars + " симв.)");
-                                    }
-                                } else {
-                                    replyBuilder.append(partText);
-                                    prog.text = replyBuilder.toString();
-                                    prog.textChars = prog.text.length();
-                                    prog.phase = "generating";
-                                    prog.statusText = "✍️ " + normBase + " пишет ответ (" + prog.textChars + " симв., чанк #" + prog.chunksCount + ")...";
-                                    if (!loggedFirstText) {
-                                        loggedFirstText = true;
-                                        prog.addLog("✍️ Чанк #" + prog.chunksCount + ": начата генерация текста ответа"
-                                            + (prog.thoughtsChars > 0 ? (" (после " + prog.thoughtsChars + " симв. мыслей)") : ""));
-                                    } else if (prog.chunksCount % 15 == 0) {
-                                        prog.addLog("✍️ Чанк #" + prog.chunksCount + ": генерация ответа (" + prog.textChars + " симв.)");
+                    JSONObject usage = respObj.optJSONObject("usageMetadata");
+                    if (usage != null) {
+                        promptTokens = usage.optInt("promptTokenCount", promptTokens);
+                        thoughtsTokens = usage.optInt("thoughtsTokenCount", thoughtsTokens);
+                        outputTokens = usage.optInt("candidatesTokenCount", outputTokens);
+                    }
+
+                    JSONArray candidates = respObj.optJSONArray("candidates");
+                    if (candidates != null && candidates.length() > 0) {
+                        JSONObject c0 = candidates.getJSONObject(0);
+                        String fr = c0.optString("finishReason", "");
+                        if (!fr.isEmpty()) {
+                            lastFinishReason = fr;
+                            prog.finishReason = fr;
+                        }
+                        JSONArray cRatings = c0.optJSONArray("safetyRatings");
+                        if (cRatings != null && cRatings.length() > 0) {
+                            String sr = summarizeSafetyRatings(cRatings);
+                            if (!sr.isEmpty()) {
+                                safetyRatingsSummary = sr;
+                            }
+                        }
+                        JSONObject cContent = c0.optJSONObject("content");
+                        if (cContent != null) {
+                            JSONArray cParts = cContent.optJSONArray("parts");
+                            if (cParts != null) {
+                                for (int i = 0; i < cParts.length(); i++) {
+                                    JSONObject p = cParts.getJSONObject(i);
+                                    boolean isThought = p.optBoolean("thought", false);
+                                    String partText = p.optString("text", "");
+                                    if (partText.isEmpty()) continue;
+
+                                    prog.chunksCount++;
+                                    if (isThought) {
+                                        thoughtsBuilder.append(partText);
+                                        prog.thoughts = thoughtsBuilder.toString();
+                                        prog.thoughtsChars = prog.thoughts.length();
+                                        prog.phase = "thinking";
+                                        prog.statusText = "💭 " + normBase + " размышляет (" + prog.thoughtsChars + " симв., чанк #" + prog.chunksCount + ")...";
+                                        if (!loggedFirstThought) {
+                                            loggedFirstThought = true;
+                                            prog.addLog("💭 Чанк #" + prog.chunksCount + ": начато размышление модели (" + normBase + ")");
+                                        } else if (prog.chunksCount % 12 == 0) {
+                                            prog.addLog("💭 Чанк #" + prog.chunksCount + ": размышление продолжается (" + prog.thoughtsChars + " симв.)");
+                                        }
+                                    } else {
+                                        replyBuilder.append(partText);
+                                        prog.text = replyBuilder.toString();
+                                        prog.textChars = prog.text.length();
+                                        prog.phase = "generating";
+                                        prog.statusText = "✍️ " + normBase + " пишет ответ (" + prog.textChars + " симв., чанк #" + prog.chunksCount + ")...";
+                                        if (!loggedFirstText) {
+                                            loggedFirstText = true;
+                                            prog.addLog("✍️ Чанк #" + prog.chunksCount + ": начата генерация текста ответа"
+                                                + (prog.thoughtsChars > 0 ? (" (после " + prog.thoughtsChars + " симв. мыслей)") : ""));
+                                        } else if (prog.chunksCount % 15 == 0) {
+                                            prog.addLog("✍️ Чанк #" + prog.chunksCount + ": генерация ответа (" + prog.textChars + " симв.)");
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                } catch (Exception parseEx) {
+                    prog.addLog("⚠️ Ошибка парсинга SSE-чанка: " + parseEx.getMessage());
                 }
-            } catch (Exception parseEx) {
-                prog.addLog("⚠️ Ошибка парсинга SSE-чанка: " + parseEx.getMessage());
             }
-        }
-        br.close();
+            br.close();
 
-        // Fallback if server returned non-SSE JSON body on HTTP 200
-        if (prog.chunksCount == 0 && rawFallbackBuilder.length() > 0) {
-            try {
-                String rawStr = rawFallbackBuilder.toString().trim();
-                JSONObject root = new JSONObject(rawStr);
-                JSONObject respObj = root.optJSONObject("response") != null ? root.getJSONObject("response") : root;
-                JSONArray candidates = respObj.optJSONArray("candidates");
-                if (candidates != null && candidates.length() > 0) {
-                    JSONObject c0 = candidates.getJSONObject(0);
-                    lastFinishReason = c0.optString("finishReason", lastFinishReason);
-                    prog.finishReason = lastFinishReason;
-                    JSONObject cContent = c0.optJSONObject("content");
-                    if (cContent != null) {
-                        JSONArray cParts = cContent.optJSONArray("parts");
-                        if (cParts != null) {
-                            for (int i = 0; i < cParts.length(); i++) {
-                                JSONObject p = cParts.getJSONObject(i);
-                                if (p.optBoolean("thought", false)) {
-                                    thoughtsBuilder.append(p.optString("text", ""));
-                                } else {
-                                    replyBuilder.append(p.optString("text", ""));
+            // Fallback if server returned non-SSE JSON body on HTTP 200
+            if (prog.chunksCount == 0 && rawFallbackBuilder.length() > 0) {
+                try {
+                    String rawStr = rawFallbackBuilder.toString().trim();
+                    JSONObject root = new JSONObject(rawStr);
+                    JSONObject respObj = root.optJSONObject("response") != null ? root.getJSONObject("response") : root;
+                    JSONArray candidates = respObj.optJSONArray("candidates");
+                    if (candidates != null && candidates.length() > 0) {
+                        JSONObject c0 = candidates.getJSONObject(0);
+                        lastFinishReason = c0.optString("finishReason", lastFinishReason);
+                        prog.finishReason = lastFinishReason;
+                        JSONObject cContent = c0.optJSONObject("content");
+                        if (cContent != null) {
+                            JSONArray cParts = cContent.optJSONArray("parts");
+                            if (cParts != null) {
+                                for (int i = 0; i < cParts.length(); i++) {
+                                    JSONObject p = cParts.getJSONObject(i);
+                                    if (p.optBoolean("thought", false)) {
+                                        thoughtsBuilder.append(p.optString("text", ""));
+                                    } else {
+                                        replyBuilder.append(p.optString("text", ""));
+                                    }
                                 }
+                                prog.thoughts = thoughtsBuilder.toString();
+                                prog.thoughtsChars = prog.thoughts.length();
+                                prog.text = replyBuilder.toString();
+                                prog.textChars = prog.text.length();
+                                prog.chunksCount = 1;
                             }
-                            prog.thoughts = thoughtsBuilder.toString();
-                            prog.thoughtsChars = prog.thoughts.length();
-                            prog.text = replyBuilder.toString();
-                            prog.textChars = prog.text.length();
-                            prog.chunksCount = 1;
                         }
                     }
+                } catch (Exception ignored) {
                 }
-            } catch (Exception ignored) {
             }
+
+            String finalReply = replyBuilder.toString().trim();
+            String finalThoughts = thoughtsBuilder.toString().trim();
+            prog.thoughts = finalThoughts;
+            prog.thoughtsChars = finalThoughts.length();
+            prog.text = finalReply;
+            prog.textChars = finalReply.length();
+
+            String tokenStats = (promptTokens > 0 || thoughtsTokens > 0 || outputTokens > 0)
+                ? (", токены: вход=" + promptTokens + ", мысли=" + thoughtsTokens + ", ответ=" + outputTokens)
+                : "";
+            prog.addLog("Поток завершён: чанков=" + prog.chunksCount
+                + ", finishReason=" + (lastFinishReason.isEmpty() ? "STOP" : lastFinishReason)
+                + ", safety=" + activeSafetyThreshold
+                + ", ответ=" + finalReply.length() + " симв., мысли=" + finalThoughts.length() + " симв." + tokenStats);
+            if (!safetyRatingsSummary.isEmpty()) {
+                prog.addLog("🛡️ safetyRatings: " + safetyRatingsSummary);
+            }
+
+            if (!finalReply.isEmpty()) {
+                return new String[]{finalReply, finalThoughts};
+            }
+
+            if (!blockReason.isEmpty() || ("SAFETY".equals(lastFinishReason) || "PROHIBITED_CONTENT".equals(lastFinishReason) || "BLOCKLIST".equals(lastFinishReason))) {
+                String reason = !blockReason.isEmpty() ? blockReason : lastFinishReason;
+                if ("SAFETY".equals(reason) && attemptIdx + 1 < thresholdsToTry.length) {
+                    prog.addLog("⚠️ Получен " + reason + " при safety=" + activeSafetyThreshold + ". Повторяем запрос к той же модели " + normBase + " с порогом " + thresholdsToTry[attemptIdx + 1] + "...");
+                    lastSafetyError = reason + (safetyRatingsSummary.isEmpty() ? "" : (" [" + safetyRatingsSummary + "]"));
+                    continue;
+                }
+                String ratingsNote = safetyRatingsSummary.isEmpty() ? "" : (" (категории: " + safetyRatingsSummary + ")");
+                throw new Exception("Модель " + normBase + " заблокировала генерацию ответа (причина: " + reason + ", safetySettings=" + activeSafetyThreshold + ")" + ratingsNote + ". Автоматическая смена модели отключена.");
+            }
+
+            if ("MAX_TOKENS".equals(lastFinishReason) && !finalThoughts.isEmpty()) {
+                throw new Exception("Модель " + normBase + " потратила лимит вывода на размышления (" + finalThoughts.length() + " симв. мыслей, finishReason: MAX_TOKENS). Попробуйте уменьшить Effort (например, на Medium или Low).");
+            }
+
+            throw new Exception("Модель " + normBase + " вернула пустой текстовый ответ (HTTP " + code
+                + ", finishReason=" + (lastFinishReason.isEmpty() ? "NONE" : lastFinishReason)
+                + ", мыслей=" + finalThoughts.length() + " симв.). Автоматическая смена модели отключена.");
         }
 
-        String finalReply = replyBuilder.toString().trim();
-        String finalThoughts = thoughtsBuilder.toString().trim();
-        prog.thoughts = finalThoughts;
-        prog.thoughtsChars = finalThoughts.length();
-        prog.text = finalReply;
-        prog.textChars = finalReply.length();
+        throw new Exception("Модель " + normBase + " заблокировала генерацию ответа (" + lastSafetyError + "). Автоматическая смена модели отключена.");
+    }
 
-        String tokenStats = (promptTokens > 0 || thoughtsTokens > 0 || outputTokens > 0)
-            ? (", токены: вход=" + promptTokens + ", мысли=" + thoughtsTokens + ", ответ=" + outputTokens)
-            : "";
-        prog.addLog("Поток завершён: чанков=" + prog.chunksCount
-            + ", finishReason=" + (lastFinishReason.isEmpty() ? "STOP" : lastFinishReason)
-            + ", ответ=" + finalReply.length() + " симв., мысли=" + finalThoughts.length() + " симв." + tokenStats);
-
-        if (!finalReply.isEmpty()) {
-            return new String[]{finalReply, finalThoughts};
+    private JSONArray buildSafetySettingsArray(String threshold) throws Exception {
+        String normThreshold = (threshold == null || threshold.trim().isEmpty()) ? "OFF" : threshold.trim().toUpperCase(Locale.ROOT);
+        String[] categories = new String[]{
+            "HARM_CATEGORY_HATE_SPEECH",
+            "HARM_CATEGORY_DANGEROUS_CONTENT",
+            "HARM_CATEGORY_HARASSMENT",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT"
+        };
+        JSONArray arr = new JSONArray();
+        for (String cat : categories) {
+            JSONObject item = new JSONObject();
+            item.put("category", cat);
+            item.put("threshold", normThreshold);
+            arr.put(item);
         }
+        return arr;
+    }
 
-        if (!blockReason.isEmpty() || ("SAFETY".equals(lastFinishReason) || "PROHIBITED_CONTENT".equals(lastFinishReason) || "BLOCKLIST".equals(lastFinishReason))) {
-            String reason = !blockReason.isEmpty() ? blockReason : lastFinishReason;
-            throw new Exception("Модель " + normBase + " заблокировала генерацию ответа (причина: " + reason + "). Измените формулировку или проверьте последние сообщения. Автоматическая смена модели отключена.");
+    private String summarizeSafetyRatings(JSONArray ratings) {
+        if (ratings == null || ratings.length() == 0) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < ratings.length(); i++) {
+            JSONObject r = ratings.optJSONObject(i);
+            if (r == null) continue;
+            String cat = r.optString("category", "").replace("HARM_CATEGORY_", "");
+            String prob = r.optString("probability", "");
+            boolean blocked = r.optBoolean("blocked", false);
+            if (cat.isEmpty()) continue;
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(cat).append("=").append(prob.isEmpty() ? "?" : prob);
+            if (blocked) sb.append("(BLOCKED)");
         }
-
-        if ("MAX_TOKENS".equals(lastFinishReason) && !finalThoughts.isEmpty()) {
-            throw new Exception("Модель " + normBase + " потратила лимит вывода на размышления (" + finalThoughts.length() + " симв. мыслей, finishReason: MAX_TOKENS). Попробуйте уменьшить Effort (например, на Medium или Low).");
-        }
-
-        throw new Exception("Модель " + normBase + " вернула пустой текстовый ответ (HTTP " + code
-            + ", finishReason=" + (lastFinishReason.isEmpty() ? "NONE" : lastFinishReason)
-            + ", мыслей=" + finalThoughts.length() + " симв.). Автоматическая смена модели отключена.");
+        return sb.toString();
     }
 
     private String readHttpBody(HttpURLConnection conn) {
@@ -2622,8 +2715,8 @@ public class LocalBackendServer {
             try {
                 JSONObject fallback = new JSONObject();
                 fallback.put("appName", "AGY Roleplay Studio");
-                fallback.put("version", "1.4.1");
-                fallback.put("build", 10);
+                fallback.put("version", "1.4.2");
+                fallback.put("build", 11);
                 fallback.put("gitRepo", "Kuka001/111");
                 fallback.put("gitBranch", "main");
                 fallback.put("apkPath", "agy-roleplay-android16.apk");
