@@ -57,8 +57,10 @@
     selectedModel: 'gemini-4-argon',
     selectedEffort: 'high',
     safetyThreshold: 'OFF',
-    contextMessagesLimit: 30,
     activePersonaId: 1,
+    claudeRuntimeReady: false,
+    claudeAuthenticated: false,
+    claudeProjectPath: '',
     models: [],
     characters: [],
     personas: [],
@@ -421,7 +423,9 @@
       state.selectedEffort = settingsData.selectedEffort || state.selectedEffort;
       state.safetyThreshold = settingsData.safetyThreshold || 'OFF';
       state.activePersonaId = settingsData.activePersonaId || state.activePersonaId;
-      state.contextMessagesLimit = settingsData.contextMessagesLimit || 30;
+      state.claudeRuntimeReady = Boolean(settingsData.claudeRuntimeReady);
+      state.claudeAuthenticated = Boolean(settingsData.claudeAuthenticated);
+      state.claudeProjectPath = settingsData.claudeProjectPath || '';
 
       state.models = modelsData.models || [];
       state.characters = charsData.characters || [];
@@ -429,7 +433,6 @@
       state.chats = chatsData.chats || [];
 
       document.getElementById('inputProjectId').value = state.projectId;
-      document.getElementById('inputContextLimit').value = state.contextMessagesLimit;
       const safetySelect = document.getElementById('inputSafetyThreshold');
       if (safetySelect) safetySelect.value = state.safetyThreshold;
 
@@ -443,6 +446,9 @@
       }
 
       renderAgyAuthStatus();
+      renderClaudeStatus();
+      const claudeProjInput = document.getElementById('inputClaudeProjectPath');
+      if (claudeProjInput) claudeProjInput.value = state.claudeProjectPath;
       updateHeaderIndicators(true);
       renderChatsList();
       renderCharactersAndPersonas();
@@ -1211,7 +1217,12 @@
       effortSel.value = state.selectedEffort || 'high';
     }
 
+    // Force the .md pickers to refresh from workspace each time the modal opens.
+    const sysSel = document.getElementById('newChatSysPromptSelect');
+    if (sysSel) sysSel.dataset.loaded = '';
+
     onNewChatCharacterChange();
+    onNewChatModelChange();
     document.getElementById('newChatModal').classList.remove('hidden');
   }
 
@@ -1227,18 +1238,27 @@
     const modelId = document.getElementById('newChatModelSelect').value;
     const effortSel = document.getElementById('newChatEffortSelect');
     const effort = effortSel ? effortSel.value : state.selectedEffort;
-    const customFirstMessage = document.getElementById('newChatGreetingInput').value;
+    let customFirstMessage = document.getElementById('newChatGreetingInput').value;
+
+    const payload = { characterId, personaId, modelId, effort };
+
+    if (isClaudeCliModel(modelId)) {
+      const sysSel = document.getElementById('newChatSysPromptSelect');
+      const firstSel = document.getElementById('newChatFirstMsgSelect');
+      const projInput = document.getElementById('newChatProjectPath');
+      payload.provider = 'claude-cli';
+      payload.systemPromptPath = sysSel ? sysSel.value : '';
+      payload.firstMessagePath = firstSel ? firstSel.value : '';
+      payload.projectPath = projInput ? projInput.value.trim() : '';
+      // A chosen first-message .md should win over the generic greeting textarea.
+      if (payload.firstMessagePath) customFirstMessage = '';
+    }
+    payload.customFirstMessage = customFirstMessage;
 
     try {
       const res = await apiFetch('/api/chats', {
         method: 'POST',
-        body: JSON.stringify({
-          characterId,
-          personaId,
-          modelId,
-          effort,
-          customFirstMessage,
-        }),
+        body: JSON.stringify(payload),
       });
       closeModal('newChatModal');
       await loadChatsList();
@@ -1891,18 +1911,204 @@
     }
   }
 
+  // ==========================================================================
+  // CLAUDE CODE CLI (on-device) — runtime install + subscription auth
+  // ==========================================================================
+  function isClaudeCliModel(modelId) {
+    return typeof modelId === 'string' && modelId.indexOf('claude-code-') === 0;
+  }
+
+  function renderClaudeStatus() {
+    const badge = document.getElementById('claudeStatusBadge');
+    const loginBtn = document.getElementById('claudeAuthLoginBtn');
+    const logoutBtn = document.getElementById('claudeAuthLogoutBtn');
+    const installBtn = document.getElementById('claudeInstallBtn');
+
+    if (badge) {
+      if (!state.claudeRuntimeReady) {
+        badge.textContent = '⚠️ Среда Claude Code не установлена. Нажмите «Скачать среду» (≈300 МБ, один раз).';
+        badge.style.color = 'var(--warning)';
+      } else if (!state.claudeAuthenticated) {
+        badge.textContent = '✅ Среда готова. ⚠️ Войдите в Claude по подписке, чтобы запускать модели Claude Code.';
+        badge.style.color = 'var(--warning)';
+      } else {
+        badge.textContent = '✅ Среда Claude Code установлена и авторизована. Модели «Claude … (Code CLI)» готовы к работе.';
+        badge.style.color = 'var(--success)';
+      }
+    }
+    if (installBtn) {
+      installBtn.textContent = state.claudeRuntimeReady ? '🔄 Переустановить среду Claude' : '⬇️ Скачать среду Claude (≈300 МБ)';
+    }
+    if (loginBtn) {
+      loginBtn.disabled = !state.claudeRuntimeReady;
+      loginBtn.textContent = state.claudeAuthenticated ? '🔄 Перевойти в Claude' : '🔑 Войти в Claude (подписка)';
+    }
+    if (logoutBtn) {
+      logoutBtn.classList.toggle('hidden', !state.claudeAuthenticated);
+    }
+  }
+
+  async function checkClaudeStatus() {
+    try {
+      const data = await apiFetch('/api/claude/status');
+      state.claudeRuntimeReady = Boolean(data.runtimeReady);
+      state.claudeAuthenticated = Boolean(data.authenticated);
+      if (data.projectPath !== undefined) state.claudeProjectPath = data.projectPath;
+      renderClaudeStatus();
+    } catch (e) {}
+  }
+
+  async function installClaudeRuntime() {
+    if (!confirm('Скачать среду выполнения Claude Code на устройство? Это разовая загрузка около 300 МБ (нужен Wi-Fi и свободное место).')) {
+      return;
+    }
+    const installBtn = document.getElementById('claudeInstallBtn');
+    if (installBtn) { installBtn.disabled = true; }
+    const badge = document.getElementById('claudeStatusBadge');
+    if (badge) {
+      badge.textContent = '⏳ Скачивание и распаковка среды Claude... Не закрывайте приложение. Это может занять несколько минут.';
+      badge.style.color = 'var(--text-secondary)';
+    }
+    showToast('⏳ Устанавливаю среду Claude Code...');
+    try {
+      const res = await apiFetch('/api/claude/runtime/install', { method: 'POST' });
+      state.claudeRuntimeReady = Boolean(res.runtimeReady);
+      state.claudeAuthenticated = Boolean(res.authenticated);
+      renderClaudeStatus();
+      showToast(state.claudeRuntimeReady ? '✅ Среда Claude Code установлена!' : '⚠️ Установка не завершилась.');
+    } catch (err) {
+      renderClaudeStatus();
+      showToast('Ошибка установки: ' + err.message);
+    } finally {
+      if (installBtn) { installBtn.disabled = false; }
+    }
+  }
+
+  async function startClaudeAuth() {
+    if (!state.claudeRuntimeReady) return showToast('Сначала скачайте среду Claude.');
+    try {
+      showToast('🔑 Запуск входа в Claude...');
+      const res = await apiFetch('/api/claude/auth/start', { method: 'POST' });
+      if (res.authUrl && typeof window.AndroidServer === 'undefined') {
+        window.open(res.authUrl, '_blank');
+      }
+      if (!res.authUrl && res.note) {
+        showToast('Если браузер не открылся, повторите вход.');
+      } else {
+        showToast('Войдите в браузере и вставьте код ниже.');
+      }
+    } catch (err) {
+      showToast('Ошибка запуска входа: ' + err.message);
+    }
+  }
+
+  async function exchangeClaudeAuthCode() {
+    const inputEl = document.getElementById('inputClaudeAuthCode');
+    const code = inputEl ? inputEl.value.trim() : '';
+    if (!code) return showToast('Вставьте код авторизации из браузера');
+    try {
+      showToast('⏳ Проверка кода авторизации Claude...');
+      const res = await apiFetch('/api/claude/auth/exchange', {
+        method: 'POST',
+        body: JSON.stringify({ code }),
+      });
+      state.claudeAuthenticated = Boolean(res.authenticated);
+      if (inputEl) inputEl.value = '';
+      renderClaudeStatus();
+      showToast(res.authenticated ? '✅ Авторизация Claude успешна!' : ('Не удалось: ' + (res.error || 'повторите вход')));
+    } catch (err) {
+      showToast('Ошибка авторизации: ' + err.message);
+    }
+  }
+
+  async function logoutClaudeAuth() {
+    try {
+      await apiFetch('/api/claude/auth/logout', { method: 'POST' });
+      state.claudeAuthenticated = false;
+      renderClaudeStatus();
+      showToast('Вы вышли из Claude.');
+    } catch (err) {
+      showToast(err.message);
+    }
+  }
+
+  /**
+   * Walks the workspace (breadth-first, shallow) collecting all .md files so the
+   * new-chat modal can offer them as system-prompt / first-message choices.
+   */
+  async function collectWorkspaceMdFiles() {
+    const found = [];
+    const queue = [''];
+    let visited = 0;
+    while (queue.length && visited < 60) {
+      const dir = queue.shift();
+      visited++;
+      let data;
+      try {
+        data = await apiFetch(`/api/files?path=${encodeURIComponent(dir)}`);
+      } catch (e) {
+        continue;
+      }
+      for (const item of (data.items || [])) {
+        if (item.isDirectory) {
+          queue.push(item.path);
+        } else if (/\.md$/i.test(item.name)) {
+          found.push(item.path);
+        }
+      }
+    }
+    found.sort((a, b) => a.localeCompare(b, 'ru'));
+    return found;
+  }
+
+  function fillMdSelect(selectEl, files, placeholder) {
+    if (!selectEl) return;
+    const opts = [`<option value="">${escapeHtml(placeholder)}</option>`]
+      .concat(files.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`));
+    selectEl.innerHTML = opts.join('');
+  }
+
+  async function onNewChatModelChange() {
+    const modelSel = document.getElementById('newChatModelSelect');
+    const block = document.getElementById('newChatClaudeBlock');
+    if (!modelSel || !block) return;
+    const isClaude = isClaudeCliModel(modelSel.value);
+    block.classList.toggle('hidden', !isClaude);
+    if (!isClaude) return;
+
+    const sysSel = document.getElementById('newChatSysPromptSelect');
+    const firstSel = document.getElementById('newChatFirstMsgSelect');
+    const projInput = document.getElementById('newChatProjectPath');
+    if (projInput && !projInput.value) projInput.value = state.claudeProjectPath || '';
+    // Populate the .md pickers lazily on first open.
+    if (sysSel && sysSel.dataset.loaded !== '1') {
+      fillMdSelect(sysSel, [], 'Загрузка .md...');
+      fillMdSelect(firstSel, [], 'Загрузка .md...');
+      const files = await collectWorkspaceMdFiles();
+      fillMdSelect(sysSel, files, '— Системный промпт (.md) —');
+      fillMdSelect(firstSel, files, '— Без файла (приветствие из карточки) —');
+      sysSel.dataset.loaded = '1';
+    }
+    if (!state.claudeRuntimeReady || !state.claudeAuthenticated) {
+      showToast('Claude Code: откройте Настройки и установите среду + войдите по подписке.');
+    }
+  }
+
   async function saveSettings() {
     const projectId = document.getElementById('inputProjectId').value.trim();
-    const contextMessagesLimit = Number(document.getElementById('inputContextLimit').value || 30);
     const safetySelect = document.getElementById('inputSafetyThreshold');
     const safetyThreshold = safetySelect ? safetySelect.value : (state.safetyThreshold || 'OFF');
+    const claudeProjInput = document.getElementById('inputClaudeProjectPath');
     if (!projectId) return showToast('Введите Project ID');
 
     const payload = {
       projectId,
-      contextMessagesLimit,
       safetyThreshold,
     };
+    if (claudeProjInput) {
+      payload.claudeProjectPath = claudeProjInput.value.trim();
+      state.claudeProjectPath = payload.claudeProjectPath;
+    }
 
     try {
       const res = await apiFetch('/api/settings', {
@@ -1910,7 +2116,6 @@
         body: JSON.stringify(payload),
       });
       state.projectId = res.projectId;
-      state.contextMessagesLimit = res.contextMessagesLimit;
       state.safetyThreshold = res.safetyThreshold || safetyThreshold;
       renderAgyAuthStatus();
       updateHeaderIndicators(true);
@@ -1957,6 +2162,7 @@
       checkForUpdates(false);
     } else if (tabName === 'settings') {
       checkAgyAuthStatus();
+      checkClaudeStatus();
     }
   }
 
@@ -2188,7 +2394,9 @@
     }
   }
 
-  async function applyGitUpdate(targetRef = '', targetVersion = '', commitSha = '') {
+  // Note: the 2nd positional arg (version) is intentionally ignored — the installed
+  // version is taken from the cryptographically signed remote manifest, never the client.
+  async function applyGitUpdate(targetRef = '', _ignoredVersion = '', commitSha = '') {
     const applyBtn = document.getElementById('applyOtaUpdateBtn');
     const bannerBtn = document.getElementById('updateBannerApplyBtn');
     if (applyBtn) {
@@ -2202,16 +2410,15 @@
 
     showToast('⏳ Скачивание обновления из Git...');
     try {
-      const gitRepo = (document.getElementById('inputGitRepo')?.value || state.updateInfo?.gitRepo || 'Kuka001/111').trim();
+      // Repository is pinned server-side; the applied version comes from the signed
+      // manifest, so neither is sent from here.
       const gitBranch = (document.getElementById('inputGitBranch')?.value || state.updateInfo?.gitBranch || 'main').trim();
 
       const res = await apiFetch('/api/updates/apply', {
         method: 'POST',
         body: JSON.stringify({
-          gitRepo,
           gitBranch,
           ref: targetRef || gitBranch,
-          version: targetVersion || '',
           commitSha: commitSha || '',
         }),
       });
@@ -2266,16 +2473,15 @@
   }
 
   async function saveGitRepoConfig() {
-    const gitRepo = (document.getElementById('inputGitRepo')?.value || '').trim();
+    // The repository itself is pinned inside the signed APK; only the branch is sent.
     const gitBranch = (document.getElementById('inputGitBranch')?.value || 'main').trim();
-    if (!gitRepo) return showToast('Укажите Git-репозиторий (например, Kuka001/111)');
     try {
       await apiFetch('/api/updates/config', {
         method: 'POST',
-        body: JSON.stringify({ gitRepo, gitBranch }),
+        body: JSON.stringify({ gitBranch }),
       });
       updateBannerDismissed = false;
-      showToast('💾 Репозиторий сохранён! Проверяем обновления...');
+      showToast('💾 Ветка сохранена! Проверяем обновления...');
       await checkForUpdates(true);
     } catch (err) {
       showToast(err.message);
@@ -2788,6 +2994,82 @@
     }
   }
 
+  // ==================== FULL BACKUP & RESTORE ====================
+
+  async function exportFullBackup() {
+    showToast('⏳ Готовим резервную копию...');
+    try {
+      const backup = await apiFetch('/api/backup/export');
+      const text = JSON.stringify(backup, null, 2);
+      const counts = backup.counts || {};
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const filename = `agy-backup-${stamp}.json`;
+
+      if (typeof window.AndroidServer !== 'undefined' && typeof window.AndroidServer.saveExportFile === 'function') {
+        window.AndroidServer.saveExportFile(filename, text, 'application/json');
+      } else {
+        try {
+          const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          }, 300);
+        } catch {
+          await navigator.clipboard?.writeText(text).catch(() => {});
+        }
+      }
+
+      showToast(
+        `✅ Копия готова: персонажей ${counts.characters ?? 0}, чатов ${counts.chats ?? 0}, ` +
+        `сообщений ${counts.messages ?? 0}, файлов ${counts.workspaceFiles ?? 0}`
+      );
+    } catch (err) {
+      showToast(`❌ Не удалось создать копию: ${err.message}`);
+    }
+  }
+
+  async function importFullBackup() {
+    const field = document.getElementById('inputBackupJson');
+    const raw = (field?.value || '').trim();
+    if (!raw) return showToast('Вставьте содержимое файла резервной копии');
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return showToast('❌ Это не похоже на JSON резервной копии');
+    }
+
+    const counts = parsed.counts || {};
+    const summary =
+      `Восстановить данные из копии?\n\n` +
+      `Персонажей: ${counts.characters ?? '?'}\n` +
+      `Чатов: ${counts.chats ?? '?'}\n` +
+      `Сообщений: ${counts.messages ?? '?'}\n\n` +
+      `ВНИМАНИЕ: текущие персонажи, чаты и сообщения будут полностью заменены. Отменить это действие нельзя.`;
+    if (!window.confirm(summary)) return;
+
+    showToast('⏳ Восстанавливаем данные...');
+    try {
+      const res = await apiFetch('/api/backup/import', {
+        method: 'POST',
+        body: JSON.stringify({ backup: parsed }),
+      });
+      if (field) field.value = '';
+      showToast(`✅ ${res.message || 'Данные восстановлены'}`);
+      // Reload characters/personas/chats so the UI reflects the restored data.
+      await initApp();
+    } catch (err) {
+      showToast(`❌ Восстановление не удалось: ${err.message}`);
+    }
+  }
+
   // ==================== POPUP IMAGE VIEWER (2-FINGER PINCH-TO-ZOOM & PAN) ====================
   const viewerState = {
     scale: 1,
@@ -3189,6 +3471,11 @@
     startAgyOAuth,
     exchangeAgyOAuthCode,
     logoutAgyOAuth,
+    onNewChatModelChange,
+    installClaudeRuntime,
+    startClaudeAuth,
+    exchangeClaudeAuthCode,
+    logoutClaudeAuth,
     saveSettings,
     applyServerUrl,
     checkForUpdates,
@@ -3198,6 +3485,18 @@
     saveGitRepoConfig,
     openGitRepoExternal,
     dismissUpdateBanner,
+    exportFullBackup,
+    importFullBackup,
+  };
+
+  // Pure, side-effect-free helpers exposed for the unit tests in mobile/tests/.
+  // Not part of the UI API — do not call these from markup.
+  window.__appInternals = {
+    escapeHtml,
+    stripMarkdownPreview,
+    formatRoleplayHtml,
+    resolveAvatarUrl,
+    isClaudeCliModel,
   };
 })();
 

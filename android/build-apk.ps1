@@ -58,6 +58,25 @@ Write-Host "Using android.jar: $AndroidJar"
 
 # 4. Sync Mobile Web UI & version.json into Android assets
 Write-Host "[4/6] Syncing version.json and mobile/www into android/assets/www..."
+
+# Run the web-layer unit tests before bundling them into the APK.
+# Set $env:AGY_SKIP_TESTS = "1" to bypass (not recommended for releases).
+if ($env:AGY_SKIP_TESTS -ne "1") {
+    $NodeExe = (Get-Command node -ErrorAction SilentlyContinue)
+    if ($NodeExe) {
+        Write-Host "Running web unit tests (mobile/tests)..."
+        Push-Location $ProjectRoot
+        & node --test "mobile/tests/*.test.js"
+        $TestExit = $LASTEXITCODE
+        Pop-Location
+        if ($TestExit -ne 0) {
+            throw "Web unit tests failed - aborting build. Fix the tests or set AGY_SKIP_TESTS=1 to override."
+        }
+    } else {
+        Write-Host "WARNING: node not found - skipping web unit tests." -ForegroundColor Yellow
+    }
+}
+
 if (Test-Path "$ProjectRoot\version.json") {
     Copy-Item -Path "$ProjectRoot\version.json" -Destination "$WebDir\version.json" -Force
 }
@@ -95,6 +114,7 @@ if ($LASTEXITCODE -ne 0) { throw "aapt2 link failed" }
 $JavaSources = @(
     "$AndroidDir\src\com\agy\roleplay\MainActivity.java",
     "$AndroidDir\src\com\agy\roleplay\LocalBackendServer.java",
+    "$AndroidDir\src\com\agy\roleplay\ClaudeRuntime.java",
     "$BuildDir\gen\com\agy\roleplay\R.java"
 )
 
@@ -121,6 +141,22 @@ if ($LASTEXITCODE -ne 0) { throw "zipalign failed" }
 
 $Keystore = "$AndroidDir\agy-release.keystore"
 if (-not (Test-Path $Keystore)) {
+    Write-Host ""
+    Write-Host "=============================================================" -ForegroundColor Yellow
+    Write-Host " CREATING A NEW RELEASE KEYSTORE" -ForegroundColor Yellow
+    Write-Host "=============================================================" -ForegroundColor Yellow
+    Write-Host " Android only allows an update to install over an existing app"
+    Write-Host " when both are signed with the SAME key."
+    Write-Host ""
+    Write-Host " If this keystore is lost, every future APK must be installed"
+    Write-Host " by UNINSTALLING the app first - which DELETES ALL CHATS."
+    Write-Host ""
+    Write-Host " ACTION REQUIRED: back up this file off this machine:"
+    Write-Host "   $Keystore" -ForegroundColor Cyan
+    Write-Host " It is gitignored on purpose and is NOT in the repository."
+    Write-Host "=============================================================" -ForegroundColor Yellow
+    Write-Host ""
+
     & $Keytool -genkeypair -v `
         -keystore $Keystore `
         -alias agyroleplay `
@@ -150,4 +186,37 @@ Write-Host "Verifying signed APK..."
 if ($LASTEXITCODE -ne 0) { throw "apksigner verify failed" }
 
 $ApkInfo = Get-Item $OutputApk
-Write-Host "SUCCESS! Built Android 16 APK: $($ApkInfo.FullName) ($($ApkInfo.Length) bytes)"
+$ApkSha = (Get-FileHash -Path $OutputApk -Algorithm SHA256).Hash.ToLower()
+
+Write-Host ""
+Write-Host "SUCCESS! Built Android 16 APK: $($ApkInfo.FullName) ($($ApkInfo.Length) bytes)" -ForegroundColor Green
+Write-Host "SHA-256: $ApkSha"
+
+# Record the hash in version.json so users can verify a downloaded APK and the
+# in-app updater can display it alongside the download link.
+$VersionJsonPath = "$ProjectRoot\version.json"
+if (Test-Path $VersionJsonPath) {
+    try {
+        $Manifest = Get-Content $VersionJsonPath -Raw | ConvertFrom-Json
+        $Manifest | Add-Member -NotePropertyName apkSha256 -NotePropertyValue $ApkSha -Force
+        $Manifest | Add-Member -NotePropertyName apkSize -NotePropertyValue $ApkInfo.Length -Force
+        $Json = $Manifest | ConvertTo-Json -Depth 20
+        $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($VersionJsonPath, $Json, $Utf8NoBom)
+        Copy-Item -Path $VersionJsonPath -Destination "$WebDir\version.json" -Force
+        Write-Host "Recorded apkSha256 in version.json"
+    } catch {
+        Write-Host "WARNING: could not update version.json with apkSha256: $_" -ForegroundColor Yellow
+    }
+}
+
+Write-Host ""
+Write-Host "NEXT STEPS:" -ForegroundColor Cyan
+Write-Host "  1. Sign the OTA bundle so in-app updates are accepted:"
+Write-Host "       .\sign-ota.ps1"
+Write-Host "     (first time only: .\sign-ota.ps1 -Init, then paste the public key"
+Write-Host "      into LocalBackendServer.java -> OTA_PUBLIC_KEY_B64 and rebuild)"
+Write-Host "  2. Publish this APK as a GitHub Release asset and verify SHA-256 above."
+Write-Host "  3. Confirm your keystore backup still exists:"
+Write-Host "       $Keystore"
+Write-Host ""

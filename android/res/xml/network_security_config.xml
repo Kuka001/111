@@ -1,9 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Hardened network policy.
+
+  Previously this config permitted cleartext traffic app-wide and trusted
+  user-installed CA certificates, which let any locally installed certificate
+  intercept the Google OAuth exchange and the Vertex AI traffic (tokens included).
+
+  Now:
+    * Cleartext is denied everywhere EXCEPT the loopback OAuth callback on
+      127.0.0.1 / localhost, which is required by the installed-app OAuth flow
+      and never leaves the device.
+    * Only system CAs are trusted, so a user-installed proxy CA cannot MITM
+      the token exchange.
+-->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true">
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
+
+    <!-- Loopback OAuth callback listener (http://localhost:51121/oauth-callback) -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
 </network-security-config>

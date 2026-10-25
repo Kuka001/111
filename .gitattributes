@@ -1,0 +1,30 @@
+# Default: do not guess. Git only converts line endings where told to below.
+* -text
+
+# ---------------------------------------------------------------------------
+# OTA-signed bundle files: NEVER convert line endings.
+#
+# The OTA signature covers the SHA-256 of these files' exact bytes.
+# sign-ota.ps1 hashes the WORKING-TREE bytes, while the device hashes the bytes
+# raw.githubusercontent.com serves (i.e. the bytes stored in the repo). Any
+# LF<->CRLF conversion between those two makes the hashes disagree and every
+# update is rejected with "подпись OTA-бандла недействительна".
+#
+# `-text` above already disables conversion repo-wide; these entries are listed
+# explicitly so the requirement is obvious and survives edits to this file.
+# ---------------------------------------------------------------------------
+mobile/www/index.html   -text
+mobile/www/app.js       -text
+mobile/www/styles.css   -text
+mobile/www/version.json -text
+version.json            -text
+
+# Binaries must never be touched.
+*.apk      binary
+*.idsig    binary
+*.jpg      binary
+*.jpeg     binary
+*.png      binary
+*.keystore binary
+*.der      binary
+*.pem      -text

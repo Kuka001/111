@@ -10,6 +10,24 @@ android/build/
 android/*.keystore
 *.idsig
 
+# OTA release signing key — MUST NEVER be committed.
+# Whoever holds this key can push executable JS to every installed app.
+android/ota-release-private.pem
+android/ota-release-public.der
+
+# Generated: android/assets/www is a build-time copy of mobile/www
+# (see build-apk.ps1 step 4). mobile/www is the single source of truth.
+android/assets/www/
+
+# Private roleplay content: chat dumps, exports and personal logs.
+# These can contain explicit/personal material and must stay off the public repo.
+Проблемы/
+exports/
+*.chatlog.md
+
+# Locally uploaded avatars (user media, not project source)
+server/uploads/avatars/avatar_*
+
 # OS temporary files
 .DS_Store
 Thumbs.db

@@ -261,6 +261,44 @@
             </details>
           </div>
 
+          <!-- Card 1b: Claude Code CLI (on-device, via proot) -->
+          <div class="settings-card">
+            <div class="card-title">🤖 Claude Code CLI (на устройстве)</div>
+            <p class="card-hint">Запускает Claude Code прямо на смартфоне через <code>proot</code> (без ПК и LAN). Среда (~300 МБ) скачивается один раз и проверяется по SHA-256. Авторизация — по подписке Claude.</p>
+            <div id="claudeStatusBadge" class="conn-badge" style="margin-bottom:12px;">
+              Проверка среды Claude Code...
+            </div>
+
+            <button class="btn-secondary full-width" id="claudeInstallBtn" style="margin-bottom:10px;" onclick="window.appUI.installClaudeRuntime()">
+              ⬇️ Скачать среду Claude (≈300 МБ)
+            </button>
+
+            <div class="row-gap-sm" style="flex-wrap:wrap;">
+              <button class="btn-primary" style="flex:1;" id="claudeAuthLoginBtn" onclick="window.appUI.startClaudeAuth()">
+                🔑 Войти в Claude (подписка)
+              </button>
+              <button class="btn-danger hidden" id="claudeAuthLogoutBtn" onclick="window.appUI.logoutClaudeAuth()">
+                Выйти
+              </button>
+            </div>
+
+            <details style="margin-top:12px;">
+              <summary style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                Ввести код авторизации из браузера
+              </summary>
+              <div style="margin-top:8px;">
+                <input type="text" id="inputClaudeAuthCode" class="text-input" placeholder="Вставьте код из окна входа Claude" />
+                <button class="btn-secondary full-width" style="margin-top:8px;" onclick="window.appUI.exchangeClaudeAuthCode()">
+                  ✓ Подтвердить код Claude
+                </button>
+              </div>
+            </details>
+
+            <label class="field-label" style="margin-top:12px;">Путь проекта по умолчанию (папка в workspace)</label>
+            <input type="text" id="inputClaudeProjectPath" class="text-input" placeholder="например: projects/my_rp (можно оставить пустым)" />
+            <p class="card-hint" style="margin-top:6px;">Сохраняется кнопкой «Сохранить настройки проекта» ниже.</p>
+          </div>
+
           <!-- Card 2: Project ID & Clean GEMINI.md System Prompt Control -->
           <div class="settings-card">
             <div class="card-title">⚙️ Проект AGY и файл инструкций GEMINI.md</div>
@@ -273,8 +311,9 @@
             <label class="field-label">ID Проекта (Project ID)</label>
             <input type="text" id="inputProjectId" class="text-input" placeholder="project-4c7a8e8a-764a-42bc-bdf" />
 
-            <label class="field-label" style="margin-top:12px;">Лимит контекста сообщений из истории БД</label>
-            <input type="number" id="inputContextLimit" class="text-input" value="30" min="5" max="200" />
+            <div class="card-hint" style="margin-top:12px;">
+              📚 Контекст: модель всегда получает 100% истории диалога ([#1]..[#N]) без обрезки.
+            </div>
 
             <label class="field-label" style="margin-top:12px;">Фильтр безопасности Vertex AI (Anti-SAFETY 18+ для Gemini)</label>
             <select id="inputSafetyThreshold" class="select-input" onchange="window.appUI.saveSettings()">
@@ -377,15 +416,40 @@
           <!-- Card 4: Git Repository Settings -->
           <div class="settings-card">
             <div class="card-title">⚙️ Настройка Git-репозитория</div>
-            <p class="card-hint">Укажите ваш репозиторий на GitHub (формат <code>владелец/репозиторий</code>) и ветку для отслеживания обновлений.</p>
-            <label class="field-label">GitHub Репозиторий</label>
-            <input type="text" id="inputGitRepo" class="text-input" placeholder="Kuka001/111" value="Kuka001/111" />
+            <p class="card-hint">Репозиторий обновлений зафиксирован в подписанной сборке APK и не может быть изменён из интерфейса — это защищает от подмены источника кода. Выбрать можно только ветку.</p>
+            <label class="field-label">GitHub Репозиторий (зафиксирован в APK)</label>
+            <input type="text" id="inputGitRepo" class="text-input" value="Kuka001/111" readonly disabled />
 
             <label class="field-label" style="margin-top:10px;">Ветка (Branch)</label>
             <input type="text" id="inputGitBranch" class="text-input" placeholder="main" value="main" />
 
             <button class="btn-secondary full-width" style="margin-top:12px;" onclick="window.appUI.saveGitRepoConfig()">
-              💾 Сохранить репозиторий и проверить обновления
+              💾 Сохранить ветку и проверить обновления
+            </button>
+          </div>
+
+          <!-- Card 5: Full Backup & Restore -->
+          <div class="settings-card">
+            <div class="card-title">🗄️ Резервная копия всех данных</div>
+            <p class="card-hint">
+              Полный бэкап: персонажи, персоны, все чаты и сообщения (включая мысли и свайпы), файлы воркспейса и настройки.
+              <strong>Токены Google в копию не входят</strong> — после восстановления войдите в аккаунт заново.
+            </p>
+            <p class="card-hint" style="margin-top:6px;">
+              ⚠️ Делайте бэкап перед переустановкой приложения: при удалении APK вся база чатов стирается безвозвратно.
+            </p>
+
+            <button class="btn-primary full-width" style="margin-top:12px;" onclick="window.appUI.exportFullBackup()">
+              💾 Создать и сохранить резервную копию
+            </button>
+
+            <label class="field-label" style="margin-top:14px;">Восстановление из копии</label>
+            <p class="card-hint">
+              Вставьте содержимое файла <code>.json</code> резервной копии. Текущие персонажи, чаты и сообщения будут <strong>полностью заменены</strong>.
+            </p>
+            <textarea id="inputBackupJson" class="text-input" rows="4" placeholder='{"backupFormat":1, ...}' style="margin-top:6px; font-family:monospace; font-size:11px;"></textarea>
+            <button class="btn-secondary full-width" style="margin-top:10px;" onclick="window.appUI.importFullBackup()">
+              ♻️ Восстановить данные из копии
             </button>
           </div>
         </div>
@@ -521,7 +585,7 @@
           <select id="newChatPersonaSelect" class="select-input"></select>
 
           <label class="field-label">Базовая модель ИИ</label>
-          <select id="newChatModelSelect" class="select-input"></select>
+          <select id="newChatModelSelect" class="select-input" onchange="window.appUI.onNewChatModelChange()"></select>
 
           <label class="field-label">Уровень рассуждений (Effort — отдельно)</label>
           <select id="newChatEffortSelect" class="select-input">
@@ -530,6 +594,21 @@
             <option value="high" selected>High (Глубокий отыгрыш)</option>
             <option value="max">Max (Максимум рассуждений)</option>
           </select>
+
+          <!-- Claude Code CLI (on-device): full system-prompt replacement + first message from .md -->
+          <div id="newChatClaudeBlock" class="hidden" style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;">
+            <div class="card-title" style="font-size:14px;">🤖 Claude Code CLI (на устройстве)</div>
+            <p class="card-hint">Системный промпт полностью заменяется выбранным файлом. Файлы берутся из <code>workspace/</code>.</p>
+
+            <label class="field-label">Системный промпт (.md) — полная замена</label>
+            <select id="newChatSysPromptSelect" class="select-input"></select>
+
+            <label class="field-label" style="margin-top:10px;">Первое сообщение персонажа (.md)</label>
+            <select id="newChatFirstMsgSelect" class="select-input"></select>
+
+            <label class="field-label" style="margin-top:10px;">Путь проекта (папка в workspace, cwd для CLI)</label>
+            <input type="text" id="newChatProjectPath" class="text-input" placeholder="например: projects/my_rp (можно оставить пустым)" />
+          </div>
 
           <label class="field-label">
             Начальное сообщение персонажа (необязательно)

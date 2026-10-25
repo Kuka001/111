@@ -18,14 +18,19 @@ import android.webkit.JsResult;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
 
 public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_RESULT_CODE = 1001;
@@ -110,24 +115,91 @@ public class MainActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
-        settings.setAllowFileAccess(true);
-        settings.setAllowContentAccess(true);
-        settings.setAllowFileAccessFromFileURLs(true);
-        settings.setAllowUniversalAccessFromFileURLs(true);
-        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         settings.setTextZoom(100);
+
+        // --- Hardening ---
+        // The UI is served from app-private storage and talks to the native layer
+        // through the AndroidServer bridge only; it never needs to read arbitrary
+        // files or escape its origin. Leaving these enabled let any injected or
+        // tampered script read local files and exfiltrate chats and tokens.
+        settings.setAllowFileAccess(false);
+        settings.setAllowContentAccess(false);
+        settings.setAllowFileAccessFromFileURLs(false);
+        settings.setAllowUniversalAccessFromFileURLs(false);
+        // Never silently upgrade/downgrade to cleartext inside HTTPS pages.
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
-                if (uri != null && uri.getPath() != null && uri.getPath().endsWith(".apk")) {
+                if (uri == null) return false;
+
+                String path = uri.getPath();
+                if (path != null && path.endsWith(".apk")) {
                     Intent browserIntent = new Intent(Intent.ACTION_VIEW, uri);
                     startActivity(browserIntent);
                     return true;
                 }
-                return false;
+
+                // Keep in-WebView navigation confined to our own virtual origin.
+                // Anything else (http/https links, custom schemes) is handed to the
+                // system browser so a remote page can never take over the WebView
+                // that holds the AndroidServer bridge.
+                if (LocalBackendServer.VIRTUAL_HOST.equals(uri.getHost())) {
+                    return false;
+                }
+                try {
+                    Intent browserIntent = new Intent(Intent.ACTION_VIEW, uri);
+                    browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(browserIntent);
+                } catch (Exception ignored) {
+                }
+                return true;
+            }
+
+            // Serve the UI from a virtual https origin so the WebView can run with
+            // file:// access disabled (see WebSettings hardening above).
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (uri == null || !LocalBackendServer.VIRTUAL_HOST.equals(uri.getHost())) {
+                    return null;
+                }
+                if (localBackendServer == null) return null;
+
+                String path = uri.getPath();
+                InputStream stream = localBackendServer.serveVirtualAsset(path);
+                if (stream == null) {
+                    return new WebResourceResponse(
+                        "text/plain", "utf-8", 404, "Not Found",
+                        new HashMap<String, String>(),
+                        new ByteArrayInputStream(new byte[0])
+                    );
+                }
+
+                Map<String, String> headers = new HashMap<>();
+                headers.put("Cache-Control", "no-store");
+                // The UI only ever talks to the native bridge, so lock the page down:
+                // no remote script/style/connect origins at all.
+                headers.put("Content-Security-Policy",
+                    "default-src 'self'; "
+                    + "script-src 'self' 'unsafe-inline'; "
+                    + "style-src 'self' 'unsafe-inline'; "
+                    + "img-src 'self' data: blob:; "
+                    + "font-src 'self' data:; "
+                    + "connect-src 'self'; "
+                    + "frame-ancestors 'none'; "
+                    + "base-uri 'none'; "
+                    + "object-src 'none'; "
+                    + "form-action 'none'");
+                headers.put("X-Content-Type-Options", "nosniff");
+
+                return new WebResourceResponse(
+                    localBackendServer.virtualMimeType(path), "utf-8", 200, "OK",
+                    headers, stream
+                );
             }
         });
 
