@@ -16,7 +16,7 @@
   'use strict';
 
   const params = new URLSearchParams(location.search);
-  const ENGINE = Number(params.get('engine') || 21);
+  const ENGINE = Number(params.get('engine') || 22);
   const LEGACY = ENGINE < 18;
   const DELAY = Number(params.get('delay') || 120);
 
@@ -568,7 +568,12 @@
     if (path === '/api/claude/status') {
       return { runtimeReady: db.settings.claudeRuntimeReady, authenticated: db.settings.claudeAuthenticated, runtimeVersion: 'mock',
         runtimeUrlConfigured: ENGINE >= 19, downloadMb: 128, installing: !!db.claudeInstalling, installProgress: db.claudeInstallProgress || '',
-        loginPending: !!db.claudeLoginPending, loginError: db.claudeLoginError || '' };
+        loginPending: !!db.claudeLoginPending, loginError: db.claudeLoginError || '',
+        loginUrl: db.claudeLoginStarted && Date.now() - db.claudeLoginStarted > 3000 ? 'https://claude.ai/oauth/authorize?code=true&client_id=mock&response_type=code&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&state=mockstate' : '',
+        loginAutoUrl: db.claudeLoginStarted && Date.now() - db.claudeLoginStarted > 3000 ? 'https://claude.ai/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback' : '',
+        loginElapsed: db.claudeLoginStarted ? Math.round((Date.now() - db.claudeLoginStarted) / 1000) : 0,
+        loginOutput: db.claudeLoginPending ? 'Opening browser to sign in…' : '',
+        loginDebug: db.claudeLoginPending ? '[DEBUG] OAuth callback listener on port 54545 (mock)' : '' };
     }
     if (path === '/api/claude/runtime/install') {
       if (ENGINE < 19) return err(503, 'SHA-256 среды Claude не задан в version.json (claudeRuntimeSha256). Установка отключена из соображений безопасности.');
@@ -593,9 +598,10 @@
       }
       db.claudeLoginPending = true;
       db.claudeLoginError = '';
+      db.claudeLoginStarted = Date.now();
       // Simulate the browser redirecting back to the CLI's localhost listener.
-      if (params.get('autologin') !== '0') setTimeout(() => { if (db.claudeLoginPending) { db.claudeLoginPending = false; db.settings.claudeAuthenticated = true; } }, 6000);
-      return { ok: true, authUrl: 'http://localhost:54545/mock-auto', manualUrl: 'https://claude.ai/oauth/authorize?mock=1', mode: 'auto' };
+      if (params.get('autologin') === '1') setTimeout(() => { if (db.claudeLoginPending) { db.claudeLoginPending = false; db.settings.claudeAuthenticated = true; } }, 9000);
+      return { ok: true, pending: true };
     }
     if (path === '/api/claude/auth/exchange') {
       if (!String(body.code || '').includes('#')) return err(400, 'Скопируйте код целиком — вместе с частью после «#».');

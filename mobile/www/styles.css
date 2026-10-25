@@ -2593,6 +2593,22 @@ body.layer-open .toast-host {
   color: var(--text-2);
 }
 
+.link-box {
+  margin-top: 8px;
+  padding: 10px 12px;
+  max-height: 22vh;
+  overflow-y: auto;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .selftest {
   margin-top: 12px;
 }

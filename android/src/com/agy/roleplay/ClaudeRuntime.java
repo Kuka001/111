@@ -18,6 +18,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.zip.GZIPInputStream;
@@ -217,6 +218,11 @@ final class ClaudeRuntime {
         return new File(tmpDir, "agy-open-url");
     }
 
+    /** Host path of a file in the sandbox /tmp, e.g. a --debug-file log. */
+    File tmpFile(String name) {
+        return new File(tmpDir, name);
+    }
+
     /**
      * Installs the BROWSER shim into the rootfs. Claude Code opens its sign-in
      * link by running $BROWSER <url>; inside the sandbox there is no browser, so
@@ -326,12 +332,43 @@ final class ClaudeRuntime {
     }
 
     /** DNS and hosts for the guest: Android has no /etc/resolv.conf to inherit. */
+    private volatile List<String> dnsServers = Collections.emptyList();
+
+    /** DNS servers of the phone's active network (Android has no /etc/resolv.conf). */
+    void setDnsServers(List<String> servers) {
+        dnsServers = servers != null ? new ArrayList<>(servers) : Collections.<String>emptyList();
+    }
+
+    /**
+     * resolv.conf for the guest: the network's own resolvers first (mobile
+     * carriers often block public DNS), then a public fallback. musl uses at
+     * most three nameservers and queries them in parallel.
+     */
+    String guestResolvConf() {
+        List<String> picked = new ArrayList<>();
+        for (String s : dnsServers) {
+            if (s == null) continue;
+            String v = s.trim();
+            if (v.isEmpty() || v.contains("%") || picked.contains(v)) continue;
+            picked.add(v);
+            if (picked.size() == 2) break;
+        }
+        for (String fallback : new String[]{"1.1.1.1", "8.8.8.8"}) {
+            if (picked.size() >= 3) break;
+            if (!picked.contains(fallback)) picked.add(fallback);
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String s : picked) sb.append("nameserver ").append(s).append("\n");
+        sb.append("options timeout:3 attempts:2\n");
+        return sb.toString();
+    }
+
     private void writeGuestNetworkConfig() throws Exception {
         File etc = new File(rootfsDir, "etc");
         etc.mkdirs();
         File resolv = new File(etc, "resolv.conf");
         resolv.delete(); // may be a dangling symlink in some rootfs builds
-        writeText(resolv, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+        writeText(resolv, guestResolvConf());
         File hosts = new File(etc, "hosts");
         if (!hosts.exists() || hosts.length() == 0) {
             writeText(hosts, "127.0.0.1 localhost\n::1 localhost\n");
@@ -435,6 +472,10 @@ final class ClaudeRuntime {
                 ensureAndroidProot();
             } catch (Exception ignored) {
             }
+        }
+        try {
+            writeGuestNetworkConfig(); // keep DNS in step with the current network
+        } catch (Exception ignored) {
         }
         List<String> cmd = new ArrayList<>();
         cmd.add(prootPath(engine));

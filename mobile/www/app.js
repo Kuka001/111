@@ -378,6 +378,11 @@
       claudeInstallProgress: '',
       claudeLoginPending: false,
       claudeLoginError: '',
+      claudeLoginUrl: '',
+      claudeLoginAutoUrl: '',
+      claudeLoginElapsed: 0,
+      claudeLoginOutput: '',
+      claudeLoginDebug: '',
     },
     models: [],
     characters: [],
@@ -976,6 +981,11 @@
       state.settings.claudeInstallProgress = data.installProgress || '';
       state.settings.claudeLoginPending = Boolean(data.loginPending);
       state.settings.claudeLoginError = data.loginError || '';
+      state.settings.claudeLoginUrl = data.loginUrl || '';
+      state.settings.claudeLoginAutoUrl = data.loginAutoUrl || '';
+      state.settings.claudeLoginElapsed = Number(data.loginElapsed) || 0;
+      state.settings.claudeLoginOutput = data.loginOutput || '';
+      state.settings.claudeLoginDebug = data.loginDebug || '';
       if (state.tab === 'settings') renderSettingsTab();
       refreshLayers();
     } catch (e) {
@@ -3243,8 +3253,8 @@
     let installing = false;
     let progressTimer = null;
     let loginTimer = null;
-    // Sign-in flow: idle -> starting -> waiting (browser open) -> done / error
-    const login = { phase: 'idle', manualUrl: '', mode: '', error: '', submitting: false };
+    // Sign-in flow: idle -> waiting (CLI running; link shown when ready) -> done / error
+    const login = { phase: 'idle', legacyUrl: '', error: '', submitting: false, codeDraft: '' };
     let selftest = null; // { running } | { ok, output, exitCode, seconds }
 
     const outputBlock = (text) => `<div class="console" style="margin-top:10px;max-height:28vh">${escapeHtml(text)}</div>`;
@@ -3261,21 +3271,33 @@
         return '<div class="step-text">Для входа обновите приложение (APK) до версии 1.6.2 или новее.</div>';
       }
       if (login.phase === 'starting') {
-        return `<div class="install-progress"><span class="spinner"></span><span>Запускаю Claude Code и готовлю ссылку для входа…</span></div>
-          <p class="section-hint" style="margin:8px 0 0">Первый запуск на телефоне может занять до полуминуты.</p>`;
+        return `<div class="install-progress"><span class="spinner"></span><span>Запускаю Claude Code…</span></div>`;
       }
       if (login.phase === 'waiting') {
-        const auto = login.mode === 'auto';
-        return `<div class="install-progress"><span class="spinner"></span><span>${auto ? 'Ожидаю вход в браузере…' : 'Ожидаю код со страницы входа…'}</span></div>
-          <div class="step-text" style="margin-top:10px">${auto
-            ? 'Войдите в аккаунт Claude в открывшемся браузере. После входа браузер сам вернёт подтверждение в приложение — вставлять ничего не нужно.'
-            : 'Войдите в аккаунт Claude в открывшемся браузере, скопируйте показанный код и вставьте его ниже.'}</div>
-          <details class="disclosure"${auto ? '' : ' open'}><summary>${auto ? 'Браузер не вернул в приложение?' : 'Ввести код'} ${ic('chevron-down', 'ic-sm')}</summary>
-            ${auto && login.manualUrl ? `<p class="step-text">Откройте ручной вход — после него страница покажет код, его нужно вставить сюда.</p><button class="btn btn-secondary btn-sm" data-act="manual">${ic('external', 'ic-sm')}Открыть ручной вход</button>` : ''}
-            <label class="field"><span class="field-label">Код со страницы входа</span><input class="input mono" data-role="code" placeholder="xxxxxxxx#yyyyyyyy" autocomplete="off" autocapitalize="off" spellcheck="false" /></label>
-            <button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="exchange"${login.submitting ? ' disabled' : ''}>${login.submitting ? '<span class="spinner"></span>Проверяю…' : 'Подтвердить код'}</button>
-          </details>
-          <button class="btn btn-ghost btn-sm" style="margin-top:6px;padding:0" data-act="cancel-login">Отменить вход</button>`;
+        const url = s.claudeLoginUrl || login.legacyUrl;
+        const autoUrl = s.claudeLoginAutoUrl;
+        const live = [s.claudeLoginOutput, s.claudeLoginDebug ? '--- debug ---\n' + s.claudeLoginDebug : ''].filter(Boolean).join('\n');
+        const cancel = '<button class="btn btn-ghost btn-sm" style="margin-top:10px;padding:0" data-act="cancel-login">Отменить вход</button>';
+        if (!url && !autoUrl) {
+          const slow = s.claudeLoginElapsed >= 45;
+          return `<div class="install-progress"><span class="spinner"></span><span>Claude Code готовит ссылку для входа… ${s.claudeLoginElapsed} с</span></div>
+            ${slow ? '<p class="section-hint" style="margin:8px 0 0">Дольше обычного. Ниже — что сейчас делает Claude Code; если так и не появится ссылка, скопируйте этот текст и пришлите.</p>' : ''}
+            ${live ? `<details class="disclosure"${slow ? ' open' : ''}><summary>Что происходит ${ic('chevron-down', 'ic-sm')}</summary>${outputBlock(live)}<button class="btn btn-ghost btn-sm" style="padding:0;margin-top:6px" data-act="copy-live">${ic('copy', 'ic-sm')}Скопировать</button></details>` : ''}
+            ${cancel}`;
+        }
+        const link = url || autoUrl;
+        return `<div class="step-text"><b>1.</b> Откройте ссылку и войдите в аккаунт Claude с подпиской.</div>
+          <div class="link-box">${escapeHtml(link)}</div>
+          <div class="btn-row" style="margin-top:8px">
+            <button class="btn btn-primary btn-sm" data-act="open-link">${ic('external', 'ic-sm')}Открыть</button>
+            <button class="btn btn-secondary btn-sm" data-act="copy-link">${ic('copy', 'ic-sm')}Скопировать</button>
+          </div>
+          ${url ? `<div class="step-text" style="margin-top:14px"><b>2.</b> После входа страница покажет код — вставьте его сюда целиком:</div>
+            <input class="input mono" data-role="code" value="${escapeHtml(login.codeDraft)}" placeholder="xxxxxxxx#yyyyyyyy" autocomplete="off" autocapitalize="off" spellcheck="false" />
+            <button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="exchange"${login.submitting ? ' disabled' : ''}>${login.submitting ? '<span class="spinner"></span>Проверяю…' : 'Подтвердить код'}</button>` : '<div class="step-text" style="margin-top:12px">После входа браузер сам вернёт подтверждение в приложение.</div>'}
+          ${url && autoUrl ? '<p class="section-hint" style="margin:12px 0 0">Можно и без кода: <button class="link" data-act="open-auto">войти с автоматическим возвратом</button> — браузер сам передаст вход в приложение.</p>' : ''}
+          <div class="install-progress" style="margin-top:14px"><span class="spinner"></span><span>Жду завершения входа…</span></div>
+          ${cancel}`;
       }
       return `<div class="step-text">Откроется браузер: войдите в аккаунт Claude с подпиской Pro, Max, Team или Enterprise.</div>
         ${login.error ? `<div class="error-card" style="margin:0 0 12px"><div class="error-head">${ic('alert')}<div>Вход не удался. Подробности ниже — если ошибка повторяется, пришлите этот текст.</div></div>${outputBlock(login.error)}</div>` : ''}
@@ -3338,6 +3360,10 @@
       },
     });
     layer.isClaudePage = true;
+    // The page re-renders while sign-in runs: keep a pasted code across renders.
+    layer.el.addEventListener('input', (e) => {
+      if (e.target.dataset.role === 'code') login.codeDraft = e.target.value;
+    });
     layer.refresh = () => {
       if (document.activeElement && layer.el.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
       const body = $('.page-body', layer.el);
@@ -3364,8 +3390,8 @@
       renderRoomHeader();
       if (ok) toast('Вход в Claude выполнен', { type: 'success' });
     };
-    // While the browser is open the CLI waits for its localhost callback; poll
-    // until it stores credentials, exits with an error, or ten minutes pass.
+    // The CLI keeps running while the user signs in; poll its live output, the
+    // links it produced and the result until done, failed, or 15 minutes pass.
     const watchLogin = () => {
       clearInterval(loginTimer);
       const startedAt = Date.now();
@@ -3374,7 +3400,8 @@
         const s = state.settings;
         if (s.claudeAuthenticated) finishLogin(true);
         else if (!s.claudeLoginPending && s.claudeLoginError) finishLogin(false, s.claudeLoginError);
-        else if (Date.now() - startedAt > 10 * 60 * 1000) finishLogin(false, 'Время ожидания входа истекло. Попробуйте снова.');
+        else if (Date.now() - startedAt > 15 * 60 * 1000) finishLogin(false, 'Время ожидания входа истекло. Попробуйте снова.');
+        else layer.refresh();
       }, 2000);
     };
 
@@ -3382,7 +3409,6 @@
       if (state.settings.claudeInstalling) watchProgress();
       if (state.settings.claudeLoginPending && !state.settings.claudeAuthenticated) {
         login.phase = 'waiting';
-        login.mode = 'auto';
         layer.refresh();
         watchLogin();
       }
@@ -3430,18 +3456,23 @@
       login: async () => {
         login.phase = 'starting';
         login.error = '';
+        login.codeDraft = '';
         layer.refresh();
         try {
           const res = await api('/api/claude/auth/start', { method: 'POST' });
-          if (!res.authUrl) {
+          if (!res.pending && !res.authUrl) {
             // Engine 19 and older: setup-token never produced a link.
             finishLogin(false, res.note || 'Claude Code не выдал ссылку для входа.');
             return;
           }
-          if (!hasBridge) window.open(res.authUrl, '_blank');
+          // Engine 20-21 answered with the link directly; 22+ streams it via status.
+          login.legacyUrl = res.pending ? '' : (res.manualUrl || res.authUrl || '');
+          state.settings.claudeLoginUrl = '';
+          state.settings.claudeLoginAutoUrl = '';
+          state.settings.claudeLoginElapsed = 0;
+          state.settings.claudeLoginOutput = '';
+          state.settings.claudeLoginDebug = '';
           login.phase = 'waiting';
-          login.mode = res.mode || 'manual';
-          login.manualUrl = res.manualUrl || '';
           layer.refresh();
           watchLogin();
         } catch (e) {
@@ -3451,10 +3482,20 @@
       'copy-report': () => {
         if (selftest) copyText(selftest.report || selftest.output || '');
       },
-      manual: () => {
-        if (login.manualUrl) openExternal(login.manualUrl);
-        const details = $('details.disclosure', layer.el);
-        if (details) details.open = true;
+      'open-link': () => {
+        const link = state.settings.claudeLoginUrl || login.legacyUrl || state.settings.claudeLoginAutoUrl;
+        if (link) openExternal(link);
+      },
+      'copy-link': () => {
+        const link = state.settings.claudeLoginUrl || login.legacyUrl || state.settings.claudeLoginAutoUrl;
+        if (link) copyText(link);
+      },
+      'open-auto': () => {
+        if (state.settings.claudeLoginAutoUrl) openExternal(state.settings.claudeLoginAutoUrl);
+      },
+      'copy-live': () => {
+        const s = state.settings;
+        copyText([s.claudeLoginOutput, s.claudeLoginDebug ? '--- debug ---\n' + s.claudeLoginDebug : ''].filter(Boolean).join('\n'));
       },
       exchange: async () => {
         const input = $('[data-role="code"]', layer.el);
@@ -3487,6 +3528,7 @@
         state.settings.claudeAuthenticated = false;
         login.phase = 'idle';
         login.error = '';
+        login.codeDraft = '';
         layer.refresh();
       },
       logout: async () => {

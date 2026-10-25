@@ -130,6 +130,9 @@ public class LocalBackendServer {
     private volatile String pendingClaudeAuthUrl = "";
     private volatile String claudeLoginError = "";
     private final StringBuilder claudeLoginOutput = new StringBuilder();
+    private volatile String claudeLoginManualUrl = "";
+    private volatile long claudeLoginStartedAt = 0L;
+    private static final String CLAUDE_LOGIN_DEBUG_LOG = "agy-login-debug.log";
 
     private volatile ServerSocket oauthCallbackServer;
     private volatile String pendingCodeVerifier = "";
@@ -2435,8 +2438,16 @@ public class LocalBackendServer {
         res.put("installing", claudeInstalling);
         res.put("installProgress", claudeInstallProgress);
         Process login = pendingClaudeAuthProcess;
-        res.put("loginPending", login != null && isAlive(login));
+        boolean pending = login != null && isAlive(login);
+        res.put("loginPending", pending);
         res.put("loginError", claudeLoginError);
+        res.put("loginUrl", claudeLoginManualUrl);
+        res.put("loginAutoUrl", readFirstUrl(claudeRuntime.browserUrlFile()));
+        res.put("loginElapsed", claudeLoginStartedAt > 0 ? (System.currentTimeMillis() - claudeLoginStartedAt) / 1000 : 0);
+        if (pending || !claudeLoginError.isEmpty()) {
+            res.put("loginOutput", loginOutputTail());
+            res.put("loginDebug", fileTail(claudeRuntime.tmpFile(CLAUDE_LOGIN_DEBUG_LOG), 1500));
+        }
         return res;
     }
 
@@ -2473,11 +2484,14 @@ public class LocalBackendServer {
 
     /**
      * Starts `claude auth login --claudeai` (the non-interactive sign-in that
-     * works without a terminal). Claude Code opens its sign-in link through
-     * $BROWSER, which our shim records; we open that link in Android's browser.
-     * After sign-in the browser redirects to the CLI's own localhost listener,
-     * which stores the credentials and exits — no code needs to be pasted. The
-     * manual link (shows a code#state to paste) is returned as a fallback.
+     * works without a terminal) and returns at once; the UI polls
+     * /api/claude/status for the live output, the sign-in links and the result.
+     *
+     * Two links appear once Claude Code is ready: the manual one (printed on
+     * stdout; the page then shows a code#state to paste back) and the automatic
+     * one (handed to $BROWSER, captured by our shim; the browser then returns
+     * the sign-in to the CLI's localhost listener, nothing to paste). Nothing is
+     * opened automatically: the user picks a link in the app.
      */
     private JSONObject handleClaudeAuthStart() throws Exception {
         if (!claudeRuntime.isReady()) {
@@ -2487,15 +2501,19 @@ public class LocalBackendServer {
         // Tear down any half-finished previous attempt.
         stopPendingClaudeAuth();
         claudeLoginError = "";
+        claudeLoginManualUrl = "";
         synchronized (claudeLoginOutput) { claudeLoginOutput.setLength(0); }
+        refreshGuestDns();
         claudeRuntime.ensureBrowserShim();
-        final File urlFile = claudeRuntime.browserUrlFile();
-        urlFile.delete();
+        claudeRuntime.browserUrlFile().delete();
+        claudeRuntime.tmpFile(CLAUDE_LOGIN_DEBUG_LOG).delete();
 
         List<String> args = new ArrayList<>();
         args.add("auth");
         args.add("login");
         args.add("--claudeai");
+        args.add("--debug-file");
+        args.add("/tmp/" + CLAUDE_LOGIN_DEBUG_LOG);
         ProcessBuilder pb = claudeRuntime.newClaudeProcess(args);
         pb.environment().put("BROWSER", ClaudeRuntime.GUEST_BROWSER_SHIM);
         final Process proc;
@@ -2507,50 +2525,10 @@ public class LocalBackendServer {
         }
         pendingClaudeAuthProcess = proc;
         pendingClaudeAuthUrl = "";
-        final String[] manualUrl = {""};
+        claudeLoginStartedAt = System.currentTimeMillis();
 
-        Runnable reader = new Runnable() {
-            private void consume(InputStream stream) {
-                try {
-                    BufferedReader br = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
-                    String l;
-                    while ((l = br.readLine()) != null) {
-                        String clean = stripAnsi(l);
-                        synchronized (claudeLoginOutput) {
-                            if (claudeLoginOutput.length() < 8000) claudeLoginOutput.append(clean).append("\n");
-                        }
-                        String url = extractFirstUrl(clean);
-                        if (url != null && manualUrl[0].isEmpty()) manualUrl[0] = url;
-                    }
-                } catch (Exception ignored) {
-                }
-            }
-
-            @Override
-            public void run() {
-                consume(proc.getInputStream());
-            }
-        };
-        Thread tOut = new Thread(reader);
-        tOut.setDaemon(true);
-        tOut.start();
-        Thread tErr = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    BufferedReader br = new BufferedReader(new InputStreamReader(proc.getErrorStream(), StandardCharsets.UTF_8));
-                    String l;
-                    while ((l = br.readLine()) != null) {
-                        synchronized (claudeLoginOutput) {
-                            if (claudeLoginOutput.length() < 8000) claudeLoginOutput.append(stripAnsi(l)).append("\n");
-                        }
-                    }
-                } catch (Exception ignored) {
-                }
-            }
-        });
-        tErr.setDaemon(true);
-        tErr.start();
+        startLoginReader(proc.getInputStream(), true);
+        startLoginReader(proc.getErrorStream(), false);
 
         // Watch the process: success stores credentials; anything else is reported.
         Thread watcher = new Thread(new Runnable() {
@@ -2561,7 +2539,10 @@ public class LocalBackendServer {
                     if (pendingClaudeAuthProcess == proc) pendingClaudeAuthProcess = null;
                     if (!claudeRuntime.isAuthenticated()) {
                         String out = loginOutputTail();
-                        claudeLoginError = "Вход не завершён (" + describeExit(code) + ")" + (out.isEmpty() ? "." : ":\n" + out);
+                        String dbg = fileTail(claudeRuntime.tmpFile(CLAUDE_LOGIN_DEBUG_LOG), 1500);
+                        claudeLoginError = "Вход не завершён (" + describeExit(code) + ")"
+                            + (out.isEmpty() ? "." : ":\n" + out)
+                            + (dbg.isEmpty() ? "" : "\n--- debug ---\n" + dbg);
                     }
                 } catch (InterruptedException ignored) {
                 }
@@ -2570,42 +2551,62 @@ public class LocalBackendServer {
         watcher.setDaemon(true);
         watcher.start();
 
-        // Wait for the automatic link from the shim (preferred) or at least the
-        // manual one from stdout; give up if the CLI exits or stays silent.
-        String autoUrl = "";
-        long deadline = System.currentTimeMillis() + 30000L;
-        long manualSeenAt = 0L;
-        while (System.currentTimeMillis() < deadline) {
-            autoUrl = readFirstUrl(urlFile);
-            if (!autoUrl.isEmpty()) break;
-            if (!manualUrl[0].isEmpty()) {
-                if (manualSeenAt == 0L) manualSeenAt = System.currentTimeMillis();
-                if (System.currentTimeMillis() - manualSeenAt > 4000L) break;
-            }
-            if (!isAlive(proc)) break;
-            try { Thread.sleep(250); } catch (InterruptedException ignored) {}
-        }
-
-        String openUrl = !autoUrl.isEmpty() ? autoUrl : manualUrl[0];
-        if (openUrl.isEmpty()) {
-            String out = loginOutputTail();
-            boolean alive = isAlive(proc);
-            stopPendingClaudeAuth();
-            claudeLoginError = (alive
-                ? "Claude Code не выдал ссылку для входа за 30 секунд."
-                : "Claude Code завершился, не начав вход.")
-                + (out.isEmpty() ? " Вывода нет — проверьте запуск среды кнопкой «Проверить запуск»." : "\n" + out);
-            return errorJson(500, claudeLoginError);
-        }
-        pendingClaudeAuthUrl = openUrl;
-        openExternalUrl(openUrl);
-
         JSONObject res = new JSONObject();
         res.put("ok", true);
-        res.put("authUrl", openUrl);
-        res.put("manualUrl", manualUrl[0]);
-        res.put("mode", autoUrl.isEmpty() ? "manual" : "auto");
+        res.put("pending", true);
         return res;
+    }
+
+    private void startLoginReader(final InputStream stream, final boolean scanUrls) {
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    BufferedReader br = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
+                    String l;
+                    while ((l = br.readLine()) != null) {
+                        String clean = stripAnsi(l);
+                        synchronized (claudeLoginOutput) {
+                            if (claudeLoginOutput.length() < 8000) claudeLoginOutput.append(clean).append("\n");
+                        }
+                        if (scanUrls && claudeLoginManualUrl.isEmpty()) {
+                            String url = extractFirstUrl(clean);
+                            if (url != null) claudeLoginManualUrl = url;
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        });
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** Passes the active network's DNS servers to the sandbox resolv.conf. */
+    private void refreshGuestDns() {
+        List<String> servers = new ArrayList<>();
+        try {
+            android.net.ConnectivityManager cm =
+                (android.net.ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null && android.os.Build.VERSION.SDK_INT >= 23) {
+                android.net.Network net = cm.getActiveNetwork();
+                android.net.LinkProperties lp = net != null ? cm.getLinkProperties(net) : null;
+                if (lp != null) {
+                    for (InetAddress a : lp.getDnsServers()) {
+                        String h = a.getHostAddress();
+                        if (h != null) servers.add(h);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        claudeRuntime.setDnsServers(servers);
+    }
+
+    private String fileTail(File f, int max) {
+        if (f == null || !f.isFile()) return "";
+        String text = stripAnsi(readTextFile(f)).trim();
+        return text.length() > max ? "…" + text.substring(text.length() - max) : text;
     }
 
     private JSONObject handleClaudeAuthExchange(JSONObject body) throws Exception {
@@ -2660,6 +2661,7 @@ public class LocalBackendServer {
         if (!claudeRuntime.isReady()) {
             return errorJson(409, "Сначала скачайте среду Claude Code.");
         }
+        refreshGuestDns();
         JSONArray stages = new JSONArray();
         StringBuilder report = new StringBuilder();
         report.append("AGY Claude Code self-test · engine build ").append(getEngineBuild())
@@ -2667,7 +2669,8 @@ public class LocalBackendServer {
             .append(" (API ").append(android.os.Build.VERSION.SDK_INT).append(") · ")
             .append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL)
             .append(" · ").append(android.os.Build.SUPPORTED_ABIS.length > 0 ? android.os.Build.SUPPORTED_ABIS[0] : "?")
-            .append("\nruntime ").append(ClaudeRuntime.version()).append("\n");
+            .append("\nruntime ").append(ClaudeRuntime.version())
+            .append("\nresolv.conf: ").append(claudeRuntime.guestResolvConf().trim().replace("\n", "; ")).append("\n");
 
         ClaudeRuntime.Engine working = null;
         ClaudeRuntime.Engine[] order = claudeRuntime.preferredEngine() == ClaudeRuntime.Engine.STATIC
@@ -2709,7 +2712,40 @@ public class LocalBackendServer {
                 break;
             }
         }
-        if (working != null) claudeRuntime.setPreferredEngine(working);
+        if (working != null) {
+            claudeRuntime.setPreferredEngine(working);
+            String label = working == ClaudeRuntime.Engine.ANDROID ? "proot (Termux)" : "proot (static)";
+
+            // DNS inside the sandbox (musl reads the resolv.conf written above).
+            List<String> dns = new ArrayList<>();
+            dns.add("/bin/busybox");
+            dns.add("nslookup");
+            dns.add("api.anthropic.com");
+            JSONObject s4 = runStage(label + " · сеть (DNS)", claudeRuntime.newGuestProcess(working, dns, 0), 25000L, null);
+            stages.put(s4);
+            appendStage(report, s4);
+
+            // A full CLI start (not the --version fast path) with a debug log, the
+            // same start-up path sign-in and replies go through.
+            File dbgFile = claudeRuntime.tmpFile("agy-selftest-debug.log");
+            dbgFile.delete();
+            List<String> full = new ArrayList<>();
+            full.add(ClaudeRuntime.GUEST_CLAUDE);
+            full.add("auth");
+            full.add("status");
+            full.add("--json");
+            full.add("--debug-file");
+            full.add("/tmp/agy-selftest-debug.log");
+            JSONObject s5 = runStage(label + " · полный запуск Claude Code", claudeRuntime.newGuestProcess(working, full, 0), 90000L, null);
+            // `auth status` exits 1 when signed out; that still proves start-up works.
+            if (!s5.optBoolean("ok") && s5.optInt("exitCode", -1) == 1 && s5.optString("output").contains("loggedIn")) {
+                s5.put("ok", true);
+            }
+            String dbg = fileTail(dbgFile, 2500);
+            if (!dbg.isEmpty() && !s5.optBoolean("ok")) s5.put("verbose", dbg);
+            stages.put(s5);
+            appendStage(report, s5);
+        }
 
         JSONObject res = new JSONObject();
         res.put("ok", working != null);
@@ -3383,6 +3419,7 @@ public class LocalBackendServer {
             + " --system-prompt-file " + guestSysPrompt + " (" + systemPrompt.length() + " симв.)");
 
         prog.throwIfCancelled();
+        refreshGuestDns();
         ProcessBuilder pb = claudeRuntime.newClaudeProcess(args);
         pb.environment().put("CI", "1"); // non-interactive generation only
         Process proc = pb.start();
