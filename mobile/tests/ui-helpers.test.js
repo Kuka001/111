@@ -87,6 +87,21 @@ test('effort options reflect what each provider really honours', () => {
   assert.strictEqual(effectiveEffort('claude-opus-5-5', 'high'), '');
 });
 
+test('per-model effort lists from the native engine take precedence', () => {
+  const models = [
+    { id: 'claude-code-opus-4-6', efforts: ['low', 'medium', 'high', 'max'] },
+    { id: 'claude-code-opus-4-5', efforts: ['low', 'medium', 'high'] },
+    { id: 'claude-code-haiku-4-5', efforts: [] },
+  ];
+  assert.deepStrictEqual(Array.from(effortOptionsFor('claude-code-opus-4-6', models)), ['low', 'medium', 'high', 'max']);
+  // xhigh is not offered on Opus 4.6: fall back to the nearest lower level.
+  assert.strictEqual(effectiveEffort('claude-code-opus-4-6', 'xhigh', models), 'high');
+  assert.strictEqual(effectiveEffort('claude-code-opus-4-5', 'max', models), 'high');
+  assert.strictEqual(effectiveEffort('claude-code-haiku-4-5', 'high', models), '');
+  // Unknown to the list (older engines): provider defaults still apply.
+  assert.strictEqual(effectiveEffort('claude-code-sonnet', 'xhigh', models), 'xhigh');
+});
+
 test('sortChats orders by last activity and falls back to id', () => {
   const chats = [
     { id: 1, last_activity: '2026-10-20 10:00:00' },

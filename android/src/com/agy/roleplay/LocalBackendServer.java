@@ -119,6 +119,11 @@ public class LocalBackendServer {
     private final ClaudeRuntime claudeRuntime;
     private SQLiteDatabase db;
 
+    // Claude runtime install runs for minutes on the bridge thread; the UI polls
+    // /api/claude/status for these while it waits.
+    private volatile boolean claudeInstalling = false;
+    private volatile String claudeInstallProgress = "";
+
     // Interactive `claude setup-token` process kept alive between /start and /exchange.
     private volatile Process pendingClaudeAuthProcess;
     private volatile String pendingClaudeAuthUrl = "";
@@ -234,7 +239,7 @@ public class LocalBackendServer {
         this.executor = Executors.newCachedThreadPool();
         this.workspaceDir = new File(this.context.getFilesDir(), "workspace");
         this.otaWwwDir = new File(this.context.getFilesDir(), "ota_www");
-        this.claudeRuntime = new ClaudeRuntime(this.context, this.workspaceDir);
+        this.claudeRuntime = new ClaudeRuntime(this.context);
         initWorkspaceAndDatabase();
     }
 
@@ -947,48 +952,87 @@ public class LocalBackendServer {
     // =========================================================================
     // CLEAN BASE MODELS & SEPARATE EFFORT MAPPING
     // =========================================================================
+    private static final String EFFORTS_ALL = "low,medium,high,xhigh,max";
+    private static final String EFFORTS_NO_XHIGH = "low,medium,high,max";
+    private static final String EFFORTS_BASIC = "low,medium,high";
+
+    // Vertex (AGY) models: {id, name, provider, badge, efforts}
+    private static final String[][] VERTEX_MODELS = new String[][]{
+        {"gemini-4-argon", "Gemini 4 Argon", "Google DeepMind", "Флагман RP", EFFORTS_BASIC},
+        {"claude-opus-5-5", "Claude Opus 5.5", "Anthropic (AGY)", "Литературный", ""},
+        {"claude-sonnet-5-5", "Claude Sonnet 5.5", "Anthropic (AGY)", "Креативный", ""},
+        {"gemini-3.8-flash", "Gemini 3.8 Flash", "Google DeepMind", "Быстрый RP", EFFORTS_BASIC},
+        {"gemini-3.7-flash", "Gemini 3.7 Flash", "Google DeepMind", "Баланс", EFFORTS_BASIC},
+        {"gemini-3.6-flash", "Gemini 3.6 Flash", "Google DeepMind", "Скоростной", EFFORTS_BASIC},
+        {"gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite", "Google DeepMind", "Лёгкий", EFFORTS_BASIC},
+        {"gemini-3.1-pro", "Gemini 3.1 Pro", "Google DeepMind", "Глубокий", EFFORTS_BASIC},
+    };
+
+    // Claude Code CLI models: {id, --model value, name, badge, efforts ("" = no effort control), legacy}.
+    // Every model still served (retired ones excluded); the CLI aliases always
+    // follow the newest model of their family.
+    private static final String[][] CLAUDE_CLI_MODELS = new String[][]{
+        {"claude-code-opus", "opus", "Claude Opus (новейшая)", "Всегда последняя Opus", EFFORTS_ALL, "0"},
+        {"claude-code-sonnet", "sonnet", "Claude Sonnet (новейшая)", "Всегда последняя Sonnet", EFFORTS_ALL, "0"},
+        {"claude-code-haiku", "haiku", "Claude Haiku (новейшая)", "Всегда последняя Haiku", EFFORTS_ALL, "0"},
+        {"claude-code-fable-5-1", "claude-fable-5-1", "Claude Fable 5.1", "Самая мощная", EFFORTS_ALL, "0"},
+        {"claude-code-opus-5-5", "claude-opus-5-5", "Claude Opus 5.5", "Opus", EFFORTS_ALL, "0"},
+        {"claude-code-sonnet-5-5", "claude-sonnet-5-5", "Claude Sonnet 5.5", "Sonnet", EFFORTS_ALL, "0"},
+        {"claude-code-haiku-5-5", "claude-haiku-5-5", "Claude Haiku 5.5", "Haiku · быстрая", EFFORTS_ALL, "0"},
+        {"claude-code-fable-5", "claude-fable-5", "Claude Fable 5", "Предыдущая Fable", EFFORTS_ALL, "1"},
+        {"claude-code-opus-5", "claude-opus-5", "Claude Opus 5", "Предыдущая Opus", EFFORTS_ALL, "1"},
+        {"claude-code-opus-4-8", "claude-opus-4-8", "Claude Opus 4.8", "Opus 4", EFFORTS_ALL, "1"},
+        {"claude-code-opus-4-7", "claude-opus-4-7", "Claude Opus 4.7", "Opus 4", EFFORTS_ALL, "1"},
+        {"claude-code-opus-4-6", "claude-opus-4-6", "Claude Opus 4.6", "Opus 4", EFFORTS_NO_XHIGH, "1"},
+        {"claude-code-opus-4-5", "claude-opus-4-5", "Claude Opus 4.5", "Opus 4", EFFORTS_BASIC, "1"},
+        {"claude-code-sonnet-5", "claude-sonnet-5", "Claude Sonnet 5", "Предыдущая Sonnet", EFFORTS_ALL, "1"},
+        {"claude-code-sonnet-4-6", "claude-sonnet-4-6", "Claude Sonnet 4.6", "Sonnet 4", EFFORTS_NO_XHIGH, "1"},
+        {"claude-code-sonnet-4-5", "claude-sonnet-4-5", "Claude Sonnet 4.5", "Снимается 30.11.2026", "", "1"},
+        {"claude-code-haiku-4-5", "claude-haiku-4-5", "Claude Haiku 4.5", "Haiku 4", "", "1"},
+    };
+
     private JSONArray getCleanBaseModelsJson() throws Exception {
         JSONArray arr = new JSONArray();
-        arr.put(makeModelObj("gemini-4-argon", "Gemini 4 Argon", "Google DeepMind", "Флагман RP"));
-        arr.put(makeModelObj("claude-opus-5-5", "Claude Opus 5.5", "Anthropic (AGY)", "Литературный"));
-        arr.put(makeModelObj("claude-sonnet-5-5", "Claude Sonnet 5.5", "Anthropic (AGY)", "Креативный"));
-        arr.put(makeModelObj("claude-code-opus", "Claude Opus (Code CLI)", "Claude Code · на устройстве", "CLI · подписка"));
-        arr.put(makeModelObj("claude-code-sonnet", "Claude Sonnet (Code CLI)", "Claude Code · на устройстве", "CLI · подписка"));
-        arr.put(makeModelObj("gemini-3.8-flash", "Gemini 3.8 Flash", "Google DeepMind", "Быстрый RP"));
-        arr.put(makeModelObj("gemini-3.7-flash", "Gemini 3.7 Flash", "Google DeepMind", "Баланс"));
-        arr.put(makeModelObj("gemini-3.6-flash", "Gemini 3.6 Flash", "Google DeepMind", "Скоростной"));
-        arr.put(makeModelObj("gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite", "Google DeepMind", "Лёгкий"));
-        arr.put(makeModelObj("gemini-3.1-pro", "Gemini 3.1 Pro", "Google DeepMind", "Глубокий"));
+        for (String[] m : VERTEX_MODELS) {
+            arr.put(makeModelObj(m[0], m[1], m[2], m[3], m[4], false));
+        }
+        for (String[] m : CLAUDE_CLI_MODELS) {
+            arr.put(makeModelObj(m[0], m[2], "Claude Code · на устройстве", m[3], m[4], "1".equals(m[5])));
+        }
         return arr;
     }
 
-    private JSONObject makeModelObj(String id, String name, String provider, String badge) throws Exception {
+    private JSONObject makeModelObj(String id, String name, String provider, String badge, String efforts, boolean legacy) throws Exception {
         JSONObject o = new JSONObject();
         o.put("id", id);
         o.put("name", name);
         o.put("provider", provider);
         o.put("badge", badge);
+        JSONArray eff = new JSONArray();
+        if (!efforts.isEmpty()) for (String e : efforts.split(",")) eff.put(e);
+        o.put("efforts", eff);
+        o.put("legacy", legacy);
         return o;
+    }
+
+    private static String[] findCliModel(String id) {
+        for (String[] m : CLAUDE_CLI_MODELS) {
+            if (m[0].equalsIgnoreCase(id)) return m;
+        }
+        return null;
     }
 
     private String normalizeBaseModelId(String rawModelId) {
         if (rawModelId == null || rawModelId.trim().isEmpty()) return "gemini-4-argon";
-        String stripped = rawModelId.trim().replaceAll("-(low|medium|high|max)$", "");
-        String[] known = new String[]{
-            "gemini-4-argon",
-            "claude-opus-5-5",
-            "claude-sonnet-5-5",
-            "claude-code-opus",
-            "claude-code-sonnet",
-            "gemini-3.8-flash",
-            "gemini-3.7-flash",
-            "gemini-3.6-flash",
-            "gemini-3.5-flash-lite",
-            "gemini-3.1-pro"
-        };
-        for (String k : known) {
-            if (k.equalsIgnoreCase(stripped)) return k;
+        String trimmed = rawModelId.trim();
+        String[] cli = findCliModel(trimmed);
+        if (cli != null) return cli[0];
+        String stripped = trimmed.replaceAll("-(low|medium|high|max)$", "");
+        for (String[] m : VERTEX_MODELS) {
+            if (m[0].equalsIgnoreCase(stripped)) return m[0];
         }
+        cli = findCliModel(stripped);
+        if (cli != null) return cli[0];
         return "gemini-4-argon";
     }
 
@@ -1072,9 +1116,7 @@ public class LocalBackendServer {
                 res.put("workspaceDir", workspaceDir.getAbsolutePath());
                 res.put("embeddedServer", true);
                 // Claude Code CLI (on-device) status — flags only, never credentials.
-                String rtVer = readLocalVersionManifest().optString("claudeRuntimeVersion", "");
-                res.put("claudeProjectPath", getSetting("claude_project_path", ""));
-                res.put("claudeRuntimeReady", claudeRuntime.isReady(rtVer));
+                res.put("claudeRuntimeReady", claudeRuntime.isReady());
                 res.put("claudeAuthenticated", claudeRuntime.isAuthenticated());
                 // Lets a newer OTA web layer feature-detect what this native engine supports.
                 res.put("engineBuild", getEngineBuild());
@@ -2377,53 +2419,50 @@ public class LocalBackendServer {
     // CLAUDE CODE CLI: RUNTIME INSTALL + SUBSCRIPTION (setup-token) AUTH
     // =========================================================================
     private JSONObject handleClaudeStatus() throws Exception {
-        JSONObject manifest = readLocalVersionManifest();
-        String rtVer = manifest.optString("claudeRuntimeVersion", "");
         JSONObject res = new JSONObject();
-        res.put("runtimeReady", claudeRuntime.isReady(rtVer));
+        res.put("runtimeReady", claudeRuntime.isReady());
         res.put("authenticated", claudeRuntime.isAuthenticated());
-        res.put("runtimeVersion", rtVer);
-        res.put("runtimeUrlConfigured", !manifest.optString("claudeRuntimeUrl", "").isEmpty());
-        res.put("projectPath", getSetting("claude_project_path", ""));
+        res.put("runtimeVersion", ClaudeRuntime.version());
+        // The component list and SHA-256 pins are compiled into this APK.
+        res.put("runtimeUrlConfigured", true);
+        res.put("downloadMb", ClaudeRuntime.downloadBytes() >> 20);
+        res.put("installing", claudeInstalling);
+        res.put("installProgress", claudeInstallProgress);
         return res;
     }
 
     private JSONObject handleClaudeRuntimeInstall() throws Exception {
-        JSONObject manifest = readLocalVersionManifest();
-        String url = manifest.optString("claudeRuntimeUrl", "");
-        String sha = manifest.optString("claudeRuntimeSha256", "");
-        String ver = manifest.optString("claudeRuntimeVersion", "");
-        if (url.isEmpty()) {
-            return errorJson(503, "URL среды Claude не задан в version.json (claudeRuntimeUrl). Обновите приложение.");
+        if (claudeInstalling) {
+            return errorJson(409, "Установка среды уже идёт.");
         }
-        // Fail-closed: the runtime is executable code. Never install an unverified
-        // bundle — the release must pin claudeRuntimeSha256 in version.json.
-        if (sha.trim().isEmpty()) {
-            return errorJson(503, "SHA-256 среды Claude не задан в version.json (claudeRuntimeSha256). Установка отключена из соображений безопасности.");
-        }
+        claudeInstalling = true;
+        claudeInstallProgress = "Подготовка…";
         try {
-            claudeRuntime.ensureReady(url, sha, ver, new ClaudeRuntime.ProgressSink() {
+            // Every component comes from its official upstream (Alpine CDN, npm)
+            // and is verified against SHA-256 pins compiled into the APK.
+            claudeRuntime.ensureReady(new ClaudeRuntime.ProgressSink() {
                 @Override
                 public void onProgress(String message) {
-                    // Best-effort breadcrumb into the native log for debugging.
+                    claudeInstallProgress = message;
                     android.util.Log.i("ClaudeRuntime", message);
                 }
             });
         } catch (Exception e) {
             return errorJson(500, "Не удалось установить среду Claude: " + (e.getMessage() != null ? e.getMessage() : "ошибка"));
+        } finally {
+            claudeInstalling = false;
+            claudeInstallProgress = "";
         }
-        setSetting("claude_runtime_installed_version", ver);
+        setSetting("claude_runtime_installed_version", ClaudeRuntime.version());
         JSONObject res = new JSONObject();
         res.put("ok", true);
-        res.put("runtimeReady", claudeRuntime.isReady(ver));
+        res.put("runtimeReady", claudeRuntime.isReady());
         res.put("authenticated", claudeRuntime.isAuthenticated());
         return res;
     }
 
     private JSONObject handleClaudeAuthStart() throws Exception {
-        JSONObject manifest = readLocalVersionManifest();
-        String rtVer = manifest.optString("claudeRuntimeVersion", "");
-        if (!claudeRuntime.isReady(rtVer)) {
+        if (!claudeRuntime.isReady()) {
             return errorJson(409, "Сначала скачайте среду Claude Code.");
         }
 
@@ -2432,7 +2471,7 @@ public class LocalBackendServer {
 
         List<String> args = new ArrayList<>();
         args.add("setup-token");
-        ProcessBuilder pb = claudeRuntime.newClaudeProcess(args, null);
+        ProcessBuilder pb = claudeRuntime.newClaudeProcess(args);
         final Process proc = pb.start();
         pendingClaudeAuthProcess = proc;
         pendingClaudeAuthUrl = "";
@@ -2982,22 +3021,28 @@ public class LocalBackendServer {
     // CLAUDE CODE CLI PROVIDER (on-device, via proot) — NO SAFETY REWRITING
     // =========================================================================
 
-    /** Maps our base model id to the CLI --model alias. */
+    /** Maps our base model id to the CLI --model value (alias or full model id). */
     private String resolveClaudeCliModel(String baseModel) {
-        String b = normalizeBaseModelId(baseModel);
-        if (b.equals("claude-code-sonnet")) return "sonnet";
-        return "opus";
+        String[] m = findCliModel(normalizeBaseModelId(baseModel));
+        return m != null ? m[1] : "opus";
     }
 
-    /** Maps our effort to a valid Claude Code --effort level. */
-    private String resolveClaudeCliEffort(String effort) {
-        String e = (effort != null ? effort.trim().toLowerCase(Locale.ROOT) : "high");
-        switch (e) {
-            case "low": case "medium": case "high": case "xhigh": case "max":
-                return e;
-            default:
-                return "high";
+    /**
+     * Maps our effort to a level the chosen model accepts, or "" when the model
+     * has no effort control (then --effort is not passed at all). An unsupported
+     * level falls back to the highest supported level below it.
+     */
+    private String resolveClaudeCliEffort(String baseModel, String effort) {
+        String[] m = findCliModel(normalizeBaseModelId(baseModel));
+        String supported = m != null ? m[4] : EFFORTS_ALL;
+        if (supported.isEmpty()) return "";
+        List<String> levels = Arrays.asList("low", "medium", "high", "xhigh", "max");
+        List<String> allowed = Arrays.asList(supported.split(","));
+        String want = normalizeEffort(effort);
+        for (int i = levels.indexOf(want); i >= 0; i--) {
+            if (allowed.contains(levels.get(i))) return levels.get(i);
         }
+        return allowed.get(0);
     }
 
     /**
@@ -3048,58 +3093,28 @@ public class LocalBackendServer {
     ) throws Exception {
         String normBase = normalizeBaseModelId(baseModel);
         String cliModel = resolveClaudeCliModel(normBase);
-        String cliEffort = resolveClaudeCliEffort(effort);
+        String cliEffort = resolveClaudeCliEffort(normBase, effort);
         prog.modelId = normBase;
-        prog.vertexModel = "claude-code-cli";
-        prog.effort = cliEffort;
-
-        // Per-chat working directory (legacy system_prompt_path is no longer used:
-        // every provider now gets the same unified system prompt).
-        String projectPathRel = "";
-        Cursor cc = db.rawQuery("SELECT project_path FROM chats WHERE id = ?",
-            new String[]{String.valueOf(chatId)});
-        try {
-            if (cc.moveToFirst()) {
-                projectPathRel = cc.getString(0) != null ? cc.getString(0) : "";
-            }
-        } finally {
-            cc.close();
-        }
-        if (projectPathRel.isEmpty()) projectPathRel = getSetting("claude_project_path", "");
+        prog.vertexModel = "claude-code-cli:" + cliModel;
+        prog.effort = cliEffort.isEmpty() ? "—" : cliEffort;
 
         prog.phase = "auth";
         prog.statusText = "🔧 Проверка среды Claude Code...";
         prog.addLog("Проверка готовности локальной среды Claude Code CLI...");
 
-        JSONObject manifest = readLocalVersionManifest();
-        String rtUrl = manifest.optString("claudeRuntimeUrl", "");
-        String rtSha = manifest.optString("claudeRuntimeSha256", "");
-        String rtVer = manifest.optString("claudeRuntimeVersion", "");
-
-        if (!claudeRuntime.isReady(rtVer)) {
+        if (!claudeRuntime.isReady()) {
             throw new Exception("Среда Claude Code не установлена. Откройте «Настройки» → «Claude Code CLI» и нажмите «Скачать среду».");
         }
         if (!claudeRuntime.isAuthenticated()) {
             throw new Exception("Нет авторизации Claude. Откройте «Настройки» → «Claude Code CLI» и войдите по подписке.");
         }
 
-        // The unified system prompt is written to a generated file inside the
-        // workspace (bound into the sandbox at /workspace) and always passed with
-        // --system-prompt-file, so the CLI never falls back to its own default
-        // coding-assistant prompt.
+        // The unified system prompt is written into the sandbox HOME and always
+        // passed with --system-prompt-file, so the CLI never falls back to its own
+        // default coding-assistant prompt. The CLI runs in HOME: no workspace
+        // folder is involved or exposed.
         String systemPrompt = buildSystemPrompt(character, persona, memoryRelPath);
-        String sysPromptRel = ".agy/system_prompt_chat_" + chatId + ".md";
-        writeTextFile(new File(workspaceDir, sysPromptRel), systemPrompt);
-        String guestSysPrompt = ClaudeRuntime.GUEST_WORKSPACE + "/" + sysPromptRel;
-
-        // Resolve the guest working directory (a workspace-relative project folder).
-        String guestCwd = ClaudeRuntime.GUEST_WORKSPACE;
-        if (projectPathRel != null && !projectPathRel.trim().isEmpty()) {
-            String rel = sanitizeRelPath(projectPathRel);
-            File projDir = new File(workspaceDir, rel);
-            if (!projDir.exists()) projDir.mkdirs();
-            guestCwd = ClaudeRuntime.GUEST_WORKSPACE + "/" + rel;
-        }
+        String guestSysPrompt = claudeRuntime.writeHomeFile(".agy/system_prompt_chat_" + chatId + ".md", systemPrompt);
 
         String transcript = buildClaudeTranscript(character, persona, history);
         prog.contextMessagesCount = history.length();
@@ -3113,8 +3128,10 @@ public class LocalBackendServer {
         args.add("--include-partial-messages");
         args.add("--model");
         args.add(cliModel);
-        args.add("--effort");
-        args.add(cliEffort);
+        if (!cliEffort.isEmpty()) {
+            args.add("--effort");
+            args.add(cliEffort);
+        }
         args.add("--tools");
         args.add("");
         args.add("--disable-slash-commands");
@@ -3125,13 +3142,14 @@ public class LocalBackendServer {
         args.add(guestSysPrompt);
 
         prog.phase = "connecting";
-        prog.endpoint = "proot · claude " + cliModel + " (" + cliEffort + ")";
-        prog.statusText = "🤖 Запуск Claude Code (" + cliModel + " • " + cliEffort.toUpperCase(Locale.ROOT) + ")...";
-        prog.addLog("proot → claude -p --model " + cliModel + " --effort " + cliEffort
+        String effortLabel = cliEffort.isEmpty() ? "без effort" : cliEffort;
+        prog.endpoint = "proot · claude " + cliModel + " (" + effortLabel + ")";
+        prog.statusText = "🤖 Запуск Claude Code (" + cliModel + " • " + effortLabel + ")...";
+        prog.addLog("proot → claude -p --model " + cliModel + (cliEffort.isEmpty() ? "" : " --effort " + cliEffort)
             + " --system-prompt-file " + guestSysPrompt + " (" + systemPrompt.length() + " симв.)");
 
         prog.throwIfCancelled();
-        ProcessBuilder pb = claudeRuntime.newClaudeProcess(args, guestCwd);
+        ProcessBuilder pb = claudeRuntime.newClaudeProcess(args);
         pb.environment().put("CI", "1"); // non-interactive generation only
         Process proc = pb.start();
         prog.activeProcess = proc;

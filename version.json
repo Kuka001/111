@@ -1,12 +1,27 @@
 {
     "appName":  "AGY Roleplay Studio",
-    "version":  "1.6.0",
-    "build":  18,
+    "version":  "1.6.1",
+    "build":  19,
     "releaseDate":  "2026-10-25",
     "gitRepo":  "Kuka001/111",
     "gitBranch":  "main",
     "apkPath":  "agy-roleplay-android16.apk",
     "releases":  [
+                     {
+                         "version":  "1.6.1",
+                         "build":  19,
+                         "date":  "2026-10-25",
+                         "title":  "Среда Claude Code устанавливается из официальных источников, все модели Claude Code, без файлов и папок",
+                         "ref":  "main",
+                         "changelog":  [
+                                           "Исправлено: «Скачать среду Claude» больше не падает с ошибкой SHA-256 — компоненты (proot, Alpine Linux, Claude Code 2.1.310) скачиваются напрямую из Alpine CDN и npm и проверяются по SHA-256, зашитым в APK",
+                                           "Прогресс установки среды в процентах, проверка свободного места и повторы при обрыве сети",
+                                           "Все доступные модели Claude Code: Fable 5.1/5, Opus 5.5/5/4.8/4.7/4.6/4.5, Sonnet 5.5/5/4.6/4.5, Haiku 5.5/4.5 и псевдонимы «новейшая Opus/Sonnet/Haiku»; старые версии — в разделе «Предыдущие версии»",
+                                           "Effort показывается только с уровнями, которые поддерживает выбранная модель",
+                                           "Файлы и папки рабочей среды полностью скрыты: нет файлового менеджера, путей к файлам и «рабочей папки» Claude",
+                                           "Чаты Claude Code работают во внутренней папке среды автоматически, без настройки"
+                                       ]
+                     },
                      {
                          "version":  "1.6.0",
                          "build":  18,
@@ -261,10 +276,7 @@
                                        ]
                      }
                  ],
-    "claudeRuntimeVersion":  "2.1.310-arm64-musl-1",
-    "claudeRuntimeUrl":  "https://github.com/Kuka001/111/releases/download/claude-runtime-2.1.310/claude-runtime-arm64.tar.gz",
-    "claudeRuntimeSha256":  "",
-    "apkSha256":  "6e06636411bfb3b12005983bc65e573a068262469178d6141d836401ba450823",
-    "apkSize":  164669,
-    "otaSignature":  "HaIi+SrPoyx1LvbNjQYyoyYVswo3B+Si3UVtl/dRUmDAHVtSaLkkIETJcQbvArhmGBVeuH4l7ONoUfO5kJQWkLXex1wurljl/GaojAhjq3gwXku6by9cpEdJyQvTji4w5OOA1vgaYFiAIU2h9B6L93X+wdboTKDQsjPH014x4YD0R0Rs1PHaLNoG1QhzWYcX4a/rGcb1Yw5xm316CUvxIuuTMBQ6F/roK+TNJCh5hCx0MYR7P+dol8dJgyLzNgWEdiAwk6xdCDCgr4KEgOCNpttClZ+ntSGQZB6vbM4FNn7b0wM/iIyFm4ia/ZtlCPTw26L9RmBj2m2OrPt05pBdSA=="
+    "apkSha256":  "c8e6c5f671daf0fb9b6e58e036009cfbb2e96e75a603a1cf0e959499223bad0c",
+    "apkSize":  160573,
+    "otaSignature":  "3fmF9mQd8j6ey2bwVm0Qdwu3c49hGd83HxWXffEXfc6ckE8TCeM/VsJ9a9v5ZJ5lm5bYkVstBAiSVLeVLmGGat+apu1IebDMbOewg9u5N9iirGWXzinS85aw1ayelPaCntT5HzEoxD97fUBuytcBHyakCz/ioIzs2lcr/O2EK3noRK/r4auSSQCb/NZTFuxtLpFnjTQQIbwVj5QhZRTYKDd38OMU9cyHwPJNtjIA3so8BRqgEguftEs6NtPU3d7zrzpVwRnIiYq8KjGR/KpNZ+ryeNQEMSSLoihluBv6ACAtPExas7N2KdEC80eQHuvAJefS9ip34nekSurPXaMOfA=="
 }

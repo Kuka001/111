@@ -2585,43 +2585,16 @@ body.layer-open .toast-host {
   color: var(--text-2);
 }
 
-.breadcrumbs {
+.install-progress {
   display: flex;
   align-items: center;
-  gap: 2px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  margin: 0 -16px 10px;
-  padding: 0 12px;
-}
-
-.breadcrumbs::-webkit-scrollbar {
-  display: none;
-}
-
-.crumb {
-  flex-shrink: 0;
-  height: 34px;
-  padding: 0 10px;
-  border-radius: var(--r-full);
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--text-2);
-}
-
-.crumb.current {
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
   color: var(--text);
-  background: var(--surface-2);
-}
-
-.crumb-sep {
-  flex-shrink: 0;
-  color: var(--text-3);
-}
-
-.crumb-sep .ic {
-  width: 14px;
-  height: 14px;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Diagnostics */

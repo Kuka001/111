@@ -295,22 +295,32 @@
     return 'gemini';
   }
 
+  const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
+
   /**
-   * Reasoning levels each provider really honours: Gemini maps MAX to HIGH,
+   * Reasoning levels a model really honours. Native engine 19+ reports them per
+   * model (models[].efforts); otherwise per provider: Gemini maps MAX to HIGH,
    * Claude-on-Vertex ignores effort, the Claude CLI accepts up to xhigh/max.
    */
-  function effortOptionsFor(modelId) {
+  function effortOptionsFor(modelId, models) {
+    const known = (models || []).find(m => m.id === modelId);
+    if (known && Array.isArray(known.efforts)) return known.efforts.slice();
     const p = providerOf(modelId);
     if (p === 'cli') return ['low', 'medium', 'high', 'xhigh', 'max'];
     if (p === 'vertex-claude') return [];
     return ['low', 'medium', 'high'];
   }
 
-  function effectiveEffort(modelId, effort) {
-    const opts = effortOptionsFor(modelId);
+  /** The level actually used: unsupported levels fall back to the nearest lower one. */
+  function effectiveEffort(modelId, effort, models) {
+    const opts = effortOptionsFor(modelId, models);
     if (!opts.length) return '';
     const e = String(effort || 'high').toLowerCase();
-    return opts.includes(e) ? e : 'high';
+    if (opts.includes(e)) return e;
+    for (let i = EFFORT_ORDER.indexOf(e); i >= 0; i--) {
+      if (opts.includes(EFFORT_ORDER[i])) return EFFORT_ORDER[i];
+    }
+    return opts.includes('high') ? 'high' : opts[0];
   }
 
   function chatActivityTime(chat) {
@@ -362,8 +372,10 @@
       agyEmail: '',
       claudeRuntimeReady: false,
       claudeAuthenticated: false,
-      claudeProjectPath: '',
       claudeRuntimeUrlConfigured: null,
+      claudeDownloadMb: 0,
+      claudeInstalling: false,
+      claudeInstallProgress: '',
     },
     models: [],
     characters: [],
@@ -426,6 +438,7 @@
     jsonPicker: () => !hasBridge || state.engineBuild >= 18,
     perChatModel: () => state.engineBuild >= 18,
     systemBars: () => !hasBridge || typeof window.AndroidServer.setSystemBars === 'function',
+    claudeInstall: () => state.engineBuild >= 19,
   };
 
   const THEMES = {
@@ -503,7 +516,7 @@
   const EFFORT_LABELS = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh', max: 'Max' };
 
   function modelSummary(modelId, effort) {
-    const e = effectiveEffort(modelId, effort);
+    const e = effectiveEffort(modelId, effort, state.models);
     return modelName(modelId) + (e ? ' · ' + EFFORT_LABELS[e] : '');
   }
 
@@ -838,43 +851,6 @@
     });
   }
 
-  function promptDialog(o) {
-    return new Promise((resolve) => {
-      let result = null;
-      const layer = openLayer({
-        kind: 'dialog',
-        html: `<div class="dialog" role="dialog">
-          ${o.title ? `<h2 class="dialog-title">${escapeHtml(o.title)}</h2>` : ''}
-          ${o.message ? `<p class="dialog-text">${escapeHtml(o.message)}</p>` : ''}
-          <input class="input" data-role="value" value="${escapeHtml(o.value || '')}" placeholder="${escapeHtml(o.placeholder || '')}" autocomplete="off" />
-          <div class="dialog-actions">
-            <button class="btn btn-ghost" data-act="cancel">Отмена</button>
-            <button class="btn btn-primary" data-act="ok">${escapeHtml(o.confirmText || 'OK')}</button>
-          </div>
-        </div>`,
-        onClose: () => resolve(result),
-      });
-      const input = $('[data-role="value"]', layer.el);
-      const submit = () => {
-        const v = input.value.trim();
-        if (!v) {
-          input.focus();
-          return;
-        }
-        result = v;
-        layer.close();
-      };
-      bindActs(layer, { cancel: () => layer.close(), ok: submit });
-      input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') submit();
-      });
-      setTimeout(() => {
-        input.focus();
-        input.setSelectionRange(input.value.length, input.value.length);
-      }, 60);
-    });
-  }
-
   /** items: [{ icon, label, danger, hidden, onSelect }] */
   function actionSheet(o) {
     const items = o.items.filter(i => !i.hidden);
@@ -932,7 +908,6 @@
       agyEmail: s.agyUserEmail || s.agyEmail || '',
       claudeRuntimeReady: Boolean(s.claudeRuntimeReady),
       claudeAuthenticated: Boolean(s.claudeAuthenticated),
-      claudeProjectPath: s.claudeProjectPath || '',
     });
   }
 
@@ -993,7 +968,9 @@
       state.settings.claudeRuntimeReady = Boolean(data.runtimeReady);
       state.settings.claudeAuthenticated = Boolean(data.authenticated);
       state.settings.claudeRuntimeUrlConfigured = data.runtimeUrlConfigured !== undefined ? Boolean(data.runtimeUrlConfigured) : null;
-      if (data.projectPath !== undefined) state.settings.claudeProjectPath = data.projectPath;
+      state.settings.claudeDownloadMb = Number(data.downloadMb) || 0;
+      state.settings.claudeInstalling = Boolean(data.installing);
+      state.settings.claudeInstallProgress = data.installProgress || '';
       if (state.tab === 'settings') renderSettingsTab();
       refreshLayers();
     } catch (e) {
@@ -1285,7 +1262,7 @@
           <div class="list">
             <button class="row" data-act="model">
               <span class="row-icon">${ic(PROVIDERS[prov].icon)}</span>
-              <div class="row-body"><div class="row-title">${escapeHtml(modelName(sel.modelId))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effectiveEffort(sel.modelId, sel.effort) ? ' · ' + EFFORT_LABELS[effectiveEffort(sel.modelId, sel.effort)] : ''}</div></div>
+              <div class="row-body"><div class="row-title">${escapeHtml(modelName(sel.modelId))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effectiveEffort(sel.modelId, sel.effort, state.models) ? ' · ' + EFFORT_LABELS[effectiveEffort(sel.modelId, sel.effort, state.models)] : ''}</div></div>
               ${ic('chevron-right', 'row-chevron')}
             </button>
           </div>
@@ -1368,22 +1345,27 @@
     const groups = ['gemini', 'vertex-claude', 'cli'];
 
     const render = () => {
-      const opts = effortOptionsFor(sel.modelId);
-      const eff = effectiveEffort(sel.modelId, sel.effort);
+      const opts = effortOptionsFor(sel.modelId, state.models);
+      const eff = effectiveEffort(sel.modelId, sel.effort, state.models);
       const effortBlock = opts.length
         ? `<div class="section-title">Глубина рассуждений</div><div class="segmented">${opts.map(e => `<button class="${e === eff ? 'active' : ''}" data-act="effort" data-effort="${e}">${EFFORT_LABELS[e]}</button>`).join('')}</div>
            <div class="effort-note">${providerOf(sel.modelId) === 'cli' ? 'Передаётся в Claude Code как --effort.' : 'Чем выше, тем дольше модель думает перед ответом.'}</div>`
         : `<div class="effort-note">${ic('info', 'ic-xs')} Для этой модели глубина рассуждений не настраивается.</div>`;
+      const row = (m) => `<button class="row model-row${m.id === sel.modelId ? ' selected' : ''}" data-act="model" data-id="${escapeHtml(m.id)}">
+          <span class="row-icon">${m.id === sel.modelId ? ic('check-circle') : ic('circle')}</span>
+          <div class="row-body"><div class="row-title">${escapeHtml(m.name)}</div>${m.badge ? `<div class="row-sub">${escapeHtml(m.badge)}</div>` : ''}</div>
+        </button>`;
       const lists = groups.map(g => {
         const models = state.models.filter(m => providerOf(m.id) === g);
         if (!models.length) return '';
         const st = providerStatus(g);
+        const current = models.filter(m => !m.legacy);
+        const older = models.filter(m => m.legacy);
+        const olderOpen = older.some(m => m.id === sel.modelId);
         return `<div class="section">
           <div class="section-title" style="display:flex;align-items:center;gap:8px">${escapeHtml(PROVIDERS[g].label)}${st.ok ? '' : `<span class="pill warn">${escapeHtml(st.text)}</span>`}</div>
-          <div class="list">${models.map(m => `<button class="row model-row${m.id === sel.modelId ? ' selected' : ''}" data-act="model" data-id="${escapeHtml(m.id)}">
-              <span class="row-icon">${m.id === sel.modelId ? ic('check-circle') : ic('circle')}</span>
-              <div class="row-body"><div class="row-title">${escapeHtml(m.name)}</div>${m.badge ? `<div class="row-sub">${escapeHtml(m.badge)}</div>` : ''}</div>
-            </button>`).join('')}</div>
+          <div class="list">${current.map(row).join('')}</div>
+          ${older.length ? `<details class="disclosure"${olderOpen ? ' open' : ''}><summary>Предыдущие версии · ${older.length} ${ic('chevron-down', 'ic-sm')}</summary><div class="list">${older.map(row).join('')}</div></details>` : ''}
           ${st.ok ? '' : `<button class="btn btn-ghost btn-sm" style="margin-top:6px" data-act="provider" data-provider="${g}">Настроить ${escapeHtml(PROVIDERS[g].short)}</button>`}
         </div>`;
       }).join('');
@@ -1399,7 +1381,10 @@
     const rerender = () => {
       const body = $('.sheet-body', layer.el);
       const scroll = body.scrollTop;
+      const folded = $('details.disclosure', body);
+      const wasOpen = folded && folded.open;
       layer.setBody(render());
+      if (wasOpen && $('details.disclosure', body)) $('details.disclosure', body).open = true;
       body.scrollTop = scroll;
     };
     layer.refresh = rerender;
@@ -1410,14 +1395,14 @@
       },
       model: (el) => {
         sel.modelId = el.dataset.id;
-        const e = effectiveEffort(sel.modelId, sel.effort);
+        const e = effectiveEffort(sel.modelId, sel.effort, state.models);
         if (e) sel.effort = e;
         rerender();
       },
       provider: (el) => openProviderSettings(el.dataset.provider),
       done: () => {
         layer.close();
-        o.onPick({ modelId: sel.modelId, effort: effectiveEffort(sel.modelId, sel.effort) || sel.effort });
+        o.onPick({ modelId: sel.modelId, effort: effectiveEffort(sel.modelId, sel.effort, state.models) || sel.effort });
       },
     });
   }
@@ -2156,7 +2141,7 @@
         ${can.rename() ? `<label class="field"><span class="field-label">Название чата</span><input class="input" data-role="title" value="${escapeHtml(custom)}" placeholder="${escapeHtml(ch.name || 'Без названия')}" maxlength="120" autocomplete="off" /><span class="field-hint">Помогает различать несколько историй с одним персонажем.</span></label>` : ''}
         <div class="section">
           <div class="section-title">Модель этого чата</div>
-          <div class="list"><button class="row" data-act="model"><span class="row-icon">${ic(PROVIDERS[prov].icon)}</span><div class="row-body"><div class="row-title">${escapeHtml(modelName(chat.model_id))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effectiveEffort(chat.model_id, chat.effort) ? ' · ' + EFFORT_LABELS[effectiveEffort(chat.model_id, chat.effort)] : ''}</div></div>${ic('chevron-right', 'row-chevron')}</button></div>
+          <div class="list"><button class="row" data-act="model"><span class="row-icon">${ic(PROVIDERS[prov].icon)}</span><div class="row-body"><div class="row-title">${escapeHtml(modelName(chat.model_id))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effectiveEffort(chat.model_id, chat.effort, state.models) ? ' · ' + EFFORT_LABELS[effectiveEffort(chat.model_id, chat.effort, state.models)] : ''}</div></div>${ic('chevron-right', 'row-chevron')}</button></div>
           ${can.perChatModel() ? '' : '<p class="section-hint">На текущей версии APK выбор модели здесь также меняет модель по умолчанию.</p>'}
         </div>
         <div class="section">
@@ -2237,12 +2222,7 @@
       },
       memory: () => {
         const chat = state.room.data.chat;
-        openFileEditor(chat.memory_file_path || `memories/chat_${chatId}.md`, {
-          title: 'Память чата',
-          hint: 'Попадает в системный промпт внутри &lt;chat_memory&gt;, если здесь есть что-то кроме заголовка. Макросы {{char}} и {{user}} подставляются.',
-          allowDelete: false,
-          plain: true,
-        });
+        openMemoryEditor(chat.memory_file_path || `memories/chat_${chatId}.md`);
       },
       prompt: () => openPromptPreview(chatId),
       diag: () => openDiagnostics(chatId),
@@ -2389,7 +2369,7 @@
       if (o.prompts) {
         payload.context = src.systemPrompt !== null
           ? { systemPrompt: src.systemPrompt }
-          : { 'GEMINI.md': src.rules, characterCard: src.characterMd, personaCard: src.personaMd, chatMemory: src.memoryMd };
+          : { systemPrompt: src.rules, characterCard: src.characterMd, personaCard: src.personaMd, chatMemory: src.memoryMd };
       }
       payload.messages = messages.map((m, i) => {
         const v = variants(m);
@@ -2426,7 +2406,7 @@
       if (src.systemPrompt !== null) {
         block('Итоговый системный промпт', src.systemPrompt);
       } else {
-        block('Системный промпт (GEMINI.md)', src.rules);
+        block('Системный промпт', src.rules);
         block(`Карточка персонажа: ${charName}`, src.characterMd);
         block(`Персона: ${personaName}`, src.personaMd);
         block('Память чата', src.memoryMd);
@@ -2763,10 +2743,6 @@
       ${isChar ? `<label class="field"><span class="field-label">Приветствие</span>
         <textarea class="textarea" data-field="greeting" placeholder="Первое сообщение персонажа в новом чате. Можно оставить пустым.">${escapeHtml(cur.greeting)}</textarea>
         <div class="macro-chips"><button class="chip sm" data-act="macro" data-macro="{{char}}">{{char}}</button><button class="chip sm" data-act="macro" data-macro="{{user}}">{{user}}</button></div></label>` : ''}
-      <details class="disclosure section"><summary>Дополнительно ${ic('chevron-down', 'ic-sm')}</summary>
-        <label class="field"><span class="field-label">Файл в workspace</span>
-          <input class="input mono" data-field="filePath" value="${escapeHtml(cur.filePath)}" placeholder="${isChar ? 'characters/имя.md' : 'personas/имя.md'} — создастся автоматически" autocomplete="off" /></label>
-      </details>
       ${item ? `<div class="danger-zone"><button class="btn btn-danger btn-block" data-act="delete">${ic('trash')}Удалить ${noun}</button>
         ${chatsCount ? `<p class="section-hint">${chatsCount} ${pluralRu(chatsCount, 'чат останется', 'чата останутся', 'чатов останутся')} без карточки персонажа.</p>` : ''}</div>` : ''}`;
 
@@ -3015,7 +2991,6 @@
       </div></div>
       <div class="section"><div class="section-title">Данные</div><div class="list">
         ${settingsRow({ page: 'backup', icon: 'database', title: 'Резервная копия', sub: 'Сохранить или восстановить все данные' })}
-        ${settingsRow({ page: 'files', icon: 'folder', title: 'Файлы workspace', sub: 'Для продвинутых: все файлы как есть' })}
       </div></div>
       <div class="section"><div class="section-title">Приложение</div><div class="list">
         ${settingsRow({ page: 'updates', icon: 'update', title: 'Обновления', sub: upd ? `Установлена v${escapeHtml(upd.currentVersion || state.webVersion)}` : (state.webVersion ? `v${escapeHtml(state.webVersion)}` : ''), value: updAvailable ? '<span class="pill accent">Доступно</span>' : '' })}
@@ -3032,7 +3007,6 @@
     else if (page === 'appearance') openAppearancePage();
     else if (page === 'reading') openReadingPage();
     else if (page === 'backup') openBackupPage();
-    else if (page === 'files') openFilesPage('');
     else if (page === 'updates') openUpdatesPage();
   }
 
@@ -3096,7 +3070,7 @@
           <div class="macro-chips" style="margin:0"><button class="chip sm" data-act="macro" data-macro="{{char}}">{{char}}</button><button class="chip sm" data-act="macro" data-macro="{{user}}">{{user}}</button></div>
           <span class="char-count" data-role="count" style="margin-left:auto"></span>
         </div>
-        <p class="section-hint">{{char}} — имя персонажа чата, {{user}} — имя вашей персоны. Хранится в файле GEMINI.md.</p>`,
+        <p class="section-hint">{{char}} — имя персонажа чата, {{user}} — имя вашей персоны.</p>`,
       actions: `<button class="btn btn-ghost" data-act="save">Сохранить</button>`,
       onBack: () => {
         if (saving || $('[data-role="text"]', layer.el).value === initial) return true;
@@ -3262,18 +3236,25 @@
   // --- Claude Code CLI ------------------------------------------------------
   function openClaudePage() {
     let installing = false;
+    let progressTimer = null;
     const render = () => {
       const s = state.settings;
-      const urlKnown = s.claudeRuntimeUrlConfigured;
-      const runtimeBlocked = urlKnown === false && !s.claudeRuntimeReady;
+      const sizeMb = s.claudeDownloadMb || 128;
+      const canInstall = can.claudeInstall();
+      const busy = installing || s.claudeInstalling;
+      let runtimeText;
+      if (s.claudeRuntimeReady) runtimeText = 'Установлена. Новые чаты с моделями Claude Code работают в ней автоматически.';
+      else if (!canInstall) runtimeText = 'Для установки среды обновите приложение (APK) до версии 1.6.1 или новее.';
+      else runtimeText = `Разовая загрузка около ${sizeMb} МБ (после распаковки ~300 МБ), лучше по Wi-Fi. Компоненты берутся из официальных источников — Alpine Linux и npm — и проверяются по SHA-256.`;
       return `
-        <p class="section-hint" style="margin:0 4px 14px">Claude Code запускается прямо на телефоне через proot — без ПК. Системный промпт тот же, что и для Gemini.</p>
+        <p class="section-hint" style="margin:0 4px 14px">Claude Code работает прямо на телефоне — без ПК и без настройки папок. Системный промпт тот же, что и для Gemini.</p>
         <div class="card">
           <div class="step${s.claudeRuntimeReady ? ' done' : ''}">
             <span class="step-num">${s.claudeRuntimeReady ? ic('check', 'ic-xs') : '1'}</span>
             <div class="step-body"><div class="step-title">Среда выполнения</div>
-              <div class="step-text">${s.claudeRuntimeReady ? 'Установлена.' : (runtimeBlocked ? 'Пакет среды для этой сборки ещё не опубликован. Установка станет доступна после обновления.' : 'Разовая загрузка около 300 МБ, лучше по Wi-Fi. Проверяется по SHA-256.')}</div>
-              <button class="btn ${s.claudeRuntimeReady ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="install"${installing || runtimeBlocked ? ' disabled' : ''}>${installing ? '<span class="spinner"></span>Загрузка… не закрывайте приложение' : (s.claudeRuntimeReady ? `${ic('reroll')}Переустановить` : `${ic('download')}Скачать среду`)}</button>
+              <div class="step-text">${escapeHtml(runtimeText)}</div>
+              ${busy ? `<div class="install-progress"><span class="spinner"></span><span>${escapeHtml(s.claudeInstallProgress || 'Подготовка…')}</span></div><p class="section-hint" style="margin:8px 0 0">Не закрывайте приложение до окончания установки.</p>`
+                : `<button class="btn ${s.claudeRuntimeReady ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="install"${canInstall ? '' : ' disabled'}>${s.claudeRuntimeReady ? `${ic('reroll')}Переустановить` : `${ic('download')}Скачать среду`}</button>`}
             </div>
           </div>
           <div class="step${s.claudeAuthenticated ? ' done' : ''}">
@@ -3281,22 +3262,19 @@
             <div class="step-body"><div class="step-title">Вход по подписке Claude</div>
               <div class="step-text">${s.claudeAuthenticated ? 'Вход выполнен.' : 'Откроется браузер. После входа скопируйте код и вставьте его ниже.'}</div>
               <div class="btn-row">
-                <button class="btn ${s.claudeAuthenticated ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="login"${s.claudeRuntimeReady ? '' : ' disabled'}>${ic('login')}${s.claudeAuthenticated ? 'Войти заново' : 'Войти'}</button>
+                <button class="btn ${s.claudeAuthenticated ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="login"${s.claudeRuntimeReady && !busy ? '' : ' disabled'}>${ic('login')}${s.claudeAuthenticated ? 'Войти заново' : 'Войти'}</button>
                 ${s.claudeAuthenticated ? `<button class="btn btn-danger btn-sm" data-act="logout">${ic('logout')}Выйти</button>` : ''}
               </div>
               ${s.claudeRuntimeReady && !s.claudeAuthenticated ? `<label class="field"><span class="field-label">Код из браузера</span><input class="input" data-role="code" placeholder="Вставьте код" autocomplete="off" /></label><button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="exchange">Подтвердить код</button>` : ''}
             </div>
           </div>
-          <div class="step">
-            <span class="step-num">3</span>
-            <div class="step-body"><div class="step-title">Рабочая папка</div>
-              <div class="step-text">Папка внутри workspace, в которой запускается CLI. Можно оставить пустой.</div>
-              <input class="input mono" data-role="project" value="${escapeHtml(s.claudeProjectPath)}" placeholder="например, projects/rp" autocomplete="off" />
-            </div>
-          </div>
         </div>`;
     };
-    const layer = openPage({ title: 'Claude Code CLI', body: render() });
+    const layer = openPage({
+      title: 'Claude Code CLI',
+      body: render(),
+      onClose: () => clearInterval(progressTimer),
+    });
     layer.refresh = () => {
       if (document.activeElement && layer.el.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
       const body = $('.page-body', layer.el);
@@ -3304,36 +3282,39 @@
       layer.setBody(render());
       body.scrollTop = scroll;
     };
-    refreshClaudeStatus();
-    layer.el.addEventListener('change', async (e) => {
-      if (e.target.dataset.role !== 'project') return;
-      const claudeProjectPath = e.target.value.trim();
-      try {
-        applySettings(await api('/api/settings', { method: 'POST', body: { claudeProjectPath } }));
-        toast('Рабочая папка сохранена', { type: 'success' });
-      } catch (err) {
-        toast(err.message, { type: 'error' });
-      }
+    const watchProgress = () => {
+      clearInterval(progressTimer);
+      progressTimer = setInterval(async () => {
+        await refreshClaudeStatus();
+        if (!installing && !state.settings.claudeInstalling) clearInterval(progressTimer);
+      }, 1000);
+    };
+    refreshClaudeStatus().then(() => {
+      if (state.settings.claudeInstalling) watchProgress();
     });
     bindActs(layer, {
       install: async () => {
         const ok = await confirmDialog({
           title: state.settings.claudeRuntimeReady ? 'Переустановить среду?' : 'Скачать среду Claude Code?',
-          message: 'Около 300 МБ. Нужны стабильный интернет и свободное место. Загрузка займёт несколько минут.',
+          message: `Около ${state.settings.claudeDownloadMb || 128} МБ. Нужны стабильный интернет и ~700 МБ свободного места. Загрузка займёт несколько минут.`,
           confirmText: 'Скачать',
         });
         if (!ok) return;
         installing = true;
+        state.settings.claudeInstallProgress = 'Подготовка…';
         layer.refresh();
+        watchProgress();
         try {
           const res = await api('/api/claude/runtime/install', { method: 'POST' });
           state.settings.claudeRuntimeReady = Boolean(res.runtimeReady);
           state.settings.claudeAuthenticated = Boolean(res.authenticated);
           toast(state.settings.claudeRuntimeReady ? 'Среда установлена' : 'Установка не завершилась', { type: state.settings.claudeRuntimeReady ? 'success' : 'error' });
         } catch (e) {
-          toast('Ошибка установки: ' + e.message, { type: 'error' });
+          toast('Ошибка установки: ' + e.message, { type: 'error', duration: 8000 });
         } finally {
           installing = false;
+          state.settings.claudeInstalling = false;
+          await refreshClaudeStatus();
           layer.refresh();
           renderSettingsTab();
         }
@@ -3466,7 +3447,7 @@
       body: `
         <div class="card card-pad">
           <div class="status-card-title">Создать копию</div>
-          <p class="step-text">Персонажи, персоны, все чаты (с мыслями и вариантами), файлы workspace и настройки. Токены входа не сохраняются — после восстановления войдите заново.</p>
+          <p class="step-text">Персонажи, персоны, все чаты (с мыслями и вариантами), системный промпт, память чатов и настройки. Токены входа не сохраняются — после восстановления войдите заново.</p>
           <button class="btn btn-primary btn-block" data-act="export">${ic('download')}Сохранить копию</button>
         </div>
         <div class="card card-pad section">
@@ -3694,142 +3675,23 @@
     });
   }
 
-  // --- workspace files ------------------------------------------------------
-  function openFilesPage(startPath) {
-    let path = startPath || '';
-    let items = null;
-    const render = () => {
-      const parts = path ? path.split('/') : [];
-      const crumbs = [`<button class="crumb${parts.length ? '' : ' current'}" data-act="go" data-path="">workspace</button>`]
-        .concat(parts.map((p, i) => `<span class="crumb-sep">${ic('chevron-right')}</span><button class="crumb${i === parts.length - 1 ? ' current' : ''}" data-act="go" data-path="${escapeHtml(parts.slice(0, i + 1).join('/'))}">${escapeHtml(p)}</button>`))
-        .join('');
-      let list;
-      if (items === null) list = '<div class="empty"><span class="spinner"></span></div>';
-      else if (!items.length) list = emptyHtml('folder', 'Папка пуста', 'Создайте файл или папку кнопкой «+».');
-      else {
-        list = `<div class="list">${items.map(it => `<div class="row pressable" role="button" tabindex="0" data-act="${it.isDirectory ? 'go' : 'open'}" data-path="${escapeHtml(it.path)}">
-          <span class="row-icon">${ic(it.isDirectory ? 'folder' : 'file')}</span>
-          <div class="row-body"><div class="row-title">${escapeHtml(it.name)}</div><div class="row-sub">${it.isDirectory ? 'Папка' : formatSize(it.size)}</div></div>
-          <button class="icon-btn sm" data-act="item-menu" data-path="${escapeHtml(it.path)}" data-dir="${it.isDirectory ? 1 : 0}" aria-label="Действия">${ic('more', 'ic-sm')}</button>
-        </div>`).join('')}</div>`;
-      }
-      return `<div class="breadcrumbs">${crumbs}</div>${list}
-        <p class="section-hint">Персонажи, персоны, системный промпт и память чатов удобнее редактировать в их разделах. Здесь — все файлы как есть.</p>`;
-    };
-    const layer = openPage({
-      title: 'Файлы',
-      body: render(),
-      actions: `<button class="icon-btn accent" data-act="add" aria-label="Создать">${ic('plus')}</button>`,
-    });
-    const load = async () => {
-      items = null;
-      layer.setBody(render());
-      try {
-        const data = await api(`/api/files?path=${encodeURIComponent(path)}`);
-        items = data.items || [];
-      } catch (e) {
-        items = [];
-        toast(e.message, { type: 'error' });
-      }
-      layer.setBody(render());
-    };
-    layer.refresh = load;
-    load();
-    bindActs(layer, {
-      go: (el) => {
-        path = el.dataset.path || '';
-        load();
-      },
-      open: (el, e) => {
-        if (e.target.closest('[data-act="item-menu"]')) return;
-        openFileEditor(el.dataset.path, { onChange: load });
-      },
-      'item-menu': (el, e) => {
-        e.stopPropagation();
-        const p = el.dataset.path;
-        actionSheet({
-          title: p.split('/').pop(),
-          items: [
-            { icon: 'edit', label: 'Открыть', hidden: el.dataset.dir === '1', onSelect: () => openFileEditor(p, { onChange: load }) },
-            {
-              icon: 'trash',
-              label: el.dataset.dir === '1' ? 'Удалить папку со всем содержимым' : 'Удалить файл',
-              danger: true,
-              onSelect: async () => {
-                const ok = await confirmDialog({ title: 'Удалить?', message: p, confirmText: 'Удалить', danger: true });
-                if (!ok) return;
-                try {
-                  await api(`/api/files?path=${encodeURIComponent(p)}`, { method: 'DELETE' });
-                  toast('Удалено');
-                  load();
-                  loadCards();
-                } catch (err) {
-                  toast(err.message, { type: 'error' });
-                }
-              },
-            },
-          ],
-        });
-      },
-      add: () => actionSheet({
-        title: 'Создать',
-        items: [
-          {
-            icon: 'file-plus',
-            label: 'Новый файл',
-            onSelect: async () => {
-              const name = await promptDialog({ title: 'Новый файл', value: 'new_file.md', confirmText: 'Создать' });
-              if (!name) return;
-              openFileEditor((path ? path + '/' : '') + name.replace(/^\/+/, ''), { isNew: true, onChange: load });
-            },
-          },
-          {
-            icon: 'folder-plus',
-            label: 'Новая папка',
-            onSelect: async () => {
-              const name = await promptDialog({ title: 'Новая папка', value: 'new_folder', confirmText: 'Создать' });
-              if (!name) return;
-              try {
-                await api('/api/files/folder', { method: 'POST', body: { folderPath: (path ? path + '/' : '') + name.replace(/^\/+|\/+$/g, '') } });
-                load();
-              } catch (e) {
-                toast(e.message, { type: 'error' });
-              }
-            },
-          },
-        ],
-      }),
-    });
-  }
-
-  function formatSize(bytes) {
-    const n = Number(bytes) || 0;
-    if (n < 1024) return n + ' Б';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' КБ';
-    return (n / 1024 / 1024).toFixed(1) + ' МБ';
-  }
-
-  async function openFileEditor(relPath, opts) {
-    const o = opts || {};
-    let initial = '';
-    if (!o.isNew) {
-      try {
-        initial = (await api(`/api/files/content?path=${encodeURIComponent(relPath)}`)).content || '';
-      } catch (e) {
-        if (!o.plain) {
-          toast(e.message, { type: 'error' });
-          return;
-        }
-      }
+  // --- chat memory ----------------------------------------------------------
+  async function openMemoryEditor(relPath) {
+    let raw = '';
+    try {
+      raw = (await api(`/api/files/content?path=${encodeURIComponent(relPath)}`)).content || '';
+    } catch (e) {
+      raw = '';
     }
+    // The auto-created "# Память чата #N" heading is never sent to the model; keep it out of sight.
+    const heading = (raw.match(/^# Память чата[^\n]*\n*/) || [''])[0];
+    let initial = raw.slice(heading.length);
     let saved = false;
-    const title = o.title || relPath.split('/').pop();
     const layer = openPage({
-      title,
+      title: 'Память чата',
       backIcon: 'x',
-      body: `${o.hint ? `<p class="section-hint" style="margin:0 4px 12px">${o.hint}</p>` : `<p class="section-hint mono" style="margin:0 4px 12px">${escapeHtml(relPath)}</p>`}
-        <textarea class="textarea tall${o.plain ? '' : ' mono'}" data-role="text">${escapeHtml(initial)}</textarea>
-        ${o.allowDelete === false || o.isNew ? '' : `<div class="danger-zone"><button class="btn btn-danger btn-block" data-act="delete">${ic('trash')}Удалить файл</button></div>`}`,
+      body: `<p class="section-hint" style="margin:0 4px 12px">Важные факты, договорённости и события, которые модель должна помнить. Текст попадает в системный промпт внутри &lt;chat_memory&gt;; {{char}} и {{user}} подставляются.</p>
+        <textarea class="textarea tall" data-role="text" placeholder="Например: {{user}} обещал вернуться к рассвету. {{char}} не доверяет гильдии.">${escapeHtml(initial)}</textarea>`,
       actions: `<button class="btn btn-ghost" data-act="save">Сохранить</button>`,
       onBack: () => {
         if (saved || $('[data-role="text"]', layer.el).value === initial) return true;
@@ -3838,34 +3700,18 @@
       },
     });
     const ta = $('[data-role="text"]', layer.el);
-    ta.addEventListener('input', () => layer.setTitle(escapeHtml(title) + (ta.value !== initial ? '<span class="dirty-dot"></span>' : '')));
+    ta.addEventListener('input', () => layer.setTitle('Память чата' + (ta.value !== initial ? '<span class="dirty-dot"></span>' : '')));
     bindActs(layer, {
       save: async (btn) => {
         btn.disabled = true;
         try {
-          await api('/api/files/file', { method: 'POST', body: { filePath: relPath, content: ta.value } });
+          await api('/api/files/file', { method: 'POST', body: { filePath: relPath, content: heading + ta.value } });
           saved = true;
+          initial = ta.value;
           layer.close();
-          toast('Сохранено', { type: 'success' });
-          if (o.onChange) o.onChange();
-          if (relPath === 'GEMINI.md') state.systemPromptText = ta.value;
-          if (/^(characters|personas)\//.test(relPath)) loadCards();
+          toast('Память сохранена', { type: 'success' });
         } catch (e) {
           btn.disabled = false;
-          toast(e.message, { type: 'error' });
-        }
-      },
-      delete: async () => {
-        const ok = await confirmDialog({ title: 'Удалить файл?', message: relPath, confirmText: 'Удалить', danger: true });
-        if (!ok) return;
-        try {
-          await api(`/api/files?path=${encodeURIComponent(relPath)}`, { method: 'DELETE' });
-          saved = true;
-          layer.close();
-          toast('Файл удалён');
-          if (o.onChange) o.onChange();
-          loadCards();
-        } catch (e) {
           toast(e.message, { type: 'error' });
         }
       },

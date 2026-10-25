@@ -8,6 +8,7 @@
 // URL switches:
 //   ?engine=17   emulate the old native engine (no cancel, no prompt preview,
 //                no engineBuild, no setSystemBars, no last_activity)
+//   ?engine=18   engine without the pinned Claude runtime installer
 //   ?empty=1     start without characters, personas and chats
 //   ?long=1      add a 300-message chat for scroll/perf testing
 //   ?delay=ms    base latency of every request (default 120)
@@ -15,7 +16,7 @@
   'use strict';
 
   const params = new URLSearchParams(location.search);
-  const ENGINE = Number(params.get('engine') || 18);
+  const ENGINE = Number(params.get('engine') || 19);
   const LEGACY = ENGINE < 18;
   const DELAY = Number(params.get('delay') || 120);
 
@@ -116,18 +117,46 @@
     }
   }
 
+  // Mirrors VERTEX_MODELS / CLAUDE_CLI_MODELS in LocalBackendServer.java (engine 19).
+  const ALL = 'low,medium,high,xhigh,max';
+  const BASIC = 'low,medium,high';
+  const CLI = 'Claude Code · на устройстве';
   const MODELS = [
-    ['gemini-4-argon', 'Gemini 4 Argon', 'Google DeepMind', 'Флагман RP'],
-    ['claude-opus-5-5', 'Claude Opus 5.5', 'Anthropic (AGY)', 'Литературный'],
-    ['claude-sonnet-5-5', 'Claude Sonnet 5.5', 'Anthropic (AGY)', 'Креативный'],
-    ['claude-code-opus', 'Claude Opus (Code CLI)', 'Claude Code · на устройстве', 'CLI · подписка'],
-    ['claude-code-sonnet', 'Claude Sonnet (Code CLI)', 'Claude Code · на устройстве', 'CLI · подписка'],
-    ['gemini-3.8-flash', 'Gemini 3.8 Flash', 'Google DeepMind', 'Быстрый RP'],
-    ['gemini-3.7-flash', 'Gemini 3.7 Flash', 'Google DeepMind', 'Баланс'],
-    ['gemini-3.6-flash', 'Gemini 3.6 Flash', 'Google DeepMind', 'Скоростной'],
-    ['gemini-3.5-flash-lite', 'Gemini 3.5 Flash Lite', 'Google DeepMind', 'Лёгкий'],
-    ['gemini-3.1-pro', 'Gemini 3.1 Pro', 'Google DeepMind', 'Глубокий'],
-  ].map(([id, name, provider, badge]) => ({ id, name, provider, badge }));
+    ['gemini-4-argon', 'Gemini 4 Argon', 'Google DeepMind', 'Флагман RP', BASIC],
+    ['claude-opus-5-5', 'Claude Opus 5.5', 'Anthropic (AGY)', 'Литературный', ''],
+    ['claude-sonnet-5-5', 'Claude Sonnet 5.5', 'Anthropic (AGY)', 'Креативный', ''],
+    ['gemini-3.8-flash', 'Gemini 3.8 Flash', 'Google DeepMind', 'Быстрый RP', BASIC],
+    ['gemini-3.7-flash', 'Gemini 3.7 Flash', 'Google DeepMind', 'Баланс', BASIC],
+    ['gemini-3.6-flash', 'Gemini 3.6 Flash', 'Google DeepMind', 'Скоростной', BASIC],
+    ['gemini-3.5-flash-lite', 'Gemini 3.5 Flash Lite', 'Google DeepMind', 'Лёгкий', BASIC],
+    ['gemini-3.1-pro', 'Gemini 3.1 Pro', 'Google DeepMind', 'Глубокий', BASIC],
+    ['claude-code-opus', 'Claude Opus (новейшая)', CLI, 'Всегда последняя Opus', ALL],
+    ['claude-code-sonnet', 'Claude Sonnet (новейшая)', CLI, 'Всегда последняя Sonnet', ALL],
+    ['claude-code-haiku', 'Claude Haiku (новейшая)', CLI, 'Всегда последняя Haiku', ALL],
+    ['claude-code-fable-5-1', 'Claude Fable 5.1', CLI, 'Самая мощная', ALL],
+    ['claude-code-opus-5-5', 'Claude Opus 5.5', CLI, 'Opus', ALL],
+    ['claude-code-sonnet-5-5', 'Claude Sonnet 5.5', CLI, 'Sonnet', ALL],
+    ['claude-code-haiku-5-5', 'Claude Haiku 5.5', CLI, 'Haiku · быстрая', ALL],
+    ['claude-code-fable-5', 'Claude Fable 5', CLI, 'Предыдущая Fable', ALL, true],
+    ['claude-code-opus-5', 'Claude Opus 5', CLI, 'Предыдущая Opus', ALL, true],
+    ['claude-code-opus-4-8', 'Claude Opus 4.8', CLI, 'Opus 4', ALL, true],
+    ['claude-code-opus-4-7', 'Claude Opus 4.7', CLI, 'Opus 4', ALL, true],
+    ['claude-code-opus-4-6', 'Claude Opus 4.6', CLI, 'Opus 4', 'low,medium,high,max', true],
+    ['claude-code-opus-4-5', 'Claude Opus 4.5', CLI, 'Opus 4', BASIC, true],
+    ['claude-code-sonnet-5', 'Claude Sonnet 5', CLI, 'Предыдущая Sonnet', ALL, true],
+    ['claude-code-sonnet-4-6', 'Claude Sonnet 4.6', CLI, 'Sonnet 4', 'low,medium,high,max', true],
+    ['claude-code-sonnet-4-5', 'Claude Sonnet 4.5', CLI, 'Снимается 30.11.2026', '', true],
+    ['claude-code-haiku-4-5', 'Claude Haiku 4.5', CLI, 'Haiku 4', '', true],
+  ].map(([id, name, provider, badge, efforts, legacy]) => {
+    const m = { id, name, provider, badge };
+    if (ENGINE >= 19) {
+      m.efforts = efforts ? efforts.split(',') : [];
+      m.legacy = !!legacy;
+      return m;
+    }
+    // Older engines only knew two CLI models and no per-model effort lists.
+    return (!id.startsWith('claude-code-') || id === 'claude-code-opus' || id === 'claude-code-sonnet') ? m : null;
+  }).filter(Boolean);
 
   // ---------------------------------------------------------------------------
   const err = (status, msg, extra) => Object.assign({ __status: status, error: msg }, extra || {});
@@ -536,10 +565,21 @@
     if (path === '/api/agy/auth/exchange') { db.settings.agyAuthenticated = true; return { authenticated: true, email: db.settings.agyUserEmail, projectId: db.settings.projectId }; }
     if (path === '/api/agy/auth/logout') { db.settings.agyAuthenticated = false; return { ok: true, authenticated: false }; }
 
-    if (path === '/api/claude/status') return { runtimeReady: db.settings.claudeRuntimeReady, authenticated: db.settings.claudeAuthenticated, runtimeVersion: '', runtimeUrlConfigured: params.get('claudeurl') === '1', projectPath: db.settings.claudeProjectPath };
+    if (path === '/api/claude/status') {
+      return { runtimeReady: db.settings.claudeRuntimeReady, authenticated: db.settings.claudeAuthenticated, runtimeVersion: 'mock',
+        runtimeUrlConfigured: ENGINE >= 19, downloadMb: 128, installing: !!db.claudeInstalling, installProgress: db.claudeInstallProgress || '' };
+    }
     if (path === '/api/claude/runtime/install') {
-      if (params.get('claudeurl') !== '1') return err(503, 'Среда Claude Code недоступна: в version.json не задан SHA-256 пакета.');
-      await sleep(2500);
+      if (ENGINE < 19) return err(503, 'SHA-256 среды Claude не задан в version.json (claudeRuntimeSha256). Установка отключена из соображений безопасности.');
+      db.claudeInstalling = true;
+      for (let pct = 0; pct <= 100; pct += 10) {
+        db.claudeInstallProgress = 'Скачивание: ' + pct + '% (' + Math.round(128 * pct / 100) + ' из 128 МБ)';
+        await sleep(250);
+      }
+      db.claudeInstallProgress = 'Распаковка: Claude Code 2.1.310…';
+      await sleep(600);
+      db.claudeInstalling = false;
+      db.claudeInstallProgress = '';
       db.settings.claudeRuntimeReady = true;
       return { ok: true, runtimeReady: true, authenticated: db.settings.claudeAuthenticated };
     }
