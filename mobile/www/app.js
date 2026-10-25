@@ -3293,9 +3293,20 @@
       else runtimeText = `Разовая загрузка около ${sizeMb} МБ (после распаковки ~300 МБ), лучше по Wi-Fi. Компоненты берутся из официальных источников — Alpine Linux и npm — и проверяются по SHA-256.`;
       let selftestHtml = '';
       if (selftest && selftest.running) {
-        selftestHtml = `<div class="install-progress" style="margin-top:10px"><span class="spinner"></span><span>Запускаю claude --version…</span></div>`;
+        selftestHtml = `<div class="install-progress" style="margin-top:10px"><span class="spinner"></span><span>Проверяю proot, песочницу и Claude Code… до 2 минут</span></div>`;
+      } else if (selftest && Array.isArray(selftest.stages)) {
+        selftestHtml = `<div class="selftest">
+          <div class="selftest-summary"><span class="pill ${selftest.ok ? 'ok' : 'err'}">${selftest.ok ? 'Среда работает' : 'Среда не запускается'}</span>
+            ${selftest.ok ? `<span class="faint">движок: ${selftest.engine === 'static' ? 'proot (static)' : 'proot (Termux)'}</span>` : ''}</div>
+          ${selftest.stages.map(st => `<div class="selftest-stage">
+            <div class="selftest-head">${ic(st.ok ? 'check-circle' : 'alert', 'ic-sm')}<span>${escapeHtml(st.name)}</span><span class="faint">${escapeHtml(st.exit || '')} · ${escapeHtml(st.seconds || '0')} с</span></div>
+            ${st.output ? outputBlock(st.output) : (st.ok ? '' : outputBlock('(пустой вывод)'))}
+            ${st.verbose ? `<details class="disclosure"><summary>Подробный журнал proot ${ic('chevron-down', 'ic-sm')}</summary>${outputBlock(st.verbose)}</details>` : ''}
+          </div>`).join('')}
+          <button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="copy-report">${ic('copy', 'ic-sm')}Скопировать отчёт</button>
+        </div>`;
       } else if (selftest) {
-        selftestHtml = `<div style="margin-top:10px"><span class="pill ${selftest.ok ? 'ok' : 'err'}">${selftest.ok ? `Работает · ${Number(selftest.seconds || 0).toFixed(1)} с` : 'Не запускается'}</span>${outputBlock(selftest.output || '(пустой вывод)')}</div>`;
+        selftestHtml = `<div style="margin-top:10px"><span class="pill ${selftest.ok ? 'ok' : 'err'}">${selftest.ok ? 'Работает' : 'Не запускается'}</span>${outputBlock(selftest.output || '(пустой вывод)')}</div>`;
       }
       return `
         <p class="section-hint" style="margin:0 4px 14px">Claude Code работает прямо на телефоне — без ПК и без настройки папок. Системный промпт тот же, что и для Gemini.</p>
@@ -3391,7 +3402,8 @@
         layer.refresh();
         watchProgress();
         try {
-          const res = await api('/api/claude/runtime/install', { method: 'POST' });
+          // force: "Переустановить" must really download and unpack again.
+          const res = await api('/api/claude/runtime/install', { method: 'POST', body: { force: Boolean(state.settings.claudeRuntimeReady) } });
           state.settings.claudeRuntimeReady = Boolean(res.runtimeReady);
           state.settings.claudeAuthenticated = Boolean(res.authenticated);
           toast(state.settings.claudeRuntimeReady ? 'Среда установлена' : 'Установка не завершилась', { type: state.settings.claudeRuntimeReady ? 'success' : 'error' });
@@ -3435,6 +3447,9 @@
         } catch (e) {
           finishLogin(false, e.message);
         }
+      },
+      'copy-report': () => {
+        if (selftest) copyText(selftest.report || selftest.output || '');
       },
       manual: () => {
         if (login.manualUrl) openExternal(login.manualUrl);

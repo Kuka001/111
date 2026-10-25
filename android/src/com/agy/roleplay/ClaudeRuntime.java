@@ -110,6 +110,19 @@ final class ClaudeRuntime {
     /** Download + extracted size with headroom; checked before starting. */
     private static final long REQUIRED_FREE_BYTES = 700L * 1024L * 1024L;
 
+    /**
+     * How the sandbox is launched.
+     * ANDROID: Termux's proot (bionic, Android-specific fixes), shipped in the
+     *   APK assets; this is the build Termux/proot-distro run Claude Code with.
+     * STATIC: Alpine's statically linked upstream proot, downloaded with the
+     *   runtime; kept as a fallback.
+     */
+    enum Engine { ANDROID, STATIC }
+
+    static final String ANDROID_ASSET_DIR = "claude-android";
+    static final String ANDROID_PROOT_VERSION = "termux-proot-5.1.107.101+talloc-2.5.0+shmem-0.7";
+
+    private final Context context; // null in desktop tests: no APK assets
     private final File runtimeDir;
     private final File prootBin;
     private final File rootfsDir;
@@ -117,13 +130,25 @@ final class ClaudeRuntime {
     private final File homeDir;
     private final File tmpDir;
     private final File readyMarker;
+    private final File androidDir;
+    private final File androidProot;
+    private final File androidLoader;
+    private final File androidLoader32;
+    private final File androidLibDir;
+    private final File engineFile;
+    private final File procFakeDir;
 
     ClaudeRuntime(Context context) {
-        this(context.getFilesDir());
+        this(context, context.getFilesDir());
     }
 
     /** Test seam: lets a desktop JVM exercise download/verify/extract. */
     ClaudeRuntime(File filesDir) {
+        this(null, filesDir);
+    }
+
+    private ClaudeRuntime(Context context, File filesDir) {
+        this.context = context;
         this.runtimeDir = new File(filesDir, "claude_runtime");
         this.prootBin = new File(runtimeDir, "proot");
         this.rootfsDir = new File(runtimeDir, "rootfs");
@@ -131,6 +156,13 @@ final class ClaudeRuntime {
         this.homeDir = new File(runtimeDir, "home");
         this.tmpDir = new File(runtimeDir, "tmp");
         this.readyMarker = new File(runtimeDir, ".ready");
+        this.androidDir = new File(runtimeDir, "android");
+        this.androidProot = new File(androidDir, "proot");
+        this.androidLoader = new File(androidDir, "loader");
+        this.androidLoader32 = new File(androidDir, "loader32");
+        this.androidLibDir = new File(androidDir, "lib");
+        this.engineFile = new File(runtimeDir, ".engine");
+        this.procFakeDir = new File(runtimeDir, "procfake");
     }
 
     File getHomeDir() {
@@ -154,7 +186,8 @@ final class ClaudeRuntime {
 
     /** True once the pinned runtime has been fully extracted and chmod'd. */
     boolean isReady() {
-        if (!prootBin.exists() || !claudeBin.exists() || !rootfsDir.isDirectory()) return false;
+        boolean anyProot = prootBin.exists() || context != null;
+        if (!anyProot || !claudeBin.exists() || !rootfsDir.isDirectory()) return false;
         if (!readyMarker.exists()) return false;
         try {
             String have = new String(readAll(new FileInputStream(readyMarker)), StandardCharsets.UTF_8).trim();
@@ -219,8 +252,11 @@ final class ClaudeRuntime {
      * failure; a failed attempt leaves no ready marker. Signed-in credentials in
      * home/ survive a reinstall.
      */
-    synchronized void ensureReady(ProgressSink sink) throws Exception {
-        if (isReady()) return;
+    synchronized void ensureReady(ProgressSink sink, boolean force) throws Exception {
+        if (!force && isReady()) {
+            ensureAndroidProot();
+            return;
+        }
 
         runtimeDir.mkdirs();
         long free = runtimeDir.getUsableSpace();
@@ -283,6 +319,7 @@ final class ClaudeRuntime {
         claudeBin.setExecutable(true, false);
         makeTreeExecutable(rootfsDir);
         writeGuestNetworkConfig();
+        ensureAndroidProot();
 
         writeText(readyMarker, RUNTIME_VERSION);
         if (sink != null) sink.onProgress("Среда Claude готова.");
@@ -301,14 +338,110 @@ final class ClaudeRuntime {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Engines
+    // -------------------------------------------------------------------------
+
+    /** Copies Termux's proot set out of the APK assets (once per version). */
+    synchronized void ensureAndroidProot() throws Exception {
+        if (context == null) return;
+        File marker = new File(androidDir, ".version");
+        if (androidProot.isFile() && marker.isFile()) {
+            String have = new String(readAll(new FileInputStream(marker)), StandardCharsets.UTF_8).trim();
+            if (ANDROID_PROOT_VERSION.equals(have)) return;
+        }
+        deleteRecursive(androidDir);
+        androidLibDir.mkdirs();
+        copyAsset("proot", androidProot);
+        copyAsset("loader", androidLoader);
+        copyAsset("loader32", androidLoader32);
+        copyAsset("libtalloc.so.2", new File(androidLibDir, "libtalloc.so.2"));
+        copyAsset("libandroid-shmem.so", new File(androidLibDir, "libandroid-shmem.so"));
+        for (File f : new File[]{androidProot, androidLoader, androidLoader32}) f.setExecutable(true, false);
+        writeText(marker, ANDROID_PROOT_VERSION);
+    }
+
+    private void copyAsset(String name, File dest) throws Exception {
+        InputStream in = context.getAssets().open(ANDROID_ASSET_DIR + "/" + name);
+        FileOutputStream out = new FileOutputStream(dest);
+        try {
+            byte[] buf = new byte[1 << 16];
+            int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+        } finally {
+            try { out.close(); } catch (Exception ignored) {}
+            try { in.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    boolean hasEngine(Engine e) {
+        if (e == Engine.ANDROID) {
+            try {
+                ensureAndroidProot();
+            } catch (Exception ignored) {
+            }
+            return androidProot.isFile();
+        }
+        return prootBin.isFile();
+    }
+
+    /** The engine that last passed the self-test, else the Android build when available. */
+    Engine preferredEngine() {
+        try {
+            if (engineFile.isFile()) {
+                String v = new String(readAll(new FileInputStream(engineFile)), StandardCharsets.UTF_8).trim();
+                if ("static".equals(v) && hasEngine(Engine.STATIC)) return Engine.STATIC;
+                if ("android".equals(v) && hasEngine(Engine.ANDROID)) return Engine.ANDROID;
+            }
+        } catch (Exception ignored) {
+        }
+        return hasEngine(Engine.ANDROID) ? Engine.ANDROID : Engine.STATIC;
+    }
+
+    void setPreferredEngine(Engine e) {
+        try {
+            writeText(engineFile, e == Engine.STATIC ? "static" : "android");
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** `proot --version` only: shows whether the binary itself can execute. */
+    ProcessBuilder newProotVersionProcess(Engine engine) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add(prootPath(engine));
+        cmd.add("--version");
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.directory(runtimeDir);
+        applyEnv(pb.environment(), engine);
+        return pb;
+    }
+
     /**
      * Builds a configured (not started) ProcessBuilder that runs the Claude CLI
      * under proot, with HOME (/root) as the working directory. Only the runtime's
      * own directories are visible inside the sandbox.
      */
     ProcessBuilder newClaudeProcess(List<String> claudeArgs) {
+        List<String> guest = new ArrayList<>();
+        guest.add(GUEST_CLAUDE);
+        guest.addAll(claudeArgs);
+        return newGuestProcess(preferredEngine(), guest, 0);
+    }
+
+    /** Runs an arbitrary guest command (e.g. /bin/busybox) under the given engine. */
+    ProcessBuilder newGuestProcess(Engine engine, List<String> guestCmd, int verbose) {
+        if (engine == Engine.ANDROID) {
+            try {
+                ensureAndroidProot();
+            } catch (Exception ignored) {
+            }
+        }
         List<String> cmd = new ArrayList<>();
-        cmd.add(prootBin.getAbsolutePath());
+        cmd.add(prootPath(engine));
+        if (verbose > 0) {
+            cmd.add("-v");
+            cmd.add(String.valueOf(verbose));
+        }
         cmd.add("--kill-on-exit");
         cmd.add("--link2symlink");
         cmd.add("-r");
@@ -316,19 +449,27 @@ final class ClaudeRuntime {
         bind(cmd, "/dev");
         bind(cmd, "/proc");
         bind(cmd, "/sys");
+        // Android denies apps several /proc files that runtimes read at start-up.
+        for (String[] fake : procFakes()) bindTo(cmd, fake[0], fake[1]);
         bindTo(cmd, tmpDir.getAbsolutePath(), "/tmp");
         bindTo(cmd, homeDir.getAbsolutePath(), GUEST_HOME);
         bindTo(cmd, claudeBin.getAbsolutePath(), GUEST_CLAUDE);
         cmd.add("-w");
         cmd.add(GUEST_HOME);
-        cmd.add(GUEST_CLAUDE);
-        cmd.addAll(claudeArgs);
+        cmd.addAll(guestCmd);
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(runtimeDir);
         pb.redirectErrorStream(false);
+        applyEnv(pb.environment(), engine);
+        return pb;
+    }
 
-        java.util.Map<String, String> env = pb.environment();
+    private String prootPath(Engine engine) {
+        return (engine == Engine.ANDROID ? androidProot : prootBin).getAbsolutePath();
+    }
+
+    private void applyEnv(java.util.Map<String, String> env, Engine engine) {
         env.put("HOME", GUEST_HOME);
         env.put("USER", "root");
         env.put("LOGNAME", "root");
@@ -337,20 +478,68 @@ final class ClaudeRuntime {
         env.put("LC_ALL", "C.UTF-8");
         env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
         env.put("TMPDIR", "/tmp");
+        tmpDir.mkdirs();
         env.put("PROOT_TMP_DIR", tmpDir.getAbsolutePath());
         // proot's seccomp acceleration is unreliable across Android kernels; the
         // slower ptrace-only path is far more compatible.
         env.put("PROOT_NO_SECCOMP", "1");
-        // Reduce chatter on a phone. (CI=1 is NOT set here: it would break the
-        // interactive setup-token login; the generation path sets it explicitly.)
+        // Reduce chatter on a phone. (CI=1 is set by the generation path only.)
         env.put("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
         // The binary is pinned and verified by this app; it must not replace itself.
         env.put("DISABLE_AUTOUPDATER", "1");
-        // Android's environment (ANDROID_*, BOOTCLASSPATH, LD_PRELOAD...) means
-        // nothing inside the musl guest and LD_PRELOAD would break it.
         env.remove("LD_PRELOAD");
-        env.remove("LD_LIBRARY_PATH");
-        return pb;
+        if (engine == Engine.ANDROID) {
+            // Termux's proot is a bionic binary: its libraries come from here, and
+            // its loaders are not at the Termux paths compiled into it.
+            env.put("LD_LIBRARY_PATH", androidLibDir.getAbsolutePath());
+            env.put("PROOT_LOADER", androidLoader.getAbsolutePath());
+            env.put("PROOT_LOADER_32", androidLoader32.getAbsolutePath());
+        } else {
+            env.remove("LD_LIBRARY_PATH");
+        }
+    }
+
+    private List<String[]> procFakes = null;
+
+    /** {host fake file, guest /proc path} pairs for /proc entries Android hides from apps. */
+    private synchronized List<String[]> procFakes() {
+        if (procFakes != null) return procFakes;
+        List<String[]> out = new ArrayList<>();
+        String[][] fakes = new String[][]{
+            {"loadavg", "0.12 0.07 0.02 2/165 765\n"},
+            {"stat", "cpu  1957 0 2877 93280 262 342 254 87 0 0\n"
+                + "cpu0 1957 0 2877 93280 262 342 254 87 0 0\n"
+                + "intr 0\nctxt 0\nbtime 0\nprocesses 0\nprocs_running 1\nprocs_blocked 0\nsoftirq 0 0 0 0 0 0 0 0 0 0 0\n"},
+            {"uptime", "124.08 932.80\n"},
+            {"version", "Linux version 5.15.0-android (agy@roleplay) (clang) #1 SMP PREEMPT\n"},
+            {"vmstat", "nr_free_pages 136932\nnr_inactive_anon 1\nnr_active_anon 1\nnr_inactive_file 1\nnr_active_file 1\n"},
+        };
+        procFakeDir.mkdirs();
+        for (String[] f : fakes) {
+            if (canRead(new File("/proc/" + f[0]))) continue;
+            File fake = new File(procFakeDir, f[0]);
+            try {
+                writeText(fake, f[1]);
+                out.add(new String[]{fake.getAbsolutePath(), "/proc/" + f[0]});
+            } catch (Exception ignored) {
+            }
+        }
+        procFakes = out;
+        return out;
+    }
+
+    private static boolean canRead(File f) {
+        try {
+            FileInputStream in = new FileInputStream(f);
+            try {
+                in.read(new byte[64]);
+            } finally {
+                in.close();
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private static void bind(List<String> cmd, String path) {

@@ -1508,7 +1508,7 @@ public class LocalBackendServer {
             return handleClaudeStatus();
         }
         if (path.equals("/api/claude/runtime/install") && method.equals("POST")) {
-            return handleClaudeRuntimeInstall();
+            return handleClaudeRuntimeInstall(body);
         }
         if (path.equals("/api/claude/auth/start") && method.equals("POST")) {
             return handleClaudeAuthStart();
@@ -2440,7 +2440,8 @@ public class LocalBackendServer {
         return res;
     }
 
-    private JSONObject handleClaudeRuntimeInstall() throws Exception {
+    private JSONObject handleClaudeRuntimeInstall(JSONObject body) throws Exception {
+        boolean force = body.optBoolean("force", false);
         if (claudeInstalling) {
             return errorJson(409, "Установка среды уже идёт.");
         }
@@ -2455,7 +2456,7 @@ public class LocalBackendServer {
                     claudeInstallProgress = message;
                     android.util.Log.i("ClaudeRuntime", message);
                 }
-            });
+            }, force);
         } catch (Exception e) {
             return errorJson(500, "Не удалось установить среду Claude: " + (e.getMessage() != null ? e.getMessage() : "ошибка"));
         } finally {
@@ -2560,7 +2561,7 @@ public class LocalBackendServer {
                     if (pendingClaudeAuthProcess == proc) pendingClaudeAuthProcess = null;
                     if (!claudeRuntime.isAuthenticated()) {
                         String out = loginOutputTail();
-                        claudeLoginError = "Вход не завершён (код " + code + ")" + (out.isEmpty() ? "." : ":\n" + out);
+                        claudeLoginError = "Вход не завершён (" + describeExit(code) + ")" + (out.isEmpty() ? "." : ":\n" + out);
                     }
                 } catch (InterruptedException ignored) {
                 }
@@ -2649,24 +2650,102 @@ public class LocalBackendServer {
         return res;
     }
 
-    /** Runs `claude --version` under proot to show whether the sandbox works at all. */
+    /**
+     * Staged diagnostics: (1) does proot execute, (2) does the Alpine sandbox run
+     * a trivial command, (3) does Claude Code start. A failing stage is re-run
+     * with proot's verbose log. If the Android build of proot fails, the static
+     * build is tried too, and whichever passes becomes the preferred engine.
+     */
     private JSONObject handleClaudeSelfTest() throws Exception {
-        JSONObject res = new JSONObject();
         if (!claudeRuntime.isReady()) {
             return errorJson(409, "Сначала скачайте среду Claude Code.");
         }
-        List<String> args = new ArrayList<>();
-        args.add("--version");
+        JSONArray stages = new JSONArray();
+        StringBuilder report = new StringBuilder();
+        report.append("AGY Claude Code self-test · engine build ").append(getEngineBuild())
+            .append(" · Android ").append(android.os.Build.VERSION.RELEASE)
+            .append(" (API ").append(android.os.Build.VERSION.SDK_INT).append(") · ")
+            .append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL)
+            .append(" · ").append(android.os.Build.SUPPORTED_ABIS.length > 0 ? android.os.Build.SUPPORTED_ABIS[0] : "?")
+            .append("\nruntime ").append(ClaudeRuntime.version()).append("\n");
+
+        ClaudeRuntime.Engine working = null;
+        ClaudeRuntime.Engine[] order = claudeRuntime.preferredEngine() == ClaudeRuntime.Engine.STATIC
+            ? new ClaudeRuntime.Engine[]{ClaudeRuntime.Engine.STATIC, ClaudeRuntime.Engine.ANDROID}
+            : new ClaudeRuntime.Engine[]{ClaudeRuntime.Engine.ANDROID, ClaudeRuntime.Engine.STATIC};
+        for (ClaudeRuntime.Engine engine : order) {
+            if (!claudeRuntime.hasEngine(engine)) continue;
+            String label = engine == ClaudeRuntime.Engine.ANDROID ? "proot (Termux)" : "proot (static)";
+            JSONObject s1 = runStage(label + " · запуск", claudeRuntime.newProotVersionProcess(engine), 20000L, null);
+            stages.put(s1);
+            appendStage(report, s1);
+            if (!s1.optBoolean("ok")) continue;
+
+            List<String> probe = new ArrayList<>();
+            probe.add("/bin/busybox");
+            probe.add("echo");
+            probe.add("agy-sandbox-ok");
+            JSONObject s2 = runStage(label + " · песочница Alpine",
+                claudeRuntime.newGuestProcess(engine, probe, 0), 30000L, "agy-sandbox-ok");
+            if (!s2.optBoolean("ok")) {
+                s2.put("verbose", runStage("verbose", claudeRuntime.newGuestProcess(engine, probe, 2), 30000L, null).optString("output"));
+            }
+            stages.put(s2);
+            appendStage(report, s2);
+            if (!s2.optBoolean("ok")) continue;
+
+            List<String> version = new ArrayList<>();
+            version.add(ClaudeRuntime.GUEST_CLAUDE);
+            version.add("--version");
+            JSONObject s3 = runStage(label + " · Claude Code",
+                claudeRuntime.newGuestProcess(engine, version, 0), 90000L, null);
+            if (!s3.optBoolean("ok")) {
+                s3.put("verbose", runStage("verbose", claudeRuntime.newGuestProcess(engine, version, 1), 90000L, null).optString("output"));
+            }
+            stages.put(s3);
+            appendStage(report, s3);
+            if (s3.optBoolean("ok")) {
+                working = engine;
+                break;
+            }
+        }
+        if (working != null) claudeRuntime.setPreferredEngine(working);
+
+        JSONObject res = new JSONObject();
+        res.put("ok", working != null);
+        res.put("engine", working == null ? "" : (working == ClaudeRuntime.Engine.ANDROID ? "android" : "static"));
+        res.put("stages", stages);
+        // Back-compat with the 1.6.2 UI, which only shows `output`.
+        res.put("output", report.toString().trim());
+        res.put("report", report.toString().trim());
+        return res;
+    }
+
+    private void appendStage(StringBuilder report, JSONObject s) {
+        report.append("\n[").append(s.optBoolean("ok") ? "OK" : "FAIL").append("] ").append(s.optString("name"))
+            .append(" · ").append(s.optString("exit")).append(" · ").append(s.optString("seconds")).append(" c\n");
+        String out = s.optString("output").trim();
+        if (!out.isEmpty()) report.append(out).append("\n");
+        String verbose = s.optString("verbose").trim();
+        if (!verbose.isEmpty()) report.append("--- verbose ---\n").append(verbose).append("\n");
+    }
+
+    /** Runs one diagnostic process with a timeout; ok = exit 0 (and expected text, if given). */
+    private JSONObject runStage(String name, ProcessBuilder pb, long timeoutMs, String expect) throws Exception {
+        JSONObject r = new JSONObject();
+        r.put("name", name);
         long started = System.currentTimeMillis();
+        pb.redirectErrorStream(true);
         Process proc;
         try {
-            ProcessBuilder pb = claudeRuntime.newClaudeProcess(args);
-            pb.redirectErrorStream(true);
             proc = pb.start();
         } catch (Exception e) {
-            res.put("ok", false);
-            res.put("output", "Не удалось запустить proot: " + e.getMessage());
-            return res;
+            r.put("ok", false);
+            r.put("exitCode", -2);
+            r.put("exit", "не запустился");
+            r.put("seconds", "0.0");
+            r.put("output", "Не удалось запустить: " + e.getMessage());
+            return r;
         }
         try { proc.getOutputStream().close(); } catch (Exception ignored) {}
         final StringBuilder out = new StringBuilder();
@@ -2678,7 +2757,7 @@ public class LocalBackendServer {
                     BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
                     String l;
                     while ((l = br.readLine()) != null) {
-                        synchronized (out) { if (out.length() < 4000) out.append(stripAnsi(l)).append("\n"); }
+                        synchronized (out) { if (out.length() < 6000) out.append(stripAnsi(l)).append("\n"); }
                     }
                 } catch (Exception ignored) {
                 }
@@ -2687,22 +2766,40 @@ public class LocalBackendServer {
         t.setDaemon(true);
         t.start();
         boolean finished = false;
-        while (System.currentTimeMillis() - started < 60000L) {
+        while (System.currentTimeMillis() - started < timeoutMs) {
             if (!isAlive(proc)) { finished = true; break; }
-            try { Thread.sleep(200); } catch (InterruptedException ignored) { break; }
+            try { Thread.sleep(100); } catch (InterruptedException ignored) { break; }
         }
         if (!finished) {
             try { proc.destroy(); } catch (Exception ignored) {}
         }
-        try { t.join(1000); } catch (InterruptedException ignored) {}
+        try { t.join(1500); } catch (InterruptedException ignored) {}
         int code = finished ? proc.exitValue() : -1;
         String text;
         synchronized (out) { text = out.toString().trim(); }
-        res.put("ok", finished && code == 0);
-        res.put("exitCode", code);
-        res.put("seconds", (System.currentTimeMillis() - started) / 1000.0);
-        res.put("output", finished ? text : ("Нет ответа за 60 секунд." + (text.isEmpty() ? "" : "\n" + text)));
-        return res;
+        boolean ok = finished && code == 0 && (expect == null || text.contains(expect));
+        r.put("ok", ok);
+        r.put("exitCode", code);
+        r.put("exit", finished ? describeExit(code) : "нет ответа за " + (timeoutMs / 1000) + " с");
+        r.put("seconds", String.format(Locale.US, "%.1f", (System.currentTimeMillis() - started) / 1000.0));
+        r.put("output", text);
+        return r;
+    }
+
+    /** Exit code with the signal spelled out (Java reports 128 + signal for killed processes). */
+    static String describeExit(int code) {
+        if (code > 128 && code < 160) {
+            int sig = code - 128;
+            String[] names = {"", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE",
+                "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGSTKFLT", "SIGCHLD",
+                "SIGCONT", "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU", "SIGXFSZ", "SIGVTALRM",
+                "SIGPROF", "SIGWINCH", "SIGIO", "SIGPWR", "SIGSYS"};
+            String name = sig < names.length ? names[sig] : ("сигнал " + sig);
+            String hint = sig == 31 ? " — системный вызов запрещён Android (seccomp)"
+                : sig == 11 ? " — сбой памяти" : sig == 4 ? " — недопустимая инструкция" : sig == 9 ? " — процесс убит" : "";
+            return "код " + code + " (" + name + hint + ")";
+        }
+        return "код " + code;
     }
 
     private JSONObject handleClaudeAuthLogout() throws Exception {
@@ -3426,7 +3523,7 @@ public class LocalBackendServer {
         }
         if (reply.isEmpty()) {
             String err = stderr.toString().trim();
-            throw new Exception("Claude Code CLI вернул пустой ответ (код " + exit + ")"
+            throw new Exception("Claude Code CLI вернул пустой ответ (" + describeExit(exit) + ")"
                 + (err.isEmpty() ? "" : ": " + (err.length() > 300 ? err.substring(0, 300) : err)));
         }
         prog.addLog("✅ Claude Code завершил ответ (" + reply.length() + " симв., чанков: " + chunks + ")");

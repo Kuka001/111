@@ -1,12 +1,27 @@
 {
     "appName":  "AGY Roleplay Studio",
-    "version":  "1.6.2",
-    "build":  20,
+    "version":  "1.6.3",
+    "build":  21,
     "releaseDate":  "2026-10-25",
     "gitRepo":  "Kuka001/111",
     "gitBranch":  "main",
     "apkPath":  "agy-roleplay-android16.apk",
     "releases":  [
+                     {
+                         "version":  "1.6.3",
+                         "build":  21,
+                         "date":  "2026-10-25",
+                         "title":  "Claude Code: proot из Termux для Android, подробная проверка запуска, рабочая переустановка",
+                         "ref":  "main",
+                         "changelog":  [
+                                           "Исправлено: «Переустановить» мгновенно сообщал об успехе, ничего не скачивая",
+                                           "Среда запускается через proot из Termux (сборка под Android) — ту же, на которой Claude Code работает в Termux/proot-distro; статическая сборка Alpine осталась запасной",
+                                           "Повторно скачивать среду не нужно: файлы proot из Termux входят в APK",
+                                           "Заглушки для /proc, которые Android скрывает от приложений (как в proot-distro)",
+                                           "«Проверить запуск» теперь проверяет по шагам — proot, песочницу Alpine, Claude Code — с кодом выхода, расшифровкой сигнала и подробным журналом; рабочий вариант запоминается",
+                                           "Кнопка «Скопировать отчёт» для отправки диагностики"
+                                       ]
+                     },
                      {
                          "version":  "1.6.2",
                          "build":  20,
@@ -290,7 +305,7 @@
                                        ]
                      }
                  ],
-    "apkSha256":  "beee4aeaaf6374f63e7ebd5579f5bbcd53d8b0df141b7a0b87e3b3fa06cc4800",
-    "apkSize":  164669,
-    "otaSignature":  "oasjIrlZ5xIlBKnz8iI7BTq1y7JxvqFcQtudmAoK49ZcCygM40nab4l5JEyPdaKVfz3y7m/c5oMT7Kr8fiebbiLaN2ehTbSFnq7toj/JXANPeS2HBsPMckn49X0XkiLLahW52IDk1yLg+aNWjd30m+8RVeiyuIFOlam+2xQ1l1LcC4lEaHiCxbZr7HfeQHEdsDaLkj/whSHx4JM1AJnEqhUihA5YZxeRTAUrhPcTUwqQDyLToPrZHx9bKe6a6DmbwM78rBMRPygD5You5aY3ig9GFbptB+xN9n6l2z6M0c3Sxvk/RCsZGpY8iMXIp1uYS+q1PaaUJpTxfhgd0Ufbaw=="
+    "apkSha256":  "55b107ad516201fb4282fe60674af5ffa474708a25bf15894ef8fb8a3ff3aa6b",
+    "apkSize":  308500,
+    "otaSignature":  "geDv8yBuEFyi1upPfoZuz8HNF3XPnINofjp+ROS/GZW8TriNLWzAEmARUDAFSotqay4kq/i76lRm+EnyyOV6RIDmgXiR2tHf/M0lAnFHXF1oavVUubs2f9cd3iJOp42yD+1qr/GTlYL2XDxSorT6DOL+xUQ+dQO1cobBZ1txFHVKRy93DRKTvRLqvjAuFOiYRvJIQ83GtLqTMmrgP0+u7/A5DUArj/HjWht03ljLLjJrLS6ApXIp3/BSEFBckBrVxhcv26zvTrIUMy9Y39L/pmVyWfnErx3NVuscsXn0P0IqfH+TCK4jSCAONkSLM9QWmgAAcsi2yz28CH2gWhYxeg=="
 }

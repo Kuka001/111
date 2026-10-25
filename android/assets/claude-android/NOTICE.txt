@@ -1,0 +1,28 @@
+Android build of proot used by the on-device Claude Code runtime
+================================================================
+
+These files are unmodified binaries from the Termux package repository
+(https://packages.termux.dev/apt/termux-main/, aarch64). They are shipped
+inside the APK because Android cannot decompress the repository's .deb/xz
+packages without extra native code.
+
+  proot, loader, loader32
+    package   proot 5.1.107.101 (proot_5.1.107.101_aarch64.deb,
+              sha256 a28355e9be257e1f87f4e9294b3118470d4fd7a5442fed8b278f4443c83407d7)
+    license   GPL-2.0-or-later
+    source    https://github.com/termux/proot
+              https://github.com/termux/termux-packages/tree/master/packages/proot
+
+  libtalloc.so.2
+    package   libtalloc 2.5.0 (libtalloc_2.5.0_aarch64.deb,
+              sha256 556591f43bb773ad8777e1a29522640866a55f95dab71914418b94a8c58ad5a7)
+    license   LGPL-3.0-or-later
+    source    https://www.samba.org/ftp/talloc/talloc-2.5.0.tar.gz
+
+  libandroid-shmem.so
+    package   libandroid-shmem 0.7 (libandroid-shmem_0.7_aarch64.deb,
+              sha256 0da3a24d558b93c92bcf8d611e0826a99ff96e396b148e6cdf33b47c47c57ff6)
+    license   BSD-3-Clause
+    source    https://github.com/termux/libandroid-shmem
+
+The complete corresponding source code is available at the URLs above.

@@ -16,7 +16,7 @@
   'use strict';
 
   const params = new URLSearchParams(location.search);
-  const ENGINE = Number(params.get('engine') || 20);
+  const ENGINE = Number(params.get('engine') || 21);
   const LEGACY = ENGINE < 18;
   const DELAY = Number(params.get('delay') || 120);
 
@@ -604,9 +604,19 @@
     if (path === '/api/claude/auth/logout') { db.claudeLoginPending = false; db.settings.claudeAuthenticated = false; return { ok: true }; }
     if (path === '/api/claude/selftest') {
       await sleep(1200);
-      return params.get('loginfail') === '1'
-        ? { ok: false, exitCode: 1, seconds: 0.4, output: 'proot error: ptrace(TRACEME): Operation not permitted (mock)' }
-        : { ok: true, exitCode: 0, seconds: 1.2, output: '2.1.310 (Claude Code)' };
+      const fail = params.get('loginfail') === '1';
+      const stages = fail ? [
+        { name: 'proot (Termux) · запуск', ok: true, exit: 'код 0', seconds: '0.1', output: 'proot 5.1.107-65 (mock)' },
+        { name: 'proot (Termux) · песочница Alpine', ok: false, exit: 'код 159 (SIGSYS — системный вызов запрещён Android (seccomp))', seconds: '0.2', output: '', verbose: 'proot info: vpid 1: terminated with signal 31 (mock)' },
+        { name: 'proot (static) · запуск', ok: true, exit: 'код 0', seconds: '0.1', output: 'proot v5.4.0 (mock)' },
+        { name: 'proot (static) · песочница Alpine', ok: false, exit: 'код 159 (SIGSYS — системный вызов запрещён Android (seccomp))', seconds: '0.2', output: '' },
+      ] : [
+        { name: 'proot (Termux) · запуск', ok: true, exit: 'код 0', seconds: '0.1', output: 'proot 5.1.107-65 (mock)' },
+        { name: 'proot (Termux) · песочница Alpine', ok: true, exit: 'код 0', seconds: '0.4', output: 'agy-sandbox-ok' },
+        { name: 'proot (Termux) · Claude Code', ok: true, exit: 'код 0', seconds: '3.2', output: '2.1.310 (Claude Code)' },
+      ];
+      const report = 'AGY Claude Code self-test (mock)\n' + stages.map(s => '[' + (s.ok ? 'OK' : 'FAIL') + '] ' + s.name + ' · ' + s.exit).join('\n');
+      return { ok: !fail, engine: fail ? '' : 'android', stages, output: report, report };
     }
 
     if (path === '/api/updates/check') {
