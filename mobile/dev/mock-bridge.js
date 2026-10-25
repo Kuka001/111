@@ -16,7 +16,7 @@
   'use strict';
 
   const params = new URLSearchParams(location.search);
-  const ENGINE = Number(params.get('engine') || 23);
+  const ENGINE = Number(params.get('engine') || 24);
   const LOGIN_HANG = params.get('loginhang') === '1';
   const MOCK_SNAPSHOT = ['pid 4241 proot · S (sleeping) · потоков 1 · tracer 0',
     '  $ proot … /opt/claude auth login --claudeai --debug-to-stderr',
@@ -580,6 +580,7 @@
         runtimeUrlConfigured: ENGINE >= 19, downloadMb: 128, installing: !!db.claudeInstalling, installProgress: db.claudeInstallProgress || '',
         loginPending: !!db.claudeLoginPending, loginError: db.claudeLoginError || '',
         loginTimeout: ENGINE >= 23 ? 75 : 0,
+        credentialsStamp: ENGINE >= 24 ? (db.credentialsStamp || 0) : undefined, loginBaseStamp: ENGINE >= 24 ? (db.loginBaseStamp || 0) : undefined, engine: 'direct',
         selftestRunning: !!db.claudeSelftestRunning, selftestProgress: db.claudeSelftestProgress || '', safeMode: !!db.claudeSafeMode,
         loginUrl: !LOGIN_HANG && db.claudeLoginStarted && Date.now() - db.claudeLoginStarted > 3000 ? 'https://claude.ai/oauth/authorize?code=true&client_id=mock&response_type=code&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&state=mockstate' : '',
         loginAutoUrl: !LOGIN_HANG && db.claudeLoginStarted && Date.now() - db.claudeLoginStarted > 3000 ? 'https://claude.ai/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback' : '',
@@ -611,8 +612,9 @@
       db.claudeLoginPending = true;
       db.claudeLoginError = '';
       db.claudeLoginStarted = Date.now();
+      db.loginBaseStamp = db.credentialsStamp || 0;
       // Simulate the browser redirecting back to the CLI's localhost listener.
-      if (params.get('autologin') === '1') setTimeout(() => { if (db.claudeLoginPending) { db.claudeLoginPending = false; db.settings.claudeAuthenticated = true; } }, 9000);
+      if (params.get('autologin') === '1') setTimeout(() => { if (db.claudeLoginPending) { db.claudeLoginPending = false; db.settings.claudeAuthenticated = true; db.credentialsStamp = Date.now(); } }, 9000);
       // ?loginhang=1: Claude Code never prints a link; the watchdog gives up (8 s here, 75 s on the phone).
       if (LOGIN_HANG) {
         setTimeout(() => {
@@ -625,9 +627,10 @@
     }
     if (path === '/api/claude/auth/exchange') {
       if (!String(body.code || '').includes('#')) return err(400, 'Скопируйте код целиком — вместе с частью после «#».');
-      db.claudeLoginPending = false; db.settings.claudeAuthenticated = true; return { ok: true, authenticated: true };
+      db.claudeLoginPending = false; db.settings.claudeAuthenticated = true; db.credentialsStamp = Date.now(); return { ok: true, authenticated: true };
     }
-    if (path === '/api/claude/auth/logout') { db.claudeLoginPending = false; db.settings.claudeAuthenticated = false; return { ok: true }; }
+    if (path === '/api/claude/auth/logout') { db.claudeLoginPending = false; db.settings.claudeAuthenticated = false; db.credentialsStamp = 0; return { ok: true }; }
+    if (path === '/api/claude/auth/cancel') { db.claudeLoginPending = false; return { ok: true, authenticated: db.settings.claudeAuthenticated }; }
     if (path === '/api/claude/selftest') {
       const fail = params.get('loginfail') === '1';
       // ?hang=1: plain start hangs, the safe Bun mode works. ?hang=2: every mode hangs.

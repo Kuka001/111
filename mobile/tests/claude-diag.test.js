@@ -14,7 +14,7 @@ const { spawnSync } = require('node:child_process');
 const dir = path.join(__dirname, '..', '..', 'android', 'assets', 'claude-diag');
 
 test('diagnostic preload scripts parse', () => {
-  for (const name of ['probe.mjs', 'trace.cjs']) {
+  for (const name of ['probe.mjs', 'trace.cjs', 'android.cjs']) {
     const r = spawnSync(process.execPath, ['--check', path.join(dir, name)], { encoding: 'utf8' });
     assert.strictEqual(r.status, 0, `${name}: ${r.stderr}`);
   }
@@ -31,6 +31,23 @@ test('probe runs every step and ends with "done"', () => {
   const finished = lines.filter((l) => /\] (ok|FAIL) /.test(l)).length;
   assert.strictEqual(finished, started);
   assert.ok(lines.some((l) => /ok таймер 0 мс/.test(l)));
+});
+
+test('android shim points the resolver at AGY_DNS_SERVERS and tolerates getifaddrs failures', () => {
+  const script = [
+    "const os = require('node:os');",
+    "require('node:os').networkInterfaces = os.networkInterfaces;",
+    "console.log(JSON.stringify(require('node:dns').getServers()));",
+    "console.log(typeof os.networkInterfaces());",
+  ].join('\n');
+  const r = spawnSync(process.execPath, ['-r', path.join(dir, 'android.cjs'), '-e', script], {
+    encoding: 'utf8',
+    env: { ...process.env, AGY_DNS_SERVERS: '192.0.2.53, 198.51.100.53' },
+  });
+  assert.strictEqual(r.status, 0, r.stderr);
+  const [servers, kind] = r.stdout.trim().split('\n');
+  assert.deepStrictEqual(JSON.parse(servers), ['192.0.2.53', '198.51.100.53']);
+  assert.strictEqual(kind, 'object');
 });
 
 test('trace reports child processes and the exit code', () => {

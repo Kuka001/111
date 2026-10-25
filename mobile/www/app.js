@@ -453,6 +453,7 @@
     systemBars: () => !hasBridge || typeof window.AndroidServer.setSystemBars === 'function',
     claudeInstall: () => state.engineBuild >= 19,
     claudeLogin: () => state.engineBuild >= 20,
+    claudeCancelLogin: () => state.engineBuild >= 24,
   };
 
   const THEMES = {
@@ -996,6 +997,9 @@
       state.settings.claudeSelftestRunning = Boolean(data.selftestRunning);
       state.settings.claudeSelftestProgress = data.selftestProgress || '';
       state.settings.claudeSafeMode = Boolean(data.safeMode);
+      // Engine 24+: sign-in is done when new credentials appear (not old ones).
+      state.settings.claudeCredentialsStamp = data.credentialsStamp;
+      state.settings.claudeLoginBaseStamp = data.loginBaseStamp;
       if (state.tab === 'settings') renderSettingsTab();
       refreshLayers();
     } catch (e) {
@@ -3272,7 +3276,8 @@
     const outputBlock = (text) => `<div class="console" style="margin-top:10px;max-height:28vh">${escapeHtml(text)}</div>`;
 
     const loginBody = (s) => {
-      if (s.claudeAuthenticated) {
+      // While signing in again the old sign-in still counts: show the new link.
+      if (s.claudeAuthenticated && login.phase !== 'starting' && login.phase !== 'waiting') {
         return `<div class="step-text">Вход выполнен. Модели Claude Code готовы к работе.</div>
           <div class="btn-row"><button class="btn btn-secondary btn-sm" data-act="login">${ic('login')}Войти заново</button><button class="btn btn-danger btn-sm" data-act="logout">${ic('logout')}Выйти</button></div>`;
       }
@@ -3340,7 +3345,7 @@
       if (!Array.isArray(st.stages)) {
         return `<div style="margin-top:10px"><span class="pill ${st.ok ? 'ok' : 'err'}">${st.ok ? 'Работает' : 'Не запускается'}</span>${outputBlock(st.output || '(пустой вывод)')}</div>`;
       }
-      const engine = st.engine === 'static' ? 'proot (static)' : 'proot (Termux)';
+      const engine = { direct: 'напрямую, без proot', static: 'proot (static)', android: 'proot (Termux)' }[st.engine] || st.engine;
       return `<div class="selftest">
         <div class="selftest-summary"><span class="pill ${st.ok ? 'ok' : 'err'}">${st.ok ? 'Claude Code запускается' : 'Claude Code не запускается'}</span>
           ${st.engine ? `<span class="faint">движок: ${engine}${st.safeMode ? ' · безопасный режим Bun' : ''}</span>` : ''}</div>
@@ -3437,7 +3442,10 @@
       loginTimer = setInterval(async () => {
         await refreshClaudeStatus();
         const s = state.settings;
-        if (s.claudeAuthenticated) finishLogin(true);
+        const signedIn = s.claudeCredentialsStamp === undefined
+          ? s.claudeAuthenticated
+          : s.claudeAuthenticated && s.claudeCredentialsStamp !== s.claudeLoginBaseStamp;
+        if (signedIn) finishLogin(true);
         else if (!s.claudeLoginPending && s.claudeLoginError) finishLogin(false, s.claudeLoginError);
         else if (Date.now() - startedAt > 15 * 60 * 1000) finishLogin(false, 'Время ожидания входа истекло. Попробуйте снова.');
         else layer.refresh();
@@ -3456,7 +3464,8 @@
     refreshClaudeStatus().then(() => {
       if (state.settings.claudeInstalling) watchProgress();
       if (selftestRunning()) watchSelftest();
-      if (state.settings.claudeLoginPending && !state.settings.claudeAuthenticated) {
+      const s = state.settings;
+      if (s.claudeLoginPending && (!s.claudeAuthenticated || (s.claudeCredentialsStamp !== undefined && s.claudeCredentialsStamp === s.claudeLoginBaseStamp))) {
         login.phase = 'waiting';
         layer.refresh();
         watchLogin();
@@ -3584,11 +3593,12 @@
       'cancel-login': async () => {
         clearInterval(loginTimer);
         try {
-          await api('/api/claude/auth/logout', { method: 'POST' });
+          // Older engines can only stop a sign-in by signing out.
+          const res = await api(can.claudeCancelLogin() ? '/api/claude/auth/cancel' : '/api/claude/auth/logout', { method: 'POST' });
+          state.settings.claudeAuthenticated = Boolean(res.authenticated);
         } catch (e) {
-          // nothing to cancel
+          state.settings.claudeAuthenticated = false;
         }
-        state.settings.claudeAuthenticated = false;
         login.phase = 'idle';
         login.error = '';
         login.codeDraft = '';

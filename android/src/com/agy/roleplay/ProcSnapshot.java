@@ -32,11 +32,11 @@ final class ProcSnapshot {
     private static final int MAX_THREADS = 40;
     private static final int MAX_FDS = 24;
 
-    /** Describes every descendant of {@code rootPid} (normally the app's own pid). */
-    static String ofDescendants(int rootPid, String hidePrefix) {
-        Map<Integer, List<Integer>> children = new HashMap<>();
+    /** Child pids by parent pid; null when /proc cannot be listed. */
+    private static Map<Integer, List<Integer>> childrenByParent() {
         File[] entries = new File("/proc").listFiles();
-        if (entries == null) return "(нет доступа к /proc)";
+        if (entries == null) return null;
+        Map<Integer, List<Integer>> children = new HashMap<>();
         for (File e : entries) {
             int pid = toInt(e.getName());
             if (pid <= 0) continue;
@@ -49,6 +49,47 @@ final class ProcSnapshot {
             }
             list.add(pid);
         }
+        return children;
+    }
+
+    /** Every descendant of {@code pid}, deepest first (sandboxed processes before their proot). */
+    static List<Integer> descendants(int pid) {
+        List<Integer> out = new ArrayList<>();
+        Map<Integer, List<Integer>> children = childrenByParent();
+        if (children != null) collect(pid, children, out);
+        return out;
+    }
+
+    private static void collect(int pid, Map<Integer, List<Integer>> children, List<Integer> out) {
+        List<Integer> kids = children.get(pid);
+        if (kids == null) return;
+        for (int kid : kids) {
+            collect(kid, children, out);
+            out.add(kid);
+        }
+    }
+
+    /** Direct children of {@code pid} running an executable from under {@code dir}. */
+    static List<Integer> childrenRunningFrom(int pid, String dir) {
+        List<Integer> out = new ArrayList<>();
+        Map<Integer, List<Integer>> children = childrenByParent();
+        List<Integer> kids = children != null ? children.get(pid) : null;
+        if (kids == null) return out;
+        for (int kid : kids) {
+            try {
+                String exe = Files.readSymbolicLink(Paths.get("/proc/" + kid + "/exe")).toString();
+                if (exe.startsWith(dir + "/")) out.add(kid);
+            } catch (Exception ignored) {
+                // gone, or not ours to inspect
+            }
+        }
+        return out;
+    }
+
+    /** Describes every descendant of {@code rootPid} (normally the app's own pid). */
+    static String ofDescendants(int rootPid, String hidePrefix) {
+        Map<Integer, List<Integer>> children = childrenByParent();
+        if (children == null) return "(нет доступа к /proc)";
         StringBuilder sb = new StringBuilder();
         List<Integer> top = children.get(rootPid);
         if (top == null || top.isEmpty()) return "(дочерних процессов нет)";

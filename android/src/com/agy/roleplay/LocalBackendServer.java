@@ -132,6 +132,9 @@ public class LocalBackendServer {
     private final StringBuilder claudeLoginOutput = new StringBuilder();
     private volatile String claudeLoginManualUrl = "";
     private volatile long claudeLoginStartedAt = 0L;
+    // Credentials stamp when the current sign-in began: "Войти заново" is done
+    // only once Claude Code has written new credentials, not because old ones exist.
+    private volatile long claudeLoginBaseStamp = 0L;
     private static final String CLAUDE_LOGIN_DEBUG_LOG = "agy-login-debug.log";
     /** No sign-in link by then means Claude Code hung while starting. */
     private static final long CLAUDE_LOGIN_START_TIMEOUT_MS = 75000L;
@@ -192,10 +195,7 @@ public class LocalBackendServer {
             if (conn != null) {
                 try { conn.disconnect(); } catch (Exception ignored) {}
             }
-            Process proc = activeProcess;
-            if (proc != null) {
-                try { proc.destroy(); } catch (Exception ignored) {}
-            }
+            ClaudeRuntime.kill(activeProcess);
         }
 
         void throwIfCancelled() throws Exception {
@@ -1528,8 +1528,20 @@ public class LocalBackendServer {
         if (path.equals("/api/claude/auth/logout") && method.equals("POST")) {
             return handleClaudeAuthLogout();
         }
+        if (path.equals("/api/claude/auth/cancel") && method.equals("POST")) {
+            // Stops a sign-in in progress; an existing sign-in stays.
+            stopPendingClaudeAuth();
+            claudeLoginError = "";
+            JSONObject res = new JSONObject();
+            res.put("ok", true);
+            res.put("authenticated", claudeRuntime.isAuthenticated());
+            return res;
+        }
         if (path.equals("/api/claude/selftest") && method.equals("POST")) {
             return handleClaudeSelfTest();
+        }
+        if (path.equals("/api/dev/exec") && method.equals("POST") && isDebuggableBuild()) {
+            return handleDevExec(body);
         }
 
         return errorJson(404, "Неизвестный маршрут APK-сервера: " + method + " " + path);
@@ -2451,9 +2463,12 @@ public class LocalBackendServer {
         res.put("loginAutoUrl", readFirstUrl(claudeRuntime.browserUrlFile()));
         res.put("loginElapsed", claudeLoginStartedAt > 0 ? (System.currentTimeMillis() - claudeLoginStartedAt) / 1000 : 0);
         res.put("loginTimeout", CLAUDE_LOGIN_START_TIMEOUT_MS / 1000);
+        res.put("credentialsStamp", claudeRuntime.credentialsStamp());
+        res.put("loginBaseStamp", claudeLoginBaseStamp);
         res.put("selftestRunning", claudeSelftestRunning);
         res.put("selftestProgress", claudeSelftestProgress);
         res.put("safeMode", claudeRuntime.isSafeMode());
+        res.put("engine", claudeRuntime.isReady() ? ClaudeRuntime.engineId(claudeRuntime.preferredEngine()) : "");
         if (pending || !claudeLoginError.isEmpty()) {
             res.put("loginOutput", loginOutputTail());
             res.put("loginDebug", fileTail(claudeRuntime.tmpFile(CLAUDE_LOGIN_DEBUG_LOG), 1500));
@@ -2508,8 +2523,9 @@ public class LocalBackendServer {
             return errorJson(409, "Сначала скачайте среду Claude Code.");
         }
 
-        // Tear down any half-finished previous attempt.
+        // Tear down any half-finished previous attempt, and runs left hanging.
         stopPendingClaudeAuth();
+        claudeRuntime.killStray(liveSandboxRuns());
         claudeLoginError = "";
         claudeLoginManualUrl = "";
         synchronized (claudeLoginOutput) { claudeLoginOutput.setLength(0); }
@@ -2526,8 +2542,9 @@ public class LocalBackendServer {
         args.add("auth");
         args.add("login");
         args.add("--claudeai");
-        ProcessBuilder pb = claudeRuntime.newClaudeProcess(args);
-        pb.environment().put("BROWSER", ClaudeRuntime.GUEST_BROWSER_SHIM);
+        ClaudeRuntime.Engine engine = claudeRuntime.preferredEngine();
+        ProcessBuilder pb = claudeRuntime.newClaudeProcess(engine, args, claudeRuntime.defaultOptions());
+        pb.environment().put("BROWSER", claudeRuntime.browserShimPath(engine));
         final Process proc;
         try {
             proc = pb.start();
@@ -2538,6 +2555,7 @@ public class LocalBackendServer {
         pendingClaudeAuthProcess = proc;
         pendingClaudeAuthUrl = "";
         claudeLoginStartedAt = System.currentTimeMillis();
+        claudeLoginBaseStamp = claudeRuntime.credentialsStamp();
 
         startLoginReader(proc.getInputStream(), true);
         startLoginReader(proc.getErrorStream(), false);
@@ -2552,7 +2570,7 @@ public class LocalBackendServer {
                     // below): nothing to report, or the report is already there.
                     boolean current = pendingClaudeAuthProcess == proc;
                     if (current) pendingClaudeAuthProcess = null;
-                    if (current && !claudeRuntime.isAuthenticated() && claudeLoginError.isEmpty()) {
+                    if (current && !newCredentialsStored() && claudeLoginError.isEmpty()) {
                         String out = loginOutputTail();
                         claudeLoginError = "Вход не завершён (" + describeExit(code) + ")"
                             + (out.isEmpty() ? "." : ":\n" + out);
@@ -2575,7 +2593,7 @@ public class LocalBackendServer {
                     if (!claudeLoginManualUrl.isEmpty() || !readFirstUrl(claudeRuntime.browserUrlFile()).isEmpty()) return;
                     try { Thread.sleep(500); } catch (InterruptedException e) { return; }
                 }
-                if (pendingClaudeAuthProcess != proc || !isAlive(proc) || claudeRuntime.isAuthenticated()) return;
+                if (pendingClaudeAuthProcess != proc || !isAlive(proc) || newCredentialsStored()) return;
                 if (!claudeLoginManualUrl.isEmpty() || !readFirstUrl(claudeRuntime.browserUrlFile()).isEmpty()) return;
                 String snapshot = sandboxSnapshot();
                 String out = loginOutputTail();
@@ -2653,7 +2671,7 @@ public class LocalBackendServer {
     private JSONObject handleClaudeAuthExchange(JSONObject body) throws Exception {
         String code = body.optString("code", "").trim();
         if (code.isEmpty()) return errorJson(400, "Вставьте код со страницы входа Claude");
-        if (claudeRuntime.isAuthenticated()) {
+        if (newCredentialsStored()) {
             JSONObject done = new JSONObject();
             done.put("ok", true);
             done.put("authenticated", true);
@@ -2677,11 +2695,11 @@ public class LocalBackendServer {
 
         // Give the CLI time to exchange the code and persist credentials.
         long deadline = System.currentTimeMillis() + 45000L;
-        while (System.currentTimeMillis() < deadline && isAlive(proc) && !claudeRuntime.isAuthenticated()) {
+        while (System.currentTimeMillis() < deadline && isAlive(proc) && !newCredentialsStored()) {
             try { Thread.sleep(400); } catch (InterruptedException ignored) { break; }
         }
 
-        boolean authed = claudeRuntime.isAuthenticated();
+        boolean authed = newCredentialsStored();
         JSONObject res = new JSONObject();
         res.put("ok", authed);
         res.put("authenticated", authed);
@@ -2715,6 +2733,7 @@ public class LocalBackendServer {
     }
 
     private JSONObject runClaudeSelfTest() throws Exception {
+        int stray = claudeRuntime.killStray(liveSandboxRuns());
         refreshGuestDns();
         JSONArray stages = new JSONArray();
         StringBuilder report = new StringBuilder();
@@ -2726,8 +2745,49 @@ public class LocalBackendServer {
             .append("\nruntime ").append(ClaudeRuntime.version())
             .append(" · режим до проверки: ").append(claudeRuntime.isSafeMode() ? "безопасный Bun" : "обычный")
             .append("\nresolv.conf: ").append(claudeRuntime.guestResolvConf().trim().replace("\n", "; ")).append("\n");
+        if (stray > 0) report.append("остановлено зависших запусков с прошлых раз: ").append(stray).append("\n");
         final int headerEnd = report.length();
 
+        // 1. Straight on Android (no proot, no ptrace): the default and fastest.
+        // Under proot some kernels never let Bun create its first thread.
+        final ClaudeRuntime.Engine direct = ClaudeRuntime.Engine.DIRECT;
+        if (claudeRuntime.hasEngine(direct)) {
+            String label = "напрямую";
+            List<String> version = new ArrayList<>();
+            version.add("--version");
+            claudeSelftestProgress = label + " · Claude Code";
+            JSONObject d1;
+            try {
+                d1 = runStage(label + " · Claude Code",
+                    claudeRuntime.newClaudeProcess(direct, version, new ClaudeRuntime.RunOptions()), 30000L, 30000L, null, true);
+            } catch (Exception e) {
+                d1 = new JSONObject();
+                d1.put("name", label + " · Claude Code");
+                d1.put("ok", false);
+                d1.put("exit", "не запустился");
+                d1.put("seconds", "0.0");
+                d1.put("output", e.getMessage() != null ? e.getMessage() : e.toString());
+            }
+            stages.put(d1);
+            appendStage(report, d1);
+            if (d1.optBoolean("ok")) {
+                ClaudeRuntime.RunOptions probeOpts = new ClaudeRuntime.RunOptions();
+                probeOpts.env.putAll(claudeRuntime.directProbeEnv());
+                JSONObject p = runProbe(direct, label + " · проверка рантайма Bun", probeOpts, stages, report);
+                if (runFullStart(direct, label + " · полный запуск Claude Code", new ClaudeRuntime.RunOptions(), false, stages, report)) {
+                    claudeRuntime.setPreferredEngine(direct);
+                    claudeRuntime.setSafeMode(false);
+                    String summary = p.optBoolean("ok")
+                        ? "Claude Code запускается напрямую, без proot."
+                        : "Claude Code запускается напрямую, без proot, но проверка рантайма нашла ошибки — подробности в отчёте.";
+                    report.insert(headerEnd, "Итог: " + summary + "\n");
+                    return selftestResult(true, direct, summary, stages, report);
+                }
+            }
+            report.append("\nПрямой запуск не сработал — проверяю запуск через proot.\n");
+        }
+
+        // 2. Through proot, the fallback.
         ClaudeRuntime.Engine working = null;
         ClaudeRuntime.Engine[] order = claudeRuntime.preferredEngine() == ClaudeRuntime.Engine.STATIC
             ? new ClaudeRuntime.Engine[]{ClaudeRuntime.Engine.STATIC, ClaudeRuntime.Engine.ANDROID}
@@ -2840,10 +2900,14 @@ public class LocalBackendServer {
             claudeRuntime.discardFreshHome();
         }
         report.insert(headerEnd, "Итог: " + summary + "\n");
+        return selftestResult(working != null && fullStartOk, working, summary, stages, report);
+    }
 
+    private JSONObject selftestResult(boolean ok, ClaudeRuntime.Engine engine, String summary,
+                                      JSONArray stages, StringBuilder report) throws Exception {
         JSONObject res = new JSONObject();
-        res.put("ok", working != null && fullStartOk);
-        res.put("engine", working == null ? "" : (working == ClaudeRuntime.Engine.ANDROID ? "android" : "static"));
+        res.put("ok", ok);
+        res.put("engine", engine == null ? "" : ClaudeRuntime.engineId(engine));
         res.put("summary", summary);
         res.put("safeMode", claudeRuntime.isSafeMode());
         res.put("stages", stages);
@@ -2868,10 +2932,9 @@ public class LocalBackendServer {
                                 JSONArray stages, StringBuilder report) throws Exception {
         claudeSelftestProgress = name;
         List<String> cmd = new ArrayList<>();
-        cmd.add(ClaudeRuntime.GUEST_CLAUDE);
         cmd.add("--version");
-        opts.env.put("BUN_OPTIONS", "--preload " + ClaudeRuntime.GUEST_PROBE);
-        JSONObject s = runStage(name, claudeRuntime.newGuestProcess(engine, cmd, 0, opts), 45000L, 60000L, null, true);
+        opts.preloads.add(ClaudeRuntime.PRELOAD_PROBE);
+        JSONObject s = runStage(name, claudeRuntime.newClaudeProcess(engine, cmd, opts), 45000L, 60000L, null, true);
         String out = s.optString("output");
         boolean preload = out.contains("[probe");
         s.put("preload", preload);
@@ -2893,18 +2956,17 @@ public class LocalBackendServer {
         claudeSelftestProgress = name;
         // Global options go before the subcommand: the CLI parses positionally.
         List<String> cmd = new ArrayList<>();
-        cmd.add(ClaudeRuntime.GUEST_CLAUDE);
         cmd.add("--debug-to-stderr");
         cmd.add("auth");
         cmd.add("status");
         cmd.add("--json");
-        if (trace) opts.env.put("BUN_OPTIONS", "--preload " + ClaudeRuntime.GUEST_TRACE);
+        if (trace) opts.preloads.add(ClaudeRuntime.PRELOAD_TRACE);
         // Waits longer while Claude Code keeps logging: a slow start is not a hang.
-        JSONObject s = runStage(name, claudeRuntime.newGuestProcess(engine, cmd, 0, opts), 40000L, 150000L, null, true);
+        JSONObject s = runStage(name, claudeRuntime.newClaudeProcess(engine, cmd, opts), 40000L, 150000L, null, true);
         if (trace && s.optBoolean("finished") && s.optString("output").contains("--preload")) {
             // The preload flag reached Claude Code's own arguments: run it plain.
-            opts.env.remove("BUN_OPTIONS");
-            s = runStage(name + " (без трассировки)", claudeRuntime.newGuestProcess(engine, cmd, 0, opts), 40000L, 150000L, null, true);
+            opts.preloads.remove(ClaudeRuntime.PRELOAD_TRACE);
+            s = runStage(name + " (без трассировки)", claudeRuntime.newClaudeProcess(engine, cmd, opts), 40000L, 150000L, null, true);
         }
         // `auth status` exits 1 when signed out; that still proves start-up works.
         String out = s.optString("output");
@@ -2914,6 +2976,51 @@ public class LocalBackendServer {
         stages.put(s);
         appendStage(report, s);
         return s.optBoolean("ok");
+    }
+
+    /** The current sign-in has stored credentials (new ones, when signing in again). */
+    private boolean newCredentialsStored() {
+        return claudeRuntime.isAuthenticated() && claudeRuntime.credentialsStamp() != claudeLoginBaseStamp;
+    }
+
+    /** proot runs still in use: the pending sign-in and replies being generated. */
+    private List<Process> liveSandboxRuns() {
+        List<Process> keep = new ArrayList<>();
+        keep.add(pendingClaudeAuthProcess);
+        for (GenerationProgress g : activeGenerations.values()) keep.add(g.activeProcess);
+        return keep;
+    }
+
+    private boolean isDebuggableBuild() {
+        return (context.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+    }
+
+    /**
+     * Test builds only (build-apk.ps1 -Debuggable, reached over adb + WebView
+     * remote debugging): runs a host command line inside the app process's own
+     * sandbox (SELinux domain, seccomp filter), with the runtime environment of
+     * the given proot engine plus {@code env}, e.g. proot with other flags.
+     * Paths may use "$RT" for the runtime directory.
+     */
+    private JSONObject handleDevExec(JSONObject body) throws Exception {
+        JSONArray argv = body.optJSONArray("argv");
+        if (argv == null || argv.length() == 0) return errorJson(400, "argv required");
+        String rt = claudeRuntime.getRuntimeDir().getAbsolutePath();
+        List<String> cmd = new ArrayList<>();
+        for (int i = 0; i < argv.length(); i++) cmd.add(argv.getString(i).replace("$RT", rt));
+        ClaudeRuntime.Engine engine = "static".equals(body.optString("engine")) ? ClaudeRuntime.Engine.STATIC : ClaudeRuntime.Engine.ANDROID;
+        ProcessBuilder pb = claudeRuntime.newHostProcess(cmd, engine);
+        JSONObject env = body.optJSONObject("env");
+        if (env != null) {
+            java.util.Iterator<String> keys = env.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                if (env.isNull(k)) pb.environment().remove(k);
+                else pb.environment().put(k, env.getString(k).replace("$RT", rt));
+            }
+        }
+        long timeout = body.optLong("timeoutMs", 30000L);
+        return runStage("dev exec", pb, timeout, timeout, null, body.optBoolean("snapshot", true));
     }
 
     /** What every process this app started is doing right now (for hang reports). */
@@ -2993,14 +3100,7 @@ public class LocalBackendServer {
         long seconds = (System.currentTimeMillis() - started) / 1000;
         if (!finished) {
             if (snapshotOnHang) r.put("snapshot", sandboxSnapshot());
-            try { proc.destroy(); } catch (Exception ignored) {}
-            long until = System.currentTimeMillis() + 2000L;
-            while (isAlive(proc) && System.currentTimeMillis() < until) {
-                try { Thread.sleep(100); } catch (InterruptedException ignored) { break; }
-            }
-            if (isAlive(proc)) {
-                try { proc.destroyForcibly(); } catch (Exception ignored) {}
-            }
+            ClaudeRuntime.kill(proc);
         }
         try { t.join(1500); } catch (InterruptedException ignored) {}
         int code = finished ? proc.exitValue() : -1;
@@ -3081,9 +3181,7 @@ public class LocalBackendServer {
     private void stopPendingClaudeAuth() {
         Process p = pendingClaudeAuthProcess;
         pendingClaudeAuthProcess = null;
-        if (p != null) {
-            try { p.destroy(); } catch (Exception ignored) {}
-        }
+        ClaudeRuntime.kill(p);
         pendingClaudeAuthUrl = "";
     }
 
@@ -3614,7 +3712,8 @@ public class LocalBackendServer {
         // default coding-assistant prompt. The CLI runs in HOME: no workspace
         // folder is involved or exposed.
         String systemPrompt = buildSystemPrompt(character, persona, memoryRelPath);
-        String guestSysPrompt = claudeRuntime.writeHomeFile(".agy/system_prompt_chat_" + chatId + ".md", systemPrompt);
+        ClaudeRuntime.Engine engine = claudeRuntime.preferredEngine();
+        String guestSysPrompt = claudeRuntime.writeHomeFile(engine, ".agy/system_prompt_chat_" + chatId + ".md", systemPrompt);
 
         String transcript = buildClaudeTranscript(character, persona, history);
         prog.contextMessagesCount = history.length();
@@ -3643,14 +3742,15 @@ public class LocalBackendServer {
 
         prog.phase = "connecting";
         String effortLabel = cliEffort.isEmpty() ? "без effort" : cliEffort;
-        prog.endpoint = "proot · claude " + cliModel + " (" + effortLabel + ")";
+        String launcher = engine == ClaudeRuntime.Engine.DIRECT ? "напрямую" : "proot";
+        prog.endpoint = launcher + " · claude " + cliModel + " (" + effortLabel + ")";
         prog.statusText = "🤖 Запуск Claude Code (" + cliModel + " • " + effortLabel + ")...";
-        prog.addLog("proot → claude -p --model " + cliModel + (cliEffort.isEmpty() ? "" : " --effort " + cliEffort)
+        prog.addLog(launcher + " → claude -p --model " + cliModel + (cliEffort.isEmpty() ? "" : " --effort " + cliEffort)
             + " --system-prompt-file " + guestSysPrompt + " (" + systemPrompt.length() + " симв.)");
 
         prog.throwIfCancelled();
         refreshGuestDns();
-        ProcessBuilder pb = claudeRuntime.newClaudeProcess(args);
+        ProcessBuilder pb = claudeRuntime.newClaudeProcess(engine, args, claudeRuntime.defaultOptions());
         pb.environment().put("CI", "1"); // non-interactive generation only
         Process proc = pb.start();
         prog.activeProcess = proc;
@@ -3773,7 +3873,7 @@ public class LocalBackendServer {
         try {
             exit = proc.waitFor();
         } catch (InterruptedException ie) {
-            proc.destroy();
+            ClaudeRuntime.kill(proc);
             throw new Exception("Генерация Claude Code прервана");
         }
         try { errThread.join(1500); } catch (InterruptedException ignored) {}

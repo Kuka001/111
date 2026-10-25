@@ -1,12 +1,28 @@
 {
     "appName":  "AGY Roleplay Studio",
-    "version":  "1.6.5",
-    "build":  23,
+    "version":  "1.6.6",
+    "build":  24,
     "releaseDate":  "2026-10-26",
     "gitRepo":  "Kuka001/111",
     "gitBranch":  "main",
     "apkPath":  "agy-roleplay-android16.apk",
     "releases":  [
+                     {
+                         "version":  "1.6.6",
+                         "build":  24,
+                         "date":  "2026-10-26",
+                         "title":  "Claude Code работает на телефоне: запуск без proot",
+                         "ref":  "main",
+                         "changelog":  [
+                                           "Claude Code запускается прямо на Android, без proot: под proot на ядре 4.14 Bun не мог создать ни одного потока (clone бесконечно возвращал ERESTARTNOINTR) и зависал",
+                                           "Запуск и ответы стали намного быстрее: системные вызовы больше не проходят через ptrace",
+                                           "DNS без /etc/resolv.conf: копия загрузчика musl читает DNS-серверы телефона из рабочей папки; резолвер Bun получает их же",
+                                           "«Проверить запуск» сначала проверяет прямой запуск (около 2 секунд), proot остаётся запасным вариантом",
+                                           "Исправлено: приложение считало вход выполненным без входа — теперь проверяется токен в ~/.claude/.credentials.json",
+                                           "Исправлено: «Войти заново» показывает новую ссылку и ждёт новый вход; «Отменить вход» больше не выходит из аккаунта",
+                                           "Исправлено: зависшие процессы Claude Code теперь действительно завершаются (proot игнорировал сигнал остановки); «Стоп» в чате останавливает генерацию"
+                                       ]
+                     },
                      {
                          "version":  "1.6.5",
                          "build":  23,
@@ -333,7 +349,7 @@
                                        ]
                      }
                  ],
-    "otaSignature":  "CI/VMKpUxZ/QWb2mlj8rJOTnbuWc/vVrHuQNDJq5rWPqUMeyms0BFKzVmSfHCKQdgisYE+zJp+x8P8NwfPlb1jED5a4rEl4d+2KzPEkv8mzhElSbd9tObQZAgnSMjG7VZ+YkywrXh4KVLifl/NOgRV9Xp7QW+5J2noa53TZLUlzgTwU4i9GyWDJ46k1vymkAlw8J9SNhJP4+Oam2gjLa4PfbZID21bSGA08gqz2gQg2aZMsWWtOrgr/268e8tP2CPaQ6ScpJDKcMwYOoaU/a7JhryXvA7nv6qa+DMqwfa+5OdfXyRMiO+nKOwtIowD80noY4aox5ZuXt3bhhodmsYg==",
-    "apkSha256":  "0636db6563d2401603459fbb695ab62392da03b5ccf58edef59e7002849d730e",
-    "apkSize":  325031
+    "otaSignature":  "q2NNUlA1kP9+ik0oksOS7CvErb+YM/In/SkwN6bTSvjUHSwQnfqpwNpM4kdKLoEMnOCo89kD1fk4JxilTd62Q6NDcSnFQ7dJXPeJABTzratBrCaV/K4mO38yjhsQBr4b1sIshHNeU5mU9SGcwiiSA+k6cKtlXzMZVqLrh8rmFLM+gT+sEdPSAASFNJCDhlLfySE59LPrlWPaVauEDdBJkHybgVPnNwdCHT+Kr6BdWkQVVjtRhar0BKBJgwMEAhSBcbEccEIdSCfbg7ZsJJnxeIM4MOsGW833eJVKH4gq4n1Rx5uuKCcjc6CSL4Rrxs+wqa2UN6wfXWqpIA5aRmVuaw==",
+    "apkSha256":  "95dae0da42ae153a508c11805fb12f2cb744256b63a32f0e8ca591d73cfe0365",
+    "apkSize":  329204
 }

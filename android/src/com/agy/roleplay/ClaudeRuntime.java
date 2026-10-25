@@ -31,8 +31,9 @@ import java.util.zip.GZIPInputStream;
  * on Android's bionic loader, and Android >= API 29 forbids executing any file
  * from app-writable storage at all. This app therefore targets API 28 (legacy
  * untrusted_app_27 SELinux domain, which permits exec of app data files) and
- * runs the binary through an unprivileged, statically linked {@code proot}
- * over a minimal Alpine (musl) rootfs, exactly like Termux/UserLAnd.
+ * runs the binary with Alpine's musl loader and libraries from a minimal
+ * Alpine rootfs: directly on Android by default (Engine.DIRECT), or through
+ * {@code proot} over that rootfs, like Termux/UserLAnd, as a fallback.
  *
  * Every component is downloaded once (user-triggered) straight from its
  * official upstream — Alpine Linux CDN and the npm registry — and verified
@@ -45,13 +46,15 @@ import java.util.zip.GZIPInputStream;
  *   proot      static aarch64 proot (Alpine proot-static, loader embedded)
  *   rootfs/    Alpine minirootfs + libgcc/libstdc++
  *   claude     Claude Code CLI (npm @anthropic-ai/claude-code-linux-arm64-musl)
- *   home/      HOME inside the sandbox (/root): credentials, generated prompts
- *   tmp/       /tmp inside the sandbox and PROOT_TMP_DIR
- *   .engine    proot build that passed the self-test (android | static)
+ *   home/      HOME (/root under proot): credentials, generated prompts
+ *   tmp/       TMPDIR (/tmp under proot) and PROOT_TMP_DIR
+ *   ld-musl-agy.so.1  musl loader for the direct launch (resolv.conf path patched)
+ *   bin/       BROWSER shim for the direct launch
+ *   .launch    engine that passed the self-test (direct | android | static)
  *   .compat    "safe" when Claude Code only starts with Bun's safe flags
  *
  * This class owns only the environment: download/verify/extract, readiness and
- * auth checks, and building a configured (unstarted) proot ProcessBuilder. The
+ * auth checks, and building a configured (unstarted) ProcessBuilder. The
  * generation/auth streaming lives in LocalBackendServer so it can update the
  * existing GenerationProgress telemetry.
  */
@@ -114,13 +117,28 @@ final class ClaudeRuntime {
     private static final long REQUIRED_FREE_BYTES = 700L * 1024L * 1024L;
 
     /**
-     * How the sandbox is launched.
+     * How Claude Code is launched.
+     * DIRECT: straight on Android, through a copy of Alpine's musl loader (see
+     *   {@link #ensureDirectLoader}); no proot, no ptrace. The default: under
+     *   proot, Bun's very first thread creation livelocks on some kernels (4.14:
+     *   clone() returns ERESTARTNOINTR forever while traced), and every system
+     *   call pays a ptrace round trip.
      * ANDROID: Termux's proot (bionic, Android-specific fixes), shipped in the
-     *   APK assets; this is the build Termux/proot-distro run Claude Code with.
+     *   APK assets; fallback for phones where the direct launch fails.
      * STATIC: Alpine's statically linked upstream proot, downloaded with the
-     *   runtime; kept as a fallback.
+     *   runtime; last fallback.
      */
-    enum Engine { ANDROID, STATIC }
+    enum Engine { DIRECT, ANDROID, STATIC }
+
+    /** SHA-256 of lib/ld-musl-aarch64.so.1 from the pinned Alpine minirootfs. */
+    static final String MUSL_LOADER_SHA256 = "53282acc2be8a08a9fdcf880334bf35bbfd0a13862b7f3616be3919fcda11793";
+    /**
+     * musl reads its DNS servers only from the hard-coded "/etc/resolv.conf",
+     * which Android does not have. The direct-launch copy of the loader reads
+     * this name instead: the same length, relative to the working directory,
+     * which the app sets for every launch and puts the phone's DNS servers in.
+     */
+    static final String DIRECT_RESOLV_NAME = ".agy-resolv.conf";
 
     static final String ANDROID_ASSET_DIR = "claude-android";
     static final String ANDROID_PROOT_VERSION = "termux-proot-5.1.107.101+talloc-2.5.0+shmem-0.7";
@@ -142,6 +160,8 @@ final class ClaudeRuntime {
     private final File procFakeDir;
     private final File compatFile;
     private final File freshHomeDir;
+    private final File directLoader;
+    private final File binDir;
 
     ClaudeRuntime(Context context) {
         this(context, context.getFilesDir());
@@ -166,10 +186,14 @@ final class ClaudeRuntime {
         this.androidLoader = new File(androidDir, "loader");
         this.androidLoader32 = new File(androidDir, "loader32");
         this.androidLibDir = new File(androidDir, "lib");
-        this.engineFile = new File(runtimeDir, ".engine");
+        // ".launch", not the ".engine" of builds 21-23: those recorded a proot
+        // choice made before the direct launch existed.
+        this.engineFile = new File(runtimeDir, ".launch");
         this.procFakeDir = new File(runtimeDir, "procfake");
         this.compatFile = new File(runtimeDir, ".compat");
         this.freshHomeDir = new File(runtimeDir, "home-check");
+        this.directLoader = new File(runtimeDir, "ld-musl-agy.so.1");
+        this.binDir = new File(runtimeDir, "bin");
     }
 
     File getRuntimeDir() {
@@ -208,11 +232,30 @@ final class ClaudeRuntime {
         }
     }
 
-    /** True once {@code claude setup-token} has stored subscription credentials under HOME. */
+    /**
+     * True once `claude auth login` has stored subscription credentials: an
+     * OAuth token in ~/.claude/.credentials.json. (~/.claude.json is Claude
+     * Code's settings file, written on every start; it says nothing about it.)
+     */
     boolean isAuthenticated() {
-        File creds = new File(homeDir, ".claude/.credentials.json");
-        File legacy = new File(homeDir, ".claude.json");
-        return (creds.isFile() && creds.length() > 2) || (legacy.isFile() && legacy.length() > 2);
+        File creds = credentialsFile();
+        if (!creds.isFile() || creds.length() < 10) return false;
+        try {
+            String text = new String(readAll(new FileInputStream(creds)), StandardCharsets.UTF_8);
+            return text.contains("\"accessToken\"") || text.contains("\"refreshToken\"");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Changes whenever Claude Code writes new credentials (0 = none). */
+    long credentialsStamp() {
+        File creds = credentialsFile();
+        return creds.isFile() ? creds.lastModified() : 0L;
+    }
+
+    private File credentialsFile() {
+        return new File(homeDir, ".claude/.credentials.json");
     }
 
     void logout() {
@@ -234,11 +277,13 @@ final class ClaudeRuntime {
     }
 
     /**
-     * Installs the BROWSER shim into the rootfs. Claude Code opens its sign-in
-     * link by running $BROWSER <url>; inside the sandbox there is no browser, so
-     * the shim records the URL for the app, which opens it in Android's browser.
+     * Installs the BROWSER shims (one inside the proot rootfs, one for the
+     * direct launch). Claude Code opens its sign-in link by running
+     * $BROWSER <url>; there is no browser it could reach, so the shim records
+     * the URL for the app, which shows it and opens it in Android's browser.
      */
     void ensureBrowserShim() throws Exception {
+        tmpDir.mkdirs();
         File shim = new File(rootfsDir, GUEST_BROWSER_SHIM.substring(1));
         File parent = shim.getParentFile();
         if (parent != null && !parent.exists()) parent.mkdirs();
@@ -247,19 +292,31 @@ final class ClaudeRuntime {
             + "printf '%s\\n' \"$1\" >> /tmp/agy-open-url\n"
             + "exit 0\n");
         shim.setExecutable(true, false);
-        tmpDir.mkdirs();
+
+        binDir.mkdirs();
+        File direct = new File(binDir, "agy-open");
+        writeText(direct, "#!/system/bin/sh\n"
+            + "# Hands URLs that Claude Code wants to open to the Android app.\n"
+            + "printf '%s\\n' \"$1\" >> '" + browserUrlFile().getAbsolutePath() + "'\n"
+            + "exit 0\n");
+        direct.setExecutable(true, false);
+    }
+
+    /** $BROWSER for the given engine: the shim as that engine sees it. */
+    String browserShimPath(Engine engine) {
+        return engine == Engine.DIRECT ? new File(binDir, "agy-open").getAbsolutePath() : GUEST_BROWSER_SHIM;
     }
 
     /**
-     * Writes a file into the sandbox HOME and returns its guest path, e.g. for
-     * the generated system prompt passed with --system-prompt-file.
+     * Writes a file into HOME and returns its path as Claude Code started with
+     * {@code engine} sees it, e.g. for --system-prompt-file.
      */
-    String writeHomeFile(String relName, String content) throws Exception {
+    String writeHomeFile(Engine engine, String relName, String content) throws Exception {
         File f = new File(homeDir, relName);
         File parent = f.getParentFile();
         if (parent != null && !parent.exists()) parent.mkdirs();
         writeText(f, content != null ? content : "");
-        return GUEST_HOME + "/" + relName;
+        return engine == Engine.DIRECT ? f.getAbsolutePath() : GUEST_HOME + "/" + relName;
     }
 
     /**
@@ -286,6 +343,9 @@ final class ClaudeRuntime {
         readyMarker.delete();
         prootBin.delete();
         claudeBin.delete();
+        directLoader.delete();
+        new File(runtimeDir, ".ld-musl-agy").delete();
+        scriptsInstalled = false;
         deleteRecursive(rootfsDir);
         deleteRecursive(tmpDir);
         File[] leftovers = runtimeDir.listFiles();
@@ -350,11 +410,10 @@ final class ClaudeRuntime {
     }
 
     /**
-     * resolv.conf for the guest: the network's own resolvers first (mobile
-     * carriers often block public DNS), then a public fallback. musl uses at
-     * most three nameservers and queries them in parallel.
+     * The network's own resolvers first (mobile carriers often block public
+     * DNS), then a public fallback; musl uses at most three.
      */
-    String guestResolvConf() {
+    private List<String> pickDnsServers() {
         List<String> picked = new ArrayList<>();
         for (String s : dnsServers) {
             if (s == null) continue;
@@ -367,8 +426,13 @@ final class ClaudeRuntime {
             if (picked.size() >= 3) break;
             if (!picked.contains(fallback)) picked.add(fallback);
         }
+        return picked;
+    }
+
+    /** resolv.conf for musl, in the proot rootfs or next to a direct launch. */
+    String guestResolvConf() {
         StringBuilder sb = new StringBuilder();
-        for (String s : picked) sb.append("nameserver ").append(s).append("\n");
+        for (String s : pickDnsServers()) sb.append("nameserver ").append(s).append("\n");
         sb.append("options timeout:3 attempts:2\n");
         return sb.toString();
     }
@@ -426,6 +490,9 @@ final class ClaudeRuntime {
     }
 
     boolean hasEngine(Engine e) {
+        if (e == Engine.DIRECT) {
+            return claudeBin.isFile() && new File(rootfsDir, "lib/ld-musl-aarch64.so.1").isFile();
+        }
         if (e == Engine.ANDROID) {
             try {
                 ensureAndroidProot();
@@ -436,7 +503,7 @@ final class ClaudeRuntime {
         return prootBin.isFile();
     }
 
-    /** The engine that last passed the self-test, else the Android build when available. */
+    /** The engine that last passed the self-test, else the direct launch. */
     Engine preferredEngine() {
         try {
             if (engineFile.isFile()) {
@@ -446,14 +513,59 @@ final class ClaudeRuntime {
             }
         } catch (Exception ignored) {
         }
+        if (hasEngine(Engine.DIRECT)) return Engine.DIRECT;
         return hasEngine(Engine.ANDROID) ? Engine.ANDROID : Engine.STATIC;
     }
 
     void setPreferredEngine(Engine e) {
         try {
-            writeText(engineFile, e == Engine.STATIC ? "static" : "android");
+            writeText(engineFile, e == Engine.STATIC ? "static" : e == Engine.ANDROID ? "android" : "direct");
         } catch (Exception ignored) {
         }
+    }
+
+    static String engineId(Engine e) {
+        return e == Engine.STATIC ? "static" : e == Engine.ANDROID ? "android" : "direct";
+    }
+
+    /**
+     * The loader for the direct launch: a copy of Alpine's musl loader (which
+     * is also its libc) that reads {@link #DIRECT_RESOLV_NAME} instead of
+     * /etc/resolv.conf. Built from the verified rootfs file, one same-length
+     * string replaced; the rootfs itself stays untouched.
+     */
+    synchronized File ensureDirectLoader() throws Exception {
+        File marker = new File(runtimeDir, ".ld-musl-agy");
+        if (directLoader.isFile() && marker.isFile()) return directLoader;
+        File src = new File(rootfsDir, "lib/ld-musl-aarch64.so.1");
+        byte[] data = readAll(new FileInputStream(src));
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        if (!MUSL_LOADER_SHA256.equals(toHex(md.digest(data)))) {
+            throw new Exception("Неожиданная версия загрузчика musl в среде — переустановите среду.");
+        }
+        byte[] needle = "/etc/resolv.conf".getBytes(StandardCharsets.US_ASCII);
+        byte[] repl = DIRECT_RESOLV_NAME.getBytes(StandardCharsets.US_ASCII);
+        int at = -1;
+        for (int i = 0; i + needle.length <= data.length; i++) {
+            boolean match = true;
+            for (int j = 0; j < needle.length && match; j++) match = data[i + j] == needle[j];
+            if (!match) continue;
+            if (at >= 0) throw new Exception("Загрузчик musl: путь resolv.conf встречается дважды.");
+            at = i;
+        }
+        if (at < 0 || repl.length != needle.length) throw new Exception("Загрузчик musl: путь resolv.conf не найден.");
+        System.arraycopy(repl, 0, data, at, repl.length);
+        File part = new File(runtimeDir, "ld-musl-agy.so.1.part");
+        FileOutputStream out = new FileOutputStream(part);
+        try {
+            out.write(data);
+        } finally {
+            out.close();
+        }
+        if (!part.renameTo(directLoader)) throw new Exception("Не удалось сохранить загрузчик musl.");
+        directLoader.setExecutable(true, false);
+        writeText(marker, MUSL_LOADER_SHA256);
+        return directLoader;
     }
 
     // -------------------------------------------------------------------------
@@ -476,18 +588,31 @@ final class ClaudeRuntime {
         {"BUN_FEATURE_FLAG_DISABLE_STANDALONE_MADVISE", "1"},
     };
 
-    /** Guest paths of the self-test's preload scripts (from APK assets). */
-    static final String GUEST_PROBE = "/opt/agy/probe.mjs";
-    static final String GUEST_TRACE = "/opt/agy/trace.cjs";
+    /**
+     * Scripts from APK assets that Bun preloads (BUN_OPTIONS=--preload), kept
+     * in the rootfs under /opt/agy: the Android shim every direct launch needs,
+     * and the self-test's probe and start-up trace.
+     */
+    static final String PRELOAD_ANDROID = "android.cjs";
+    static final String PRELOAD_PROBE = "probe.mjs";
+    static final String PRELOAD_TRACE = "trace.cjs";
     static final String DIAG_ASSET_DIR = "claude-diag";
+    private volatile boolean scriptsInstalled = false;
 
-    /** How one sandbox run is set up; the defaults are what sign-in and replies use. */
+    /** How one launch is set up; the defaults are what sign-in and replies use. */
     static final class RunOptions {
         /** Bun safe flags (see {@link #BUN_SAFE_FLAGS}). */
         boolean safe;
-        /** Bound as /root instead of home/, e.g. an empty profile for a check. */
+        /** Used as HOME instead of home/, e.g. an empty profile for a check. */
         File home;
+        /** Extra preload scripts (PRELOAD_PROBE, PRELOAD_TRACE). */
+        final List<String> preloads = new ArrayList<>();
         final java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
+    }
+
+    /** A preload script's path as the given engine sees it. */
+    private String preloadPath(Engine engine, String name) {
+        return engine == Engine.DIRECT ? new File(rootfsDir, "opt/agy/" + name).getAbsolutePath() : "/opt/agy/" + name;
     }
 
     /** Options matching the saved compatibility mode. */
@@ -517,13 +642,15 @@ final class ClaudeRuntime {
         }
     }
 
-    /** Copies the probe/trace scripts into the rootfs (/opt/agy). */
+    /** Copies the preload scripts into the rootfs (/opt/agy), once per app start. */
     void installDiagScripts() throws Exception {
-        if (context == null) return;
+        if (context == null || scriptsInstalled) return;
         File dir = new File(rootfsDir, "opt/agy");
         dir.mkdirs();
-        copyAsset(DIAG_ASSET_DIR, "probe.mjs", new File(dir, "probe.mjs"));
-        copyAsset(DIAG_ASSET_DIR, "trace.cjs", new File(dir, "trace.cjs"));
+        for (String name : new String[]{PRELOAD_ANDROID, PRELOAD_PROBE, PRELOAD_TRACE}) {
+            copyAsset(DIAG_ASSET_DIR, name, new File(dir, name));
+        }
+        scriptsInstalled = true;
     }
 
     /** An empty HOME for a check run, recreated on every call. */
@@ -561,6 +688,79 @@ final class ClaudeRuntime {
         deleteRecursive(freshHomeDir);
     }
 
+    // -------------------------------------------------------------------------
+    // Stopping sandbox runs
+    // -------------------------------------------------------------------------
+
+    /**
+     * Really stops a sandbox run. proot ignores SIGTERM, which is all
+     * Process.destroy() sends, so a hung run would live on and keep a CPU core
+     * busy. Every process of the tree gets SIGKILL instead: the sandboxed ones
+     * first (a killed tracer would otherwise set them loose), then proot.
+     */
+    static void kill(Process p) {
+        if (p == null) return;
+        int pid = pidOf(p);
+        if (pid > 0) killTree(pid);
+        try {
+            p.destroy();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static void killTree(int pid) {
+        for (int child : ProcSnapshot.descendants(pid)) android.os.Process.sendSignal(child, 9);
+        android.os.Process.sendSignal(pid, 9);
+    }
+
+    /** Kills every Claude Code launch (proot or direct) except {@code keep} (runs still in use). */
+    int killStray(java.util.Collection<Process> keep) {
+        java.util.Set<Integer> keepPids = new java.util.HashSet<>();
+        for (Process p : keep) {
+            if (p != null) keepPids.add(pidOf(p));
+        }
+        int killed = 0;
+        String dir;
+        try {
+            dir = runtimeDir.getCanonicalPath(); // /proc/PID/exe shows the resolved path
+        } catch (Exception e) {
+            dir = runtimeDir.getAbsolutePath();
+        }
+        for (int pid : ProcSnapshot.childrenRunningFrom(android.os.Process.myPid(), dir)) {
+            if (keepPids.contains(pid)) continue;
+            killTree(pid);
+            killed++;
+        }
+        return killed;
+    }
+
+    /** The pid of a started process (Android's Process has no public accessor). */
+    static int pidOf(Process p) {
+        try {
+            java.lang.reflect.Field f = p.getClass().getDeclaredField("pid");
+            f.setAccessible(true);
+            return f.getInt(p);
+        } catch (Throwable ignored) {
+        }
+        // Android's process class prints "Process[pid=1234, ...]".
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("pid=(\\d+)").matcher(String.valueOf(p));
+        return m.find() ? Integer.parseInt(m.group(1)) : -1;
+    }
+
+    /** Any host command with the environment the given engine runs with (test builds). */
+    ProcessBuilder newHostProcess(List<String> cmd, Engine engine) {
+        if (engine == Engine.ANDROID) {
+            try {
+                ensureAndroidProot();
+            } catch (Exception ignored) {
+            }
+        }
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.directory(runtimeDir);
+        applyEnv(pb.environment(), engine);
+        return pb;
+    }
+
     /** `proot --version` only: shows whether the binary itself can execute. */
     ProcessBuilder newProotVersionProcess(Engine engine) {
         List<String> cmd = new ArrayList<>();
@@ -574,14 +774,93 @@ final class ClaudeRuntime {
 
     /**
      * Builds a configured (not started) ProcessBuilder that runs the Claude CLI
-     * under proot, with HOME (/root) as the working directory. Only the runtime's
-     * own directories are visible inside the sandbox.
+     * with the preferred engine and the saved options; HOME is the working
+     * directory.
      */
-    ProcessBuilder newClaudeProcess(List<String> claudeArgs) {
+    ProcessBuilder newClaudeProcess(List<String> claudeArgs) throws Exception {
+        return newClaudeProcess(preferredEngine(), claudeArgs, defaultOptions());
+    }
+
+    /** Same, with an explicit engine and options (self-test variants). */
+    ProcessBuilder newClaudeProcess(Engine engine, List<String> claudeArgs, RunOptions opts) throws Exception {
+        if (engine == Engine.DIRECT) return newDirectProcess(claudeArgs, opts);
         List<String> guest = new ArrayList<>();
         guest.add(GUEST_CLAUDE);
         guest.addAll(claudeArgs);
-        return newGuestProcess(preferredEngine(), guest, 0);
+        ProcessBuilder pb = newGuestProcess(engine, guest, 0, opts);
+        if (!opts.preloads.isEmpty()) pb.environment().put("BUN_OPTIONS", preloadOptions(engine, opts.preloads));
+        return pb;
+    }
+
+    private String preloadOptions(Engine engine, List<String> names) {
+        StringBuilder sb = new StringBuilder();
+        for (String name : names) {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append("--preload ").append(preloadPath(engine, name));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Claude Code straight on Android: the patched musl loader runs the binary
+     * with libraries from the rootfs. HOME is the working directory; the phone's
+     * DNS servers go into its {@link #DIRECT_RESOLV_NAME} (for musl) and into
+     * AGY_DNS_SERVERS (for Bun's own resolver, set by the android.cjs preload).
+     */
+    private ProcessBuilder newDirectProcess(List<String> claudeArgs, RunOptions opts) throws Exception {
+        File loader = ensureDirectLoader();
+        installDiagScripts();
+        File home = opts.home != null ? opts.home : homeDir;
+        home.mkdirs();
+        tmpDir.mkdirs();
+        writeText(new File(home, DIRECT_RESOLV_NAME), guestResolvConf());
+
+        List<String> cmd = new ArrayList<>();
+        cmd.add(loader.getAbsolutePath());
+        cmd.add(claudeBin.getAbsolutePath());
+        cmd.addAll(claudeArgs);
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.directory(home);
+        pb.redirectErrorStream(false);
+
+        java.util.Map<String, String> env = pb.environment();
+        for (String k : new String[]{"LD_PRELOAD", "PROOT_TMP_DIR", "PROOT_NO_SECCOMP", "PROOT_LOADER", "PROOT_LOADER_32"}) env.remove(k);
+        env.put("HOME", home.getAbsolutePath());
+        env.put("USER", "root");
+        env.put("LOGNAME", "root");
+        env.put("TERM", "dumb");
+        env.put("LANG", "C.UTF-8");
+        env.put("LC_ALL", "C.UTF-8");
+        env.put("PATH", "/system/bin:/system/xbin");
+        env.put("SHELL", "/system/bin/sh");
+        env.put("TMPDIR", tmpDir.getAbsolutePath());
+        env.put("LD_LIBRARY_PATH", new File(rootfsDir, "lib").getAbsolutePath() + ":" + new File(rootfsDir, "usr/lib").getAbsolutePath());
+        StringBuilder dns = new StringBuilder();
+        for (String s : pickDnsServers()) {
+            if (dns.length() > 0) dns.append(',');
+            dns.append(s);
+        }
+        env.put("AGY_DNS_SERVERS", dns.toString());
+        List<String> preloads = new ArrayList<>();
+        preloads.add(PRELOAD_ANDROID);
+        preloads.addAll(opts.preloads);
+        env.put("BUN_OPTIONS", preloadOptions(Engine.DIRECT, preloads));
+        env.put("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
+        env.put("DISABLE_AUTOUPDATER", "1");
+        if (opts.safe) {
+            for (String[] flag : BUN_SAFE_FLAGS) env.put(flag[0], flag[1]);
+        }
+        env.putAll(opts.env);
+        return pb;
+    }
+
+    /** Paths the self-test's probe uses instead of the proot rootfs ones. */
+    java.util.Map<String, String> directProbeEnv() {
+        java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
+        env.put("AGY_PROBE_FILE", new File(rootfsDir, "etc/os-release").getAbsolutePath());
+        env.put("AGY_PROBE_TMP", tmpDir.getAbsolutePath());
+        env.put("AGY_PROBE_ECHO", "/system/bin/toybox");
+        return env;
     }
 
     /** Runs an arbitrary guest command (e.g. /bin/busybox) under the given engine. */

@@ -11,6 +11,10 @@ import cp from 'node:child_process';
 import dns from 'node:dns';
 
 const started = Date.now();
+// Paths differ between the proot rootfs and a direct launch on Android.
+const FILE = process.env.AGY_PROBE_FILE || '/etc/os-release';
+const TMP = process.env.AGY_PROBE_TMP || '/tmp';
+const ECHO = process.env.AGY_PROBE_ECHO || '/bin/busybox';
 const say = (line) => {
   try {
     fs.writeSync(2, `[probe +${((Date.now() - started) / 1000).toFixed(1)}s] ${line}\n`);
@@ -55,16 +59,16 @@ await step('таймер 300 мс', async () => {
   return `${Date.now() - t} мс`;
 });
 await step('setImmediate', () => new Promise((resolve) => setImmediate(resolve)));
-await step('файл: синхронное чтение', () => fs.readFileSync('/etc/os-release', 'utf8').split('\n')[0]);
-await step('файл: асинхронное чтение', async () => `${(await fs.promises.readFile('/etc/os-release', 'utf8')).length} байт`);
-if (hasBun) await step('файл: Bun.file', async () => `${(await Bun.file('/etc/os-release').text()).length} байт`);
-await step('файл: запись и удаление в /tmp', async () => {
-  const path = `/tmp/agy-probe-${process.pid}`;
+await step('файл: синхронное чтение', () => fs.readFileSync(FILE, 'utf8').split('\n')[0]);
+await step('файл: асинхронное чтение', async () => `${(await fs.promises.readFile(FILE, 'utf8')).length} байт`);
+if (hasBun) await step('файл: Bun.file', async () => `${(await Bun.file(FILE).text()).length} байт`);
+await step('файл: запись и удаление во временной папке', async () => {
+  const path = `${TMP}/agy-probe-${process.pid}`;
   await fs.promises.writeFile(path, 'agy');
   await fs.promises.rm(path);
 });
 await step('fs.watch', () => {
-  const watcher = fs.watch('/tmp');
+  const watcher = fs.watch(TMP);
   watcher.close();
 });
 await step('os: процессор, память, сеть', () =>
@@ -72,23 +76,23 @@ await step('os: процессор, память, сеть', () =>
 await step('os.userInfo', () => os.userInfo().username);
 if (hasBun) await step('Bun.which git / rg', () => `git: ${Bun.which('git') || 'нет'} · rg: ${Bun.which('rg') || 'нет'}`);
 await step('процесс: child_process.spawnSync', () => {
-  const r = cp.spawnSync('/bin/busybox', ['echo', 'ok']);
+  const r = cp.spawnSync(ECHO, ['echo', 'ok']);
   if (r.error) throw r.error;
   return `код ${r.status} · ${String(r.stdout).trim()}`;
 });
 await step('процесс: child_process.execSync (sh)', () => String(cp.execSync('echo ok')).trim());
 if (hasBun) {
   await step('процесс: Bun.spawnSync', () => {
-    const r = Bun.spawnSync(['/bin/busybox', 'echo', 'ok']);
+    const r = Bun.spawnSync([ECHO, 'echo', 'ok']);
     return `код ${r.exitCode} · ${r.stdout.toString().trim()}`;
   });
 }
 await step('процесс: child_process.execFile', () => new Promise((resolve, reject) => {
-  cp.execFile('/bin/busybox', ['echo', 'ok'], (err, out) => (err ? reject(err) : resolve(String(out).trim())));
+  cp.execFile(ECHO, ['echo', 'ok'], (err, out) => (err ? reject(err) : resolve(String(out).trim())));
 }));
 if (hasBun) {
   await step('процесс: Bun.spawn', async () => {
-    const p = Bun.spawn(['/bin/busybox', 'echo', 'ok'], { stdout: 'pipe' });
+    const p = Bun.spawn([ECHO, 'echo', 'ok'], { stdout: 'pipe' });
     const out = await new Response(p.stdout).text();
     return `код ${await p.exited} · ${out.trim()}`;
   });

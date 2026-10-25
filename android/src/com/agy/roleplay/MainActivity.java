@@ -100,6 +100,10 @@ public class MainActivity extends Activity {
         rootLayout = new FrameLayout(this);
         rootLayout.setBackgroundColor(Color.parseColor("#0F1115"));
 
+        // Test builds only (build-apk.ps1 -Debuggable): inspect the UI over adb.
+        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            WebView.setWebContentsDebuggingEnabled(true);
+        }
         webView = new WebView(this);
         webView.setBackgroundColor(Color.parseColor("#0F1115"));
 

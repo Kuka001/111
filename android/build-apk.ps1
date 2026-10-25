@@ -1,3 +1,8 @@
+# -Debuggable: a local test build (android:debuggable, WebView remote
+# debugging, run-as) written to %TEMP%; the release APK and version.json are
+# left untouched. Never publish it.
+param([switch]$Debuggable)
+
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = "C:\Users\Kazuma\mobile_project"
@@ -6,6 +11,7 @@ $WebDir = "$ProjectRoot\mobile\www"
 $AssetsWwwDir = "$AndroidDir\assets\www"
 $BuildDir = "$AndroidDir\build"
 $OutputApk = "$ProjectRoot\agy-roleplay-android16.apk"
+if ($Debuggable) { $OutputApk = "$env:TEMP\agy-roleplay-debug.apk" }
 $ToolsCache = "C:\Users\Kazuma\.gemini\antigravity-cli\brain\5fcbe0c0-e9e8-4f16-9fa1-c4f2a1a5c107\scratch\android-sdk"
 
 New-Item -ItemType Directory -Force -Path $ToolsCache | Out-Null
@@ -102,9 +108,17 @@ foreach ($f in $ResFiles) {
 $FlatFiles = (Get-ChildItem -Path "$BuildDir\compiled_res" -Filter "*.flat").FullName
 $UnalignedApk = "$BuildDir\unaligned.apk"
 
+$ManifestPath = "$AndroidDir\AndroidManifest.xml"
+if ($Debuggable) {
+    $ManifestPath = "$BuildDir\AndroidManifest.debug.xml"
+    $ManifestText = [System.IO.File]::ReadAllText("$AndroidDir\AndroidManifest.xml")
+    $ManifestText = $ManifestText.Replace("<application", "<application android:debuggable=`"true`"")
+    [System.IO.File]::WriteAllText($ManifestPath, $ManifestText, (New-Object System.Text.UTF8Encoding $false))
+}
+
 & $Aapt2 link -o $UnalignedApk `
     -I $AndroidJar `
-    --manifest "$AndroidDir\AndroidManifest.xml" `
+    --manifest $ManifestPath `
     --java "$BuildDir\gen" `
     --auto-add-overlay `
     $FlatFiles
@@ -196,6 +210,10 @@ Write-Host "SHA-256: $ApkSha"
 # Record the hash in version.json so users can verify a downloaded APK and the
 # in-app updater can display it alongside the download link.
 $VersionJsonPath = "$ProjectRoot\version.json"
+if ($Debuggable) {
+    Write-Host "Debuggable test build: version.json left untouched. Do not publish this APK." -ForegroundColor Yellow
+    return
+}
 if (Test-Path $VersionJsonPath) {
     try {
         # -Encoding UTF8: Windows PowerShell 5.1 otherwise reads the BOM-less file as ANSI (cp1251)
