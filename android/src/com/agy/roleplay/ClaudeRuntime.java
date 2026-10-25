@@ -176,6 +176,31 @@ final class ClaudeRuntime {
         deleteRecursive(new File(homeDir, ".claude.json"));
     }
 
+    /** Guest path of the BROWSER shim that hands URLs to the Android app. */
+    static final String GUEST_BROWSER_SHIM = "/usr/local/bin/agy-open";
+
+    /** Host file the shim appends URLs to (it lives in the sandbox /tmp). */
+    File browserUrlFile() {
+        return new File(tmpDir, "agy-open-url");
+    }
+
+    /**
+     * Installs the BROWSER shim into the rootfs. Claude Code opens its sign-in
+     * link by running $BROWSER <url>; inside the sandbox there is no browser, so
+     * the shim records the URL for the app, which opens it in Android's browser.
+     */
+    void ensureBrowserShim() throws Exception {
+        File shim = new File(rootfsDir, GUEST_BROWSER_SHIM.substring(1));
+        File parent = shim.getParentFile();
+        if (parent != null && !parent.exists()) parent.mkdirs();
+        writeText(shim, "#!/bin/sh\n"
+            + "# Hands URLs that Claude Code wants to open to the Android app.\n"
+            + "printf '%s\\n' \"$1\" >> /tmp/agy-open-url\n"
+            + "exit 0\n");
+        shim.setExecutable(true, false);
+        tmpDir.mkdirs();
+    }
+
     /**
      * Writes a file into the sandbox HOME and returns its guest path, e.g. for
      * the generated system prompt passed with --system-prompt-file.

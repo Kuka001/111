@@ -16,7 +16,7 @@
   'use strict';
 
   const params = new URLSearchParams(location.search);
-  const ENGINE = Number(params.get('engine') || 19);
+  const ENGINE = Number(params.get('engine') || 20);
   const LEGACY = ENGINE < 18;
   const DELAY = Number(params.get('delay') || 120);
 
@@ -567,7 +567,8 @@
 
     if (path === '/api/claude/status') {
       return { runtimeReady: db.settings.claudeRuntimeReady, authenticated: db.settings.claudeAuthenticated, runtimeVersion: 'mock',
-        runtimeUrlConfigured: ENGINE >= 19, downloadMb: 128, installing: !!db.claudeInstalling, installProgress: db.claudeInstallProgress || '' };
+        runtimeUrlConfigured: ENGINE >= 19, downloadMb: 128, installing: !!db.claudeInstalling, installProgress: db.claudeInstallProgress || '',
+        loginPending: !!db.claudeLoginPending, loginError: db.claudeLoginError || '' };
     }
     if (path === '/api/claude/runtime/install') {
       if (ENGINE < 19) return err(503, 'SHA-256 среды Claude не задан в version.json (claudeRuntimeSha256). Установка отключена из соображений безопасности.');
@@ -583,9 +584,30 @@
       db.settings.claudeRuntimeReady = true;
       return { ok: true, runtimeReady: true, authenticated: db.settings.claudeAuthenticated };
     }
-    if (path === '/api/claude/auth/start') return { ok: true, authUrl: 'https://claude.ai/oauth/mock' };
-    if (path === '/api/claude/auth/exchange') { db.settings.claudeAuthenticated = true; return { ok: true, authenticated: true }; }
-    if (path === '/api/claude/auth/logout') { db.settings.claudeAuthenticated = false; return { ok: true }; }
+    if (path === '/api/claude/auth/start') {
+      if (ENGINE < 20) return { ok: true, authUrl: '', note: 'setup-token: no TTY (mock)' };
+      await sleep(1500);
+      if (params.get('loginfail') === '1') {
+        db.claudeLoginError = 'Claude Code завершился, не начав вход.\nproot error: ptrace(TRACEME): Operation not permitted (mock)';
+        return err(500, db.claudeLoginError);
+      }
+      db.claudeLoginPending = true;
+      db.claudeLoginError = '';
+      // Simulate the browser redirecting back to the CLI's localhost listener.
+      if (params.get('autologin') !== '0') setTimeout(() => { if (db.claudeLoginPending) { db.claudeLoginPending = false; db.settings.claudeAuthenticated = true; } }, 6000);
+      return { ok: true, authUrl: 'http://localhost:54545/mock-auto', manualUrl: 'https://claude.ai/oauth/authorize?mock=1', mode: 'auto' };
+    }
+    if (path === '/api/claude/auth/exchange') {
+      if (!String(body.code || '').includes('#')) return err(400, 'Скопируйте код целиком — вместе с частью после «#».');
+      db.claudeLoginPending = false; db.settings.claudeAuthenticated = true; return { ok: true, authenticated: true };
+    }
+    if (path === '/api/claude/auth/logout') { db.claudeLoginPending = false; db.settings.claudeAuthenticated = false; return { ok: true }; }
+    if (path === '/api/claude/selftest') {
+      await sleep(1200);
+      return params.get('loginfail') === '1'
+        ? { ok: false, exitCode: 1, seconds: 0.4, output: 'proot error: ptrace(TRACEME): Operation not permitted (mock)' }
+        : { ok: true, exitCode: 0, seconds: 1.2, output: '2.1.310 (Claude Code)' };
+    }
 
     if (path === '/api/updates/check') {
       return {

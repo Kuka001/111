@@ -376,6 +376,8 @@
       claudeDownloadMb: 0,
       claudeInstalling: false,
       claudeInstallProgress: '',
+      claudeLoginPending: false,
+      claudeLoginError: '',
     },
     models: [],
     characters: [],
@@ -439,6 +441,7 @@
     perChatModel: () => state.engineBuild >= 18,
     systemBars: () => !hasBridge || typeof window.AndroidServer.setSystemBars === 'function',
     claudeInstall: () => state.engineBuild >= 19,
+    claudeLogin: () => state.engineBuild >= 20,
   };
 
   const THEMES = {
@@ -971,6 +974,8 @@
       state.settings.claudeDownloadMb = Number(data.downloadMb) || 0;
       state.settings.claudeInstalling = Boolean(data.installing);
       state.settings.claudeInstallProgress = data.installProgress || '';
+      state.settings.claudeLoginPending = Boolean(data.loginPending);
+      state.settings.claudeLoginError = data.loginError || '';
       if (state.tab === 'settings') renderSettingsTab();
       refreshLayers();
     } catch (e) {
@@ -3237,6 +3242,46 @@
   function openClaudePage() {
     let installing = false;
     let progressTimer = null;
+    let loginTimer = null;
+    // Sign-in flow: idle -> starting -> waiting (browser open) -> done / error
+    const login = { phase: 'idle', manualUrl: '', mode: '', error: '', submitting: false };
+    let selftest = null; // { running } | { ok, output, exitCode, seconds }
+
+    const outputBlock = (text) => `<div class="console" style="margin-top:10px;max-height:28vh">${escapeHtml(text)}</div>`;
+
+    const loginBody = (s) => {
+      if (s.claudeAuthenticated) {
+        return `<div class="step-text">Вход выполнен. Модели Claude Code готовы к работе.</div>
+          <div class="btn-row"><button class="btn btn-secondary btn-sm" data-act="login">${ic('login')}Войти заново</button><button class="btn btn-danger btn-sm" data-act="logout">${ic('logout')}Выйти</button></div>`;
+      }
+      if (!s.claudeRuntimeReady) {
+        return '<div class="step-text">Станет доступно после установки среды.</div>';
+      }
+      if (!can.claudeLogin()) {
+        return '<div class="step-text">Для входа обновите приложение (APK) до версии 1.6.2 или новее.</div>';
+      }
+      if (login.phase === 'starting') {
+        return `<div class="install-progress"><span class="spinner"></span><span>Запускаю Claude Code и готовлю ссылку для входа…</span></div>
+          <p class="section-hint" style="margin:8px 0 0">Первый запуск на телефоне может занять до полуминуты.</p>`;
+      }
+      if (login.phase === 'waiting') {
+        const auto = login.mode === 'auto';
+        return `<div class="install-progress"><span class="spinner"></span><span>${auto ? 'Ожидаю вход в браузере…' : 'Ожидаю код со страницы входа…'}</span></div>
+          <div class="step-text" style="margin-top:10px">${auto
+            ? 'Войдите в аккаунт Claude в открывшемся браузере. После входа браузер сам вернёт подтверждение в приложение — вставлять ничего не нужно.'
+            : 'Войдите в аккаунт Claude в открывшемся браузере, скопируйте показанный код и вставьте его ниже.'}</div>
+          <details class="disclosure"${auto ? '' : ' open'}><summary>${auto ? 'Браузер не вернул в приложение?' : 'Ввести код'} ${ic('chevron-down', 'ic-sm')}</summary>
+            ${auto && login.manualUrl ? `<p class="step-text">Откройте ручной вход — после него страница покажет код, его нужно вставить сюда.</p><button class="btn btn-secondary btn-sm" data-act="manual">${ic('external', 'ic-sm')}Открыть ручной вход</button>` : ''}
+            <label class="field"><span class="field-label">Код со страницы входа</span><input class="input mono" data-role="code" placeholder="xxxxxxxx#yyyyyyyy" autocomplete="off" autocapitalize="off" spellcheck="false" /></label>
+            <button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="exchange"${login.submitting ? ' disabled' : ''}>${login.submitting ? '<span class="spinner"></span>Проверяю…' : 'Подтвердить код'}</button>
+          </details>
+          <button class="btn btn-ghost btn-sm" style="margin-top:6px;padding:0" data-act="cancel-login">Отменить вход</button>`;
+      }
+      return `<div class="step-text">Откроется браузер: войдите в аккаунт Claude с подпиской Pro, Max, Team или Enterprise.</div>
+        ${login.error ? `<div class="error-card" style="margin:0 0 12px"><div class="error-head">${ic('alert')}<div>Вход не удался. Подробности ниже — если ошибка повторяется, пришлите этот текст.</div></div>${outputBlock(login.error)}</div>` : ''}
+        <button class="btn btn-primary btn-sm" data-act="login">${ic('login')}${login.error ? 'Попробовать снова' : 'Войти'}</button>`;
+    };
+
     const render = () => {
       const s = state.settings;
       const sizeMb = s.claudeDownloadMb || 128;
@@ -3246,6 +3291,12 @@
       if (s.claudeRuntimeReady) runtimeText = 'Установлена. Новые чаты с моделями Claude Code работают в ней автоматически.';
       else if (!canInstall) runtimeText = 'Для установки среды обновите приложение (APK) до версии 1.6.1 или новее.';
       else runtimeText = `Разовая загрузка около ${sizeMb} МБ (после распаковки ~300 МБ), лучше по Wi-Fi. Компоненты берутся из официальных источников — Alpine Linux и npm — и проверяются по SHA-256.`;
+      let selftestHtml = '';
+      if (selftest && selftest.running) {
+        selftestHtml = `<div class="install-progress" style="margin-top:10px"><span class="spinner"></span><span>Запускаю claude --version…</span></div>`;
+      } else if (selftest) {
+        selftestHtml = `<div style="margin-top:10px"><span class="pill ${selftest.ok ? 'ok' : 'err'}">${selftest.ok ? `Работает · ${Number(selftest.seconds || 0).toFixed(1)} с` : 'Не запускается'}</span>${outputBlock(selftest.output || '(пустой вывод)')}</div>`;
+      }
       return `
         <p class="section-hint" style="margin:0 4px 14px">Claude Code работает прямо на телефоне — без ПК и без настройки папок. Системный промпт тот же, что и для Gemini.</p>
         <div class="card">
@@ -3254,32 +3305,35 @@
             <div class="step-body"><div class="step-title">Среда выполнения</div>
               <div class="step-text">${escapeHtml(runtimeText)}</div>
               ${busy ? `<div class="install-progress"><span class="spinner"></span><span>${escapeHtml(s.claudeInstallProgress || 'Подготовка…')}</span></div><p class="section-hint" style="margin:8px 0 0">Не закрывайте приложение до окончания установки.</p>`
-                : `<button class="btn ${s.claudeRuntimeReady ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="install"${canInstall ? '' : ' disabled'}>${s.claudeRuntimeReady ? `${ic('reroll')}Переустановить` : `${ic('download')}Скачать среду`}</button>`}
+                : `<div class="btn-row">
+                    ${s.claudeRuntimeReady && can.claudeLogin() ? `<button class="btn btn-secondary btn-sm" data-act="selftest"${selftest && selftest.running ? ' disabled' : ''}>${ic('activity', 'ic-sm')}Проверить запуск</button>` : ''}
+                    <button class="btn ${s.claudeRuntimeReady ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="install"${canInstall ? '' : ' disabled'}>${s.claudeRuntimeReady ? `${ic('reroll')}Переустановить` : `${ic('download')}Скачать среду`}</button>
+                  </div>${selftestHtml}`}
             </div>
           </div>
           <div class="step${s.claudeAuthenticated ? ' done' : ''}">
             <span class="step-num">${s.claudeAuthenticated ? ic('check', 'ic-xs') : '2'}</span>
-            <div class="step-body"><div class="step-title">Вход по подписке Claude</div>
-              <div class="step-text">${s.claudeAuthenticated ? 'Вход выполнен.' : 'Откроется браузер. После входа скопируйте код и вставьте его ниже.'}</div>
-              <div class="btn-row">
-                <button class="btn ${s.claudeAuthenticated ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="login"${s.claudeRuntimeReady && !busy ? '' : ' disabled'}>${ic('login')}${s.claudeAuthenticated ? 'Войти заново' : 'Войти'}</button>
-                ${s.claudeAuthenticated ? `<button class="btn btn-danger btn-sm" data-act="logout">${ic('logout')}Выйти</button>` : ''}
-              </div>
-              ${s.claudeRuntimeReady && !s.claudeAuthenticated ? `<label class="field"><span class="field-label">Код из браузера</span><input class="input" data-role="code" placeholder="Вставьте код" autocomplete="off" /></label><button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="exchange">Подтвердить код</button>` : ''}
-            </div>
+            <div class="step-body"><div class="step-title">Вход по подписке Claude</div>${loginBody(s)}</div>
           </div>
         </div>`;
     };
+
     const layer = openPage({
       title: 'Claude Code CLI',
       body: render(),
-      onClose: () => clearInterval(progressTimer),
+      onClose: () => {
+        clearInterval(progressTimer);
+        clearInterval(loginTimer);
+      },
     });
+    layer.isClaudePage = true;
     layer.refresh = () => {
       if (document.activeElement && layer.el.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
       const body = $('.page-body', layer.el);
       const scroll = body.scrollTop;
+      const openDetails = $$('details.disclosure', body).map(d => d.open);
       layer.setBody(render());
+      $$('details.disclosure', body).forEach((d, i) => { if (openDetails[i]) d.open = true; });
       body.scrollTop = scroll;
     };
     const watchProgress = () => {
@@ -3289,18 +3343,50 @@
         if (!installing && !state.settings.claudeInstalling) clearInterval(progressTimer);
       }, 1000);
     };
+    const finishLogin = (ok, error) => {
+      clearInterval(loginTimer);
+      login.phase = 'idle';
+      login.submitting = false;
+      login.error = ok ? '' : (error || 'Неизвестная ошибка');
+      layer.refresh();
+      renderSettingsTab();
+      renderRoomHeader();
+      if (ok) toast('Вход в Claude выполнен', { type: 'success' });
+    };
+    // While the browser is open the CLI waits for its localhost callback; poll
+    // until it stores credentials, exits with an error, or ten minutes pass.
+    const watchLogin = () => {
+      clearInterval(loginTimer);
+      const startedAt = Date.now();
+      loginTimer = setInterval(async () => {
+        await refreshClaudeStatus();
+        const s = state.settings;
+        if (s.claudeAuthenticated) finishLogin(true);
+        else if (!s.claudeLoginPending && s.claudeLoginError) finishLogin(false, s.claudeLoginError);
+        else if (Date.now() - startedAt > 10 * 60 * 1000) finishLogin(false, 'Время ожидания входа истекло. Попробуйте снова.');
+      }, 2000);
+    };
+
     refreshClaudeStatus().then(() => {
       if (state.settings.claudeInstalling) watchProgress();
+      if (state.settings.claudeLoginPending && !state.settings.claudeAuthenticated) {
+        login.phase = 'waiting';
+        login.mode = 'auto';
+        layer.refresh();
+        watchLogin();
+      }
     });
+
     bindActs(layer, {
       install: async () => {
         const ok = await confirmDialog({
           title: state.settings.claudeRuntimeReady ? 'Переустановить среду?' : 'Скачать среду Claude Code?',
-          message: `Около ${state.settings.claudeDownloadMb || 128} МБ. Нужны стабильный интернет и ~700 МБ свободного места. Загрузка займёт несколько минут.`,
+          message: `Около ${state.settings.claudeDownloadMb || 128} МБ. Нужны стабильный интернет и ~700 МБ свободного места. Загрузка займёт несколько минут. Вход в Claude сохранится.`,
           confirmText: 'Скачать',
         });
         if (!ok) return;
         installing = true;
+        selftest = null;
         state.settings.claudeInstallProgress = 'Подготовка…';
         layer.refresh();
         watchProgress();
@@ -3319,38 +3405,80 @@
           renderSettingsTab();
         }
       },
+      selftest: async () => {
+        selftest = { running: true };
+        layer.refresh();
+        try {
+          selftest = await api('/api/claude/selftest', { method: 'POST' });
+        } catch (e) {
+          selftest = { ok: false, output: e.message };
+        }
+        layer.refresh();
+      },
       login: async () => {
+        login.phase = 'starting';
+        login.error = '';
+        layer.refresh();
         try {
           const res = await api('/api/claude/auth/start', { method: 'POST' });
-          if (res.authUrl && !hasBridge) window.open(res.authUrl, '_blank');
-          toast(res.authUrl ? 'Войдите в браузере и вставьте код' : 'Если браузер не открылся, повторите вход');
+          if (!res.authUrl) {
+            // Engine 19 and older: setup-token never produced a link.
+            finishLogin(false, res.note || 'Claude Code не выдал ссылку для входа.');
+            return;
+          }
+          if (!hasBridge) window.open(res.authUrl, '_blank');
+          login.phase = 'waiting';
+          login.mode = res.mode || 'manual';
+          login.manualUrl = res.manualUrl || '';
+          layer.refresh();
+          watchLogin();
         } catch (e) {
-          toast('Не удалось начать вход: ' + e.message, { type: 'error' });
+          finishLogin(false, e.message);
         }
+      },
+      manual: () => {
+        if (login.manualUrl) openExternal(login.manualUrl);
+        const details = $('details.disclosure', layer.el);
+        if (details) details.open = true;
       },
       exchange: async () => {
         const input = $('[data-role="code"]', layer.el);
         const code = input ? input.value.trim() : '';
         if (!code) {
-          toast('Вставьте код из браузера');
+          toast('Вставьте код со страницы входа');
           return;
         }
+        login.submitting = true;
+        if (input) input.blur();
+        layer.refresh();
         try {
           const res = await api('/api/claude/auth/exchange', { method: 'POST', body: { code } });
           state.settings.claudeAuthenticated = Boolean(res.authenticated);
-          if (input) input.blur();
-          toast(res.authenticated ? 'Вход в Claude выполнен' : ('Не удалось: ' + (res.error || 'повторите вход')), { type: res.authenticated ? 'success' : 'error' });
-          layer.refresh();
-          renderSettingsTab();
-          renderRoomHeader();
+          if (res.authenticated) finishLogin(true);
+          else finishLogin(false, res.error || 'Вход не завершился.');
         } catch (e) {
-          toast('Ошибка авторизации: ' + e.message, { type: 'error' });
+          login.submitting = false;
+          layer.refresh();
+          toast(e.message, { type: 'error', duration: 6000 });
         }
+      },
+      'cancel-login': async () => {
+        clearInterval(loginTimer);
+        try {
+          await api('/api/claude/auth/logout', { method: 'POST' });
+        } catch (e) {
+          // nothing to cancel
+        }
+        state.settings.claudeAuthenticated = false;
+        login.phase = 'idle';
+        login.error = '';
+        layer.refresh();
       },
       logout: async () => {
         try {
           await api('/api/claude/auth/logout', { method: 'POST' });
           state.settings.claudeAuthenticated = false;
+          login.phase = 'idle';
           layer.refresh();
           renderSettingsTab();
           renderRoomHeader();
@@ -4150,7 +4278,11 @@
     }
 
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') refreshAgyStatus();
+      if (document.visibilityState === 'visible') {
+        refreshAgyStatus();
+        // Returning from the browser after the Claude sign-in.
+        if (layerStack.some(l => l.isClaudePage)) refreshClaudeStatus();
+      }
     });
   }
 

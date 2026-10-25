@@ -124,9 +124,12 @@ public class LocalBackendServer {
     private volatile boolean claudeInstalling = false;
     private volatile String claudeInstallProgress = "";
 
-    // Interactive `claude setup-token` process kept alive between /start and /exchange.
+    // `claude auth login` process kept alive between /start and /exchange (or the
+    // browser's localhost callback), plus what it reported.
     private volatile Process pendingClaudeAuthProcess;
     private volatile String pendingClaudeAuthUrl = "";
+    private volatile String claudeLoginError = "";
+    private final StringBuilder claudeLoginOutput = new StringBuilder();
 
     private volatile ServerSocket oauthCallbackServer;
     private volatile String pendingCodeVerifier = "";
@@ -1516,6 +1519,9 @@ public class LocalBackendServer {
         if (path.equals("/api/claude/auth/logout") && method.equals("POST")) {
             return handleClaudeAuthLogout();
         }
+        if (path.equals("/api/claude/selftest") && method.equals("POST")) {
+            return handleClaudeSelfTest();
+        }
 
         return errorJson(404, "Неизвестный маршрут APK-сервера: " + method + " " + path);
     }
@@ -2428,6 +2434,9 @@ public class LocalBackendServer {
         res.put("downloadMb", ClaudeRuntime.downloadBytes() >> 20);
         res.put("installing", claudeInstalling);
         res.put("installProgress", claudeInstallProgress);
+        Process login = pendingClaudeAuthProcess;
+        res.put("loginPending", login != null && isAlive(login));
+        res.put("loginError", claudeLoginError);
         return res;
     }
 
@@ -2461,6 +2470,14 @@ public class LocalBackendServer {
         return res;
     }
 
+    /**
+     * Starts `claude auth login --claudeai` (the non-interactive sign-in that
+     * works without a terminal). Claude Code opens its sign-in link through
+     * $BROWSER, which our shim records; we open that link in Android's browser.
+     * After sign-in the browser redirects to the CLI's own localhost listener,
+     * which stores the credentials and exits — no code needs to be pasted. The
+     * manual link (shows a code#state to paste) is returned as a fallback.
+     */
     private JSONObject handleClaudeAuthStart() throws Exception {
         if (!claudeRuntime.isReady()) {
             return errorJson(409, "Сначала скачайте среду Claude Code.");
@@ -2468,41 +2485,54 @@ public class LocalBackendServer {
 
         // Tear down any half-finished previous attempt.
         stopPendingClaudeAuth();
+        claudeLoginError = "";
+        synchronized (claudeLoginOutput) { claudeLoginOutput.setLength(0); }
+        claudeRuntime.ensureBrowserShim();
+        final File urlFile = claudeRuntime.browserUrlFile();
+        urlFile.delete();
 
         List<String> args = new ArrayList<>();
-        args.add("setup-token");
+        args.add("auth");
+        args.add("login");
+        args.add("--claudeai");
         ProcessBuilder pb = claudeRuntime.newClaudeProcess(args);
-        final Process proc = pb.start();
+        pb.environment().put("BROWSER", ClaudeRuntime.GUEST_BROWSER_SHIM);
+        final Process proc;
+        try {
+            proc = pb.start();
+        } catch (Exception e) {
+            claudeLoginError = "Не удалось запустить среду: " + e.getMessage();
+            return errorJson(500, claudeLoginError);
+        }
         pendingClaudeAuthProcess = proc;
         pendingClaudeAuthUrl = "";
+        final String[] manualUrl = {""};
 
-        // Read stdout+stderr looking for the authorization URL; open it externally.
-        final StringBuilder captured = new StringBuilder();
-        final Object urlLock = new Object();
-
-        Runnable scanner = new Runnable() {
-            @Override
-            public void run() {
+        Runnable reader = new Runnable() {
+            private void consume(InputStream stream) {
                 try {
-                    BufferedReader br = new BufferedReader(new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8));
+                    BufferedReader br = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
                     String l;
                     while ((l = br.readLine()) != null) {
-                        synchronized (captured) { captured.append(l).append("\n"); }
-                        String url = extractFirstUrl(l);
-                        if (url != null && pendingClaudeAuthUrl.isEmpty()) {
-                            pendingClaudeAuthUrl = url;
-                            openExternalUrl(url);
-                            synchronized (urlLock) { urlLock.notifyAll(); }
+                        String clean = stripAnsi(l);
+                        synchronized (claudeLoginOutput) {
+                            if (claudeLoginOutput.length() < 8000) claudeLoginOutput.append(clean).append("\n");
                         }
+                        String url = extractFirstUrl(clean);
+                        if (url != null && manualUrl[0].isEmpty()) manualUrl[0] = url;
                     }
                 } catch (Exception ignored) {
                 }
             }
+
+            @Override
+            public void run() {
+                consume(proc.getInputStream());
+            }
         };
-        Thread tOut = new Thread(scanner);
+        Thread tOut = new Thread(reader);
         tOut.setDaemon(true);
         tOut.start();
-
         Thread tErr = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -2510,12 +2540,8 @@ public class LocalBackendServer {
                     BufferedReader br = new BufferedReader(new InputStreamReader(proc.getErrorStream(), StandardCharsets.UTF_8));
                     String l;
                     while ((l = br.readLine()) != null) {
-                        synchronized (captured) { captured.append(l).append("\n"); }
-                        String url = extractFirstUrl(l);
-                        if (url != null && pendingClaudeAuthUrl.isEmpty()) {
-                            pendingClaudeAuthUrl = url;
-                            openExternalUrl(url);
-                            synchronized (urlLock) { urlLock.notifyAll(); }
+                        synchronized (claudeLoginOutput) {
+                            if (claudeLoginOutput.length() < 8000) claudeLoginOutput.append(stripAnsi(l)).append("\n");
                         }
                     }
                 } catch (Exception ignored) {
@@ -2525,83 +2551,164 @@ public class LocalBackendServer {
         tErr.setDaemon(true);
         tErr.start();
 
-        // Wait briefly for the URL to appear.
-        synchronized (urlLock) {
-            long deadline = System.currentTimeMillis() + 20000L;
-            while (pendingClaudeAuthUrl.isEmpty() && System.currentTimeMillis() < deadline) {
-                try { urlLock.wait(500); } catch (InterruptedException ignored) {}
+        // Watch the process: success stores credentials; anything else is reported.
+        Thread watcher = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    int code = proc.waitFor();
+                    if (pendingClaudeAuthProcess == proc) pendingClaudeAuthProcess = null;
+                    if (!claudeRuntime.isAuthenticated()) {
+                        String out = loginOutputTail();
+                        claudeLoginError = "Вход не завершён (код " + code + ")" + (out.isEmpty() ? "." : ":\n" + out);
+                    }
+                } catch (InterruptedException ignored) {
+                }
             }
+        });
+        watcher.setDaemon(true);
+        watcher.start();
+
+        // Wait for the automatic link from the shim (preferred) or at least the
+        // manual one from stdout; give up if the CLI exits or stays silent.
+        String autoUrl = "";
+        long deadline = System.currentTimeMillis() + 30000L;
+        long manualSeenAt = 0L;
+        while (System.currentTimeMillis() < deadline) {
+            autoUrl = readFirstUrl(urlFile);
+            if (!autoUrl.isEmpty()) break;
+            if (!manualUrl[0].isEmpty()) {
+                if (manualSeenAt == 0L) manualSeenAt = System.currentTimeMillis();
+                if (System.currentTimeMillis() - manualSeenAt > 4000L) break;
+            }
+            if (!isAlive(proc)) break;
+            try { Thread.sleep(250); } catch (InterruptedException ignored) {}
         }
+
+        String openUrl = !autoUrl.isEmpty() ? autoUrl : manualUrl[0];
+        if (openUrl.isEmpty()) {
+            String out = loginOutputTail();
+            boolean alive = isAlive(proc);
+            stopPendingClaudeAuth();
+            claudeLoginError = (alive
+                ? "Claude Code не выдал ссылку для входа за 30 секунд."
+                : "Claude Code завершился, не начав вход.")
+                + (out.isEmpty() ? " Вывода нет — проверьте запуск среды кнопкой «Проверить запуск»." : "\n" + out);
+            return errorJson(500, claudeLoginError);
+        }
+        pendingClaudeAuthUrl = openUrl;
+        openExternalUrl(openUrl);
 
         JSONObject res = new JSONObject();
         res.put("ok", true);
-        if (!pendingClaudeAuthUrl.isEmpty()) {
-            res.put("authUrl", pendingClaudeAuthUrl);
-        } else {
-            String out;
-            synchronized (captured) { out = captured.toString().trim(); }
-            res.put("authUrl", "");
-            res.put("note", out.isEmpty()
-                ? "Запущен вход в Claude. Если браузер не открылся, повторите попытку."
-                : (out.length() > 400 ? out.substring(0, 400) : out));
-        }
+        res.put("authUrl", openUrl);
+        res.put("manualUrl", manualUrl[0]);
+        res.put("mode", autoUrl.isEmpty() ? "manual" : "auto");
         return res;
     }
 
     private JSONObject handleClaudeAuthExchange(JSONObject body) throws Exception {
         String code = body.optString("code", "").trim();
-        if (code.isEmpty()) return errorJson(400, "Введите код авторизации из браузера");
+        if (code.isEmpty()) return errorJson(400, "Вставьте код со страницы входа Claude");
+        if (claudeRuntime.isAuthenticated()) {
+            JSONObject done = new JSONObject();
+            done.put("ok", true);
+            done.put("authenticated", true);
+            return done;
+        }
 
         Process proc = pendingClaudeAuthProcess;
-        if (proc == null) {
-            return errorJson(409, "Сессия входа не активна. Нажмите «Войти в Claude» заново.");
+        if (proc == null || !isAlive(proc)) {
+            return errorJson(409, "Сессия входа не активна. Нажмите «Войти» заново.");
+        }
+        if (!code.contains("#")) {
+            return errorJson(400, "Скопируйте код целиком — вместе с частью после «#».");
         }
         try {
             OutputStream stdin = proc.getOutputStream();
             stdin.write((code + "\n").getBytes(StandardCharsets.UTF_8));
             stdin.flush();
-            // Some flows finish on EOF; others keep reading. Close to be safe.
-            try { stdin.close(); } catch (Exception ignored) {}
         } catch (Exception e) {
             return errorJson(500, "Не удалось передать код процессу: " + e.getMessage());
         }
 
         // Give the CLI time to exchange the code and persist credentials.
-        boolean exited = false;
-        try {
-            long deadline = System.currentTimeMillis() + 30000L;
-            while (System.currentTimeMillis() < deadline) {
-                try {
-                    proc.exitValue();
-                    exited = true;
-                    break;
-                } catch (IllegalThreadStateException notYet) {
-                    Thread.sleep(400);
-                    if (claudeRuntime.isAuthenticated()) break;
-                }
-            }
-        } catch (InterruptedException ignored) {
+        long deadline = System.currentTimeMillis() + 45000L;
+        while (System.currentTimeMillis() < deadline && isAlive(proc) && !claudeRuntime.isAuthenticated()) {
+            try { Thread.sleep(400); } catch (InterruptedException ignored) { break; }
         }
 
-        pendingClaudeAuthProcess = null;
-        pendingClaudeAuthUrl = "";
-        if (!exited) {
-            try { proc.destroy(); } catch (Exception ignored) {}
-        }
-
-        JSONObject res = new JSONObject();
         boolean authed = claudeRuntime.isAuthenticated();
+        JSONObject res = new JSONObject();
         res.put("ok", authed);
         res.put("authenticated", authed);
         if (!authed) {
-            res.put("error", "Авторизация не завершилась. Проверьте код и повторите вход.");
+            String out = loginOutputTail();
+            res.put("error", "Вход не завершился." + (out.isEmpty() ? " Проверьте код и повторите." : "\n" + out));
         }
+        return res;
+    }
+
+    /** Runs `claude --version` under proot to show whether the sandbox works at all. */
+    private JSONObject handleClaudeSelfTest() throws Exception {
+        JSONObject res = new JSONObject();
+        if (!claudeRuntime.isReady()) {
+            return errorJson(409, "Сначала скачайте среду Claude Code.");
+        }
+        List<String> args = new ArrayList<>();
+        args.add("--version");
+        long started = System.currentTimeMillis();
+        Process proc;
+        try {
+            ProcessBuilder pb = claudeRuntime.newClaudeProcess(args);
+            pb.redirectErrorStream(true);
+            proc = pb.start();
+        } catch (Exception e) {
+            res.put("ok", false);
+            res.put("output", "Не удалось запустить proot: " + e.getMessage());
+            return res;
+        }
+        try { proc.getOutputStream().close(); } catch (Exception ignored) {}
+        final StringBuilder out = new StringBuilder();
+        final Process p = proc;
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
+                    String l;
+                    while ((l = br.readLine()) != null) {
+                        synchronized (out) { if (out.length() < 4000) out.append(stripAnsi(l)).append("\n"); }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        });
+        t.setDaemon(true);
+        t.start();
+        boolean finished = false;
+        while (System.currentTimeMillis() - started < 60000L) {
+            if (!isAlive(proc)) { finished = true; break; }
+            try { Thread.sleep(200); } catch (InterruptedException ignored) { break; }
+        }
+        if (!finished) {
+            try { proc.destroy(); } catch (Exception ignored) {}
+        }
+        try { t.join(1000); } catch (InterruptedException ignored) {}
+        int code = finished ? proc.exitValue() : -1;
+        String text;
+        synchronized (out) { text = out.toString().trim(); }
+        res.put("ok", finished && code == 0);
+        res.put("exitCode", code);
+        res.put("seconds", (System.currentTimeMillis() - started) / 1000.0);
+        res.put("output", finished ? text : ("Нет ответа за 60 секунд." + (text.isEmpty() ? "" : "\n" + text)));
         return res;
     }
 
     private JSONObject handleClaudeAuthLogout() throws Exception {
         stopPendingClaudeAuth();
         claudeRuntime.logout();
+        claudeLoginError = "";
         JSONObject res = new JSONObject();
         res.put("ok", true);
         res.put("authenticated", false);
@@ -2610,11 +2717,41 @@ public class LocalBackendServer {
 
     private void stopPendingClaudeAuth() {
         Process p = pendingClaudeAuthProcess;
+        pendingClaudeAuthProcess = null;
         if (p != null) {
             try { p.destroy(); } catch (Exception ignored) {}
         }
-        pendingClaudeAuthProcess = null;
         pendingClaudeAuthUrl = "";
+    }
+
+    private static boolean isAlive(Process p) {
+        try {
+            p.exitValue();
+            return false;
+        } catch (IllegalThreadStateException running) {
+            return true;
+        }
+    }
+
+    private String loginOutputTail() {
+        String out;
+        synchronized (claudeLoginOutput) { out = claudeLoginOutput.toString().trim(); }
+        return out.length() > 1200 ? "…" + out.substring(out.length() - 1200) : out;
+    }
+
+    private String readFirstUrl(File f) {
+        if (!f.isFile()) return "";
+        String text = readTextFile(f).trim();
+        if (text.isEmpty()) return "";
+        String first = text.split("\n")[0].trim();
+        return first.startsWith("http://") || first.startsWith("https://") ? first : "";
+    }
+
+    /** Removes ANSI CSI/OSC escape sequences (colors, hyperlinks) from CLI output. */
+    private static String stripAnsi(String s) {
+        if (s == null) return "";
+        return s.replaceAll("\u001B\\][^\u0007\u001B]*(\u0007|\u001B\\\\)", "")
+            .replaceAll("\u001B\\[[0-9;?]*[ -/]*[@-~]", "");
     }
 
     private String extractFirstUrl(String line) {

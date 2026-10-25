@@ -1,12 +1,26 @@
 {
     "appName":  "AGY Roleplay Studio",
-    "version":  "1.6.1",
-    "build":  19,
+    "version":  "1.6.2",
+    "build":  20,
     "releaseDate":  "2026-10-25",
     "gitRepo":  "Kuka001/111",
     "gitBranch":  "main",
     "apkPath":  "agy-roleplay-android16.apk",
     "releases":  [
+                     {
+                         "version":  "1.6.2",
+                         "build":  20,
+                         "date":  "2026-10-25",
+                         "title":  "Вход в Claude Code на телефоне: браузер открывается и сам возвращает вход",
+                         "ref":  "main",
+                         "changelog":  [
+                                           "Исправлено: кнопка «Войти» в Claude Code ничего не делала — setup-token требовал терминал и не выдавал ссылку",
+                                           "Новый вход через claude auth login: приложение открывает ссылку в браузере, после входа браузер сам возвращает подтверждение в Claude Code (через localhost), вставлять код не нужно",
+                                           "Запасной вариант: «Открыть ручной вход» и поле для кода со страницы входа",
+                                           "Ошибки входа показываются с выводом Claude Code вместо молчаливого сообщения",
+                                           "Кнопка «Проверить запуск» — запускает claude --version и показывает, работает ли среда на этом телефоне"
+                                       ]
+                     },
                      {
                          "version":  "1.6.1",
                          "build":  19,
@@ -276,7 +290,7 @@
                                        ]
                      }
                  ],
-    "apkSha256":  "c8e6c5f671daf0fb9b6e58e036009cfbb2e96e75a603a1cf0e959499223bad0c",
-    "apkSize":  160573,
-    "otaSignature":  "3fmF9mQd8j6ey2bwVm0Qdwu3c49hGd83HxWXffEXfc6ckE8TCeM/VsJ9a9v5ZJ5lm5bYkVstBAiSVLeVLmGGat+apu1IebDMbOewg9u5N9iirGWXzinS85aw1ayelPaCntT5HzEoxD97fUBuytcBHyakCz/ioIzs2lcr/O2EK3noRK/r4auSSQCb/NZTFuxtLpFnjTQQIbwVj5QhZRTYKDd38OMU9cyHwPJNtjIA3so8BRqgEguftEs6NtPU3d7zrzpVwRnIiYq8KjGR/KpNZ+ryeNQEMSSLoihluBv6ACAtPExas7N2KdEC80eQHuvAJefS9ip34nekSurPXaMOfA=="
+    "apkSha256":  "beee4aeaaf6374f63e7ebd5579f5bbcd53d8b0df141b7a0b87e3b3fa06cc4800",
+    "apkSize":  164669,
+    "otaSignature":  "oasjIrlZ5xIlBKnz8iI7BTq1y7JxvqFcQtudmAoK49ZcCygM40nab4l5JEyPdaKVfz3y7m/c5oMT7Kr8fiebbiLaN2ehTbSFnq7toj/JXANPeS2HBsPMckn49X0XkiLLahW52IDk1yLg+aNWjd30m+8RVeiyuIFOlam+2xQ1l1LcC4lEaHiCxbZr7HfeQHEdsDaLkj/whSHx4JM1AJnEqhUihA5YZxeRTAUrhPcTUwqQDyLToPrZHx9bKe6a6DmbwM78rBMRPygD5You5aY3ig9GFbptB+xN9n6l2z6M0c3Sxvk/RCsZGpY8iMXIp1uYS+q1PaaUJpTxfhgd0Ufbaw=="
 }
