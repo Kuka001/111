@@ -41,6 +41,35 @@ public class MainActivity extends Activity {
     private LocalBackendServer localBackendServer;
     private String pendingSaveContent;
 
+    /**
+     * Applies theme colours to the system bars and the window background (the
+     * root layout is visible behind the bars because it pads itself by the
+     * system insets). Called on the UI thread by LocalBackendServer.setSystemBars.
+     */
+    public void applySystemBars(String bgHex, String navHex, boolean lightBars) {
+        int bg;
+        int nav;
+        try {
+            bg = Color.parseColor(bgHex);
+            nav = Color.parseColor(navHex != null && !navHex.isEmpty() ? navHex : bgHex);
+        } catch (Exception e) {
+            return;
+        }
+        Window window = getWindow();
+        if (window != null) {
+            window.setStatusBarColor(bg);
+            window.setNavigationBarColor(nav);
+            View decor = window.getDecorView();
+            int flags = decor.getSystemUiVisibility();
+            flags = lightBars
+                ? (flags | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR)
+                : (flags & ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR & ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+            decor.setSystemUiVisibility(flags);
+        }
+        if (rootLayout != null) rootLayout.setBackgroundColor(bg);
+        if (webView != null) webView.setBackgroundColor(bg);
+    }
+
     public void startSaveDocument(final String filename, final String content, final String mimeType) {
         runOnUiThread(new Runnable() {
             @Override
@@ -216,12 +245,36 @@ public class MainActivity extends Activity {
                 }
                 MainActivity.this.filePathCallback = filePathCallback;
 
+                // Honour the <input accept="..."> of the page: images for avatars,
+                // .json for backup restore. Defaults to images as before.
+                String mime = "image/*";
+                String title = "Выберите изображение";
+                String[] accept = fileChooserParams != null ? fileChooserParams.getAcceptTypes() : null;
+                if (accept != null) {
+                    for (String a : accept) {
+                        if (a == null) continue;
+                        String t = a.trim().toLowerCase(java.util.Locale.ROOT);
+                        if (t.isEmpty()) continue;
+                        if (t.equals(".json") || t.equals("application/json")) {
+                            // Many file managers label .json as octet-stream or text; let the user pick any file.
+                            mime = "*/*";
+                            title = "Выберите файл резервной копии (.json)";
+                        } else if (t.startsWith("image/")) {
+                            mime = "image/*";
+                        } else if (t.contains("/")) {
+                            mime = t;
+                            title = "Выберите файл";
+                        }
+                        break;
+                    }
+                }
+
                 Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
-                intent.setType("image/*");
+                intent.setType(mime);
 
                 try {
-                    startActivityForResult(Intent.createChooser(intent, "Выберите изображение персонажа"), FILE_CHOOSER_RESULT_CODE);
+                    startActivityForResult(Intent.createChooser(intent, title), FILE_CHOOSER_RESULT_CODE);
                 } catch (Exception e) {
                     MainActivity.this.filePathCallback = null;
                     return false;
@@ -346,8 +399,14 @@ public class MainActivity extends Activity {
     @Override
     public void onBackPressed() {
         if (webView != null) {
+            // Newer web layers expose appUI.handleBack(), which walks their own
+            // layer stack (dialogs, sheets, pages, chat room, tabs). The legacy
+            // DOM walk below stays as the fallback for older OTA bundles.
             webView.evaluateJavascript(
                 "(function(){" +
+                "  if (window.appUI && typeof window.appUI.handleBack === 'function') {" +
+                "    try { return window.appUI.handleBack() === 'exit' ? 'exit' : 'handled'; } catch (e) { return 'exit'; }" +
+                "  }" +
                 "  var openModals = document.querySelectorAll('.modal-overlay:not(.hidden)');" +
                 "  if (openModals.length > 0) { openModals[openModals.length - 1].classList.add('hidden'); return 'modal'; }" +
                 "  var chatRoom = document.getElementById('chatRoomView');" +

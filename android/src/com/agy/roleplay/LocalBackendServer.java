@@ -147,6 +147,11 @@ public class LocalBackendServer {
         volatile int promptChars = 0;
         volatile String finishReason = "";
         volatile String error = "";
+        // Cancellation: the bridge thread blocks inside the generation call, so a
+        // second request flips this flag and tears down whatever I/O is in flight.
+        volatile boolean cancelled = false;
+        volatile HttpURLConnection activeConnection;
+        volatile Process activeProcess;
         final long startedAtMs = System.currentTimeMillis();
         volatile long finishedAtMs = 0L;
         final List<String> logs = Collections.synchronizedList(new ArrayList<String>());
@@ -162,6 +167,22 @@ public class LocalBackendServer {
         long getElapsedMs() {
             long end = finishedAtMs > 0L ? finishedAtMs : System.currentTimeMillis();
             return Math.max(0L, end - startedAtMs);
+        }
+
+        void cancel() {
+            cancelled = true;
+            HttpURLConnection conn = activeConnection;
+            if (conn != null) {
+                try { conn.disconnect(); } catch (Exception ignored) {}
+            }
+            Process proc = activeProcess;
+            if (proc != null) {
+                try { proc.destroy(); } catch (Exception ignored) {}
+            }
+        }
+
+        void throwIfCancelled() throws Exception {
+            if (cancelled) throw new Exception(CANCELLED_MSG);
         }
 
         JSONObject toJson() throws Exception {
@@ -185,6 +206,7 @@ public class LocalBackendServer {
             g.put("promptChars", promptChars);
             g.put("finishReason", finishReason);
             g.put("error", error);
+            g.put("cancelled", cancelled);
             long elapsed = getElapsedMs();
             g.put("elapsedMs", elapsed);
             g.put("elapsedSec", String.format(Locale.US, "%.1f", elapsed / 1000.0));
@@ -198,6 +220,8 @@ public class LocalBackendServer {
             return g;
         }
     }
+
+    private static final String CANCELLED_MSG = "Генерация остановлена";
 
     private final Map<Integer, GenerationProgress> activeGenerations = new ConcurrentHashMap<>();
     private final Map<Integer, GenerationProgress> lastGenerations = new ConcurrentHashMap<>();
@@ -359,6 +383,22 @@ public class LocalBackendServer {
         }
     }
 
+    /**
+     * Lets the web layer match the status/navigation bars and the window
+     * background to its theme. Colours are "#RRGGBB"; lightBars=true switches
+     * the system icons to dark for light themes.
+     */
+    @JavascriptInterface
+    public void setSystemBars(final String bgHex, final String navHex, final boolean lightBars) {
+        if (activity == null) return;
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                activity.applySystemBars(bgHex, navHex, lightBars);
+            }
+        });
+    }
+
     @JavascriptInterface
     public boolean isEmbeddedServer() {
         return true;
@@ -417,7 +457,7 @@ public class LocalBackendServer {
     // =========================================================================
     private synchronized void initWorkspaceAndDatabase() {
         try {
-            String[] subdirs = new String[]{"characters", "personas", "lore", "memories", "avatars", "exports"};
+            String[] subdirs = new String[]{"characters", "personas", "memories", "exports"};
             if (!workspaceDir.exists()) {
                 workspaceDir.mkdirs();
             }
@@ -475,6 +515,9 @@ public class LocalBackendServer {
             addColumnIfMissing("chats", "system_prompt_path", "TEXT DEFAULT ''");
             addColumnIfMissing("chats", "first_message_path", "TEXT DEFAULT ''");
             addColumnIfMissing("chats", "project_path", "TEXT DEFAULT ''");
+            // Thoughts per swipe, parallel to swipes_json, so switching variants
+            // also switches the reasoning shown for that variant.
+            addColumnIfMissing("messages", "thought_swipes_json", "TEXT DEFAULT '[]'");
 
             setDefaultSetting("project_id", "project-4c7a8e8a-764a-42bc-bdf");
             setDefaultSetting("selected_model", "gemini-4-argon");
@@ -704,11 +747,11 @@ public class LocalBackendServer {
         try {
             File geminiMd = new File(workspaceDir, "GEMINI.md");
             if (!geminiMd.exists()) {
-                writeTextFile(geminiMd, "# GEMINI.md\n\n");
+                writeTextFile(geminiMd, "");
             } else {
                 String existingGemini = readTextFile(geminiMd);
                 if (existingGemini.startsWith("# Системные правила ролевой игры (AGY Roleplay Engine)")) {
-                    writeTextFile(geminiMd, "# GEMINI.md\n\n");
+                    writeTextFile(geminiMd, "");
                 }
             }
 
@@ -949,6 +992,25 @@ public class LocalBackendServer {
         return "gemini-4-argon";
     }
 
+    private static String normalizeEffort(String raw) {
+        String e = raw != null ? raw.trim().toLowerCase(Locale.ROOT) : "";
+        switch (e) {
+            case "low": case "medium": case "high": case "xhigh": case "max":
+                return e;
+            default:
+                return "high";
+        }
+    }
+
+    /** Build number of the native engine (the APK's bundled version.json), for UI feature detection. */
+    private int getEngineBuild() {
+        try {
+            return readBundledVersionManifest().optInt("build", 0);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
     private String resolveCliModelId(String baseModelId, String effort) {
         String base = normalizeBaseModelId(baseModelId);
         String eff = (effort != null ? effort.toLowerCase(Locale.ROOT) : "high");
@@ -988,6 +1050,7 @@ public class LocalBackendServer {
             res.put("projectId", getSetting("project_id", "project-4c7a8e8a-764a-42bc-bdf"));
             res.put("workspaceDir", workspaceDir.getAbsolutePath());
             res.put("embeddedServer", true);
+            res.put("engineBuild", getEngineBuild());
             return res;
         }
 
@@ -1013,24 +1076,20 @@ public class LocalBackendServer {
                 res.put("claudeProjectPath", getSetting("claude_project_path", ""));
                 res.put("claudeRuntimeReady", claudeRuntime.isReady(rtVer));
                 res.put("claudeAuthenticated", claudeRuntime.isAuthenticated());
+                // Lets a newer OTA web layer feature-detect what this native engine supports.
+                res.put("engineBuild", getEngineBuild());
                 return res;
             }
             if (method.equals("POST")) {
                 if (body.has("projectId")) setSetting("project_id", body.optString("projectId").trim());
                 if (body.has("claudeProjectPath")) setSetting("claude_project_path", body.optString("claudeProjectPath").trim());
+                // Defaults for NEW chats only. Existing chats keep their own model/effort,
+                // which is changed per chat via PATCH /api/chats/:id.
                 if (body.has("selectedModel")) {
-                    String normModel = normalizeBaseModelId(body.optString("selectedModel").trim());
-                    setSetting("selected_model", normModel);
-                    ContentValues mCv = new ContentValues();
-                    mCv.put("model_id", normModel);
-                    db.update("chats", mCv, null, null);
+                    setSetting("selected_model", normalizeBaseModelId(body.optString("selectedModel").trim()));
                 }
                 if (body.has("selectedEffort")) {
-                    String eff = body.optString("selectedEffort").trim();
-                    setSetting("selected_effort", eff);
-                    ContentValues eCv = new ContentValues();
-                    eCv.put("effort", eff);
-                    db.update("chats", eCv, null, null);
+                    setSetting("selected_effort", normalizeEffort(body.optString("selectedEffort")));
                 }
                 if (body.has("activePersonaId")) setSetting("active_persona_id", String.valueOf(body.optInt("activePersonaId", 1)));
                 if (body.has("safetyThreshold")) {
@@ -1090,6 +1149,7 @@ public class LocalBackendServer {
                         }
                     });
                     for (File f : files) {
+                        if (f.getName().startsWith(".")) continue;
                         JSONObject item = new JSONObject();
                         String itemRel = rel.isEmpty() ? f.getName() : (rel + "/" + f.getName());
                         item.put("name", f.getName());
@@ -1258,18 +1318,16 @@ public class LocalBackendServer {
                     return getChatDetailsJson(chatId);
                 }
                 if (method.equals("PATCH")) {
+                    // Changes apply to THIS chat only; defaults for new chats live in /api/settings.
                     ContentValues cv = new ContentValues();
-                    if (body.has("modelId")) {
-                        String normModel = normalizeBaseModelId(body.optString("modelId"));
-                        cv.put("model_id", normModel);
-                        setSetting("selected_model", normModel);
-                    }
-                    if (body.has("effort")) {
-                        String eff = body.optString("effort");
-                        cv.put("effort", eff);
-                        setSetting("selected_effort", eff);
-                    }
+                    if (body.has("modelId")) cv.put("model_id", normalizeBaseModelId(body.optString("modelId")));
+                    if (body.has("effort")) cv.put("effort", normalizeEffort(body.optString("effort")));
                     if (body.has("personaId")) cv.put("persona_id", body.optInt("personaId"));
+                    if (body.has("title")) {
+                        String title = body.optString("title", "").trim();
+                        if (title.length() > 120) title = title.substring(0, 120);
+                        cv.put("title", title);
+                    }
                     if (cv.size() > 0) {
                         db.update("chats", cv, "id = ?", new String[]{String.valueOf(chatId)});
                     }
@@ -1297,6 +1355,26 @@ public class LocalBackendServer {
                 return res;
             } else if (parts.length == 2 && parts[1].equals("messages") && method.equals("POST")) {
                 return handleSendChatMessage(chatId, body);
+            } else if (parts.length == 3 && parts[1].equals("generation") && parts[2].equals("cancel") && method.equals("POST")) {
+                GenerationProgress prog = activeGenerations.get(chatId);
+                if (prog != null) {
+                    prog.addLog("⏹ Остановка по запросу пользователя");
+                    prog.cancel();
+                }
+                JSONObject res = new JSONObject();
+                res.put("ok", true);
+                res.put("wasActive", prog != null);
+                return res;
+            } else if (parts.length == 2 && parts[1].equals("system-prompt") && method.equals("GET")) {
+                JSONObject details = getChatDetailsJson(chatId);
+                if (details.has("__status")) return details;
+                JSONObject chat = details.getJSONObject("chat");
+                String sp = buildSystemPrompt(details.getJSONObject("character"), details.getJSONObject("persona"),
+                    chat.optString("memory_file_path", ""));
+                JSONObject res = new JSONObject();
+                res.put("systemPrompt", sp);
+                res.put("chars", sp.length());
+                return res;
             }
         }
 
@@ -1655,6 +1733,10 @@ public class LocalBackendServer {
         if (!rawPath.contains("/")) rawPath = "characters/" + rawPath;
         if (!rawPath.endsWith(".md") && !rawPath.endsWith(".txt")) rawPath += ".md";
         String relPath = sanitizeRelPath(rawPath);
+        String previousPath = editId != null ? lookupFilePath("characters", editId) : "";
+        if (editId == null || !relPath.equals(previousPath)) {
+            relPath = uniqueCardPath("characters", relPath, editId);
+        }
 
         String avatarUrl = body.optString("avatarUrl", "").trim();
         if (avatarUrl.isEmpty()) {
@@ -1663,9 +1745,13 @@ public class LocalBackendServer {
         String firstMsg = body.optString("firstMessage", "").trim();
         String desc = body.optString("description", "").trim();
         String rawFileContent = body.optString("rawFileContent", "").trim();
+        // A card editor that sends the "rawFileContent" key owns the whole file:
+        // its text is written verbatim (even when empty) and becomes exactly what
+        // the model sees inside <character_persona>.
+        boolean verbatim = body.has("rawFileContent") && !body.isNull("rawFileContent");
 
         String fileText;
-        if (!rawFileContent.isEmpty()) {
+        if (verbatim || !rawFileContent.isEmpty()) {
             fileText = rawFileContent;
         } else {
             StringBuilder fb = new StringBuilder("# Имя: ").append(name).append("\n\n### Описание и Характер\n").append(desc).append("\n");
@@ -1676,6 +1762,9 @@ public class LocalBackendServer {
         }
 
         writeTextFile(new File(workspaceDir, relPath), fileText);
+        if (!previousPath.isEmpty() && !previousPath.equals(relPath)) {
+            new File(workspaceDir, previousPath).delete();
+        }
 
         ContentValues cv = new ContentValues();
         cv.put("name", name);
@@ -1689,7 +1778,7 @@ public class LocalBackendServer {
             db.update("characters", cv, "id = ?", new String[]{String.valueOf(editId)});
             finalId = editId;
         } else {
-            finalId = (int) db.insertWithOnConflict("characters", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+            finalId = (int) db.insert("characters", null, cv);
         }
 
         JSONObject res = new JSONObject();
@@ -1749,6 +1838,10 @@ public class LocalBackendServer {
         if (!rawPath.contains("/")) rawPath = "personas/" + rawPath;
         if (!rawPath.endsWith(".md") && !rawPath.endsWith(".txt")) rawPath += ".md";
         String relPath = sanitizeRelPath(rawPath);
+        String previousPath = editId != null ? lookupFilePath("personas", editId) : "";
+        if (editId == null || !relPath.equals(previousPath)) {
+            relPath = uniqueCardPath("personas", relPath, editId);
+        }
 
         String avatarUrl = body.optString("avatarUrl", "").trim();
         if (avatarUrl.isEmpty()) {
@@ -1756,11 +1849,15 @@ public class LocalBackendServer {
         }
         String desc = body.optString("description", "").trim();
         String rawFileContent = body.optString("rawFileContent", "").trim();
-        String fileText = !rawFileContent.isEmpty()
+        boolean verbatim = body.has("rawFileContent") && !body.isNull("rawFileContent");
+        String fileText = (verbatim || !rawFileContent.isEmpty())
             ? rawFileContent
             : ("# Имя: " + name + "\n## Описание персоны игрока\n" + desc + "\n");
 
         writeTextFile(new File(workspaceDir, relPath), fileText);
+        if (!previousPath.isEmpty() && !previousPath.equals(relPath)) {
+            new File(workspaceDir, previousPath).delete();
+        }
 
         ContentValues cv = new ContentValues();
         cv.put("name", name);
@@ -1773,7 +1870,7 @@ public class LocalBackendServer {
             db.update("personas", cv, "id = ?", new String[]{String.valueOf(editId)});
             finalId = editId;
         } else {
-            finalId = (int) db.insertWithOnConflict("personas", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+            finalId = (int) db.insert("personas", null, cv);
         }
 
         JSONObject res = new JSONObject();
@@ -1782,16 +1879,52 @@ public class LocalBackendServer {
         return res;
     }
 
+    private String lookupFilePath(String table, int id) {
+        Cursor c = db.rawQuery("SELECT file_path FROM " + table + " WHERE id = ?", new String[]{String.valueOf(id)});
+        try {
+            return c.moveToFirst() && c.getString(0) != null ? c.getString(0) : "";
+        } finally {
+            c.close();
+        }
+    }
+
+    /**
+     * Returns relPath, or relPath with a numeric suffix, so that no other card
+     * row and no existing file already uses it. Creating a second card with the
+     * same name used to REPLACE the first row (orphaning its chats).
+     */
+    private String uniqueCardPath(String table, String relPath, Integer selfId) {
+        int dot = relPath.lastIndexOf('.');
+        String stem = dot > 0 ? relPath.substring(0, dot) : relPath;
+        String ext = dot > 0 ? relPath.substring(dot) : "";
+        String candidate = relPath;
+        for (int n = 2; n < 1000; n++) {
+            Cursor c = db.rawQuery("SELECT id FROM " + table + " WHERE file_path = ?", new String[]{candidate});
+            boolean takenByOther;
+            try {
+                takenByOther = c.moveToFirst() && (selfId == null || c.getInt(0) != selfId);
+            } finally {
+                c.close();
+            }
+            boolean fileTaken = selfId == null && new File(workspaceDir, candidate).exists();
+            if (!takenByOther && !fileTaken) return candidate;
+            candidate = stem + "_" + n + ext;
+        }
+        return stem + "_" + System.currentTimeMillis() + ext;
+    }
+
     private JSONArray queryChatsListArray() throws Exception {
         JSONArray arr = new JSONArray();
         String sql = "SELECT c.id, c.title, c.character_id, c.persona_id, c.model_id, c.effort, c.memory_file_path, " +
             "ch.name, ch.avatar_url, ch.file_path, p.name, " +
             "(SELECT content FROM messages m WHERE m.chat_id = c.id ORDER BY m.id DESC LIMIT 1), " +
-            "(SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) " +
+            "(SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id), " +
+            "MAX(COALESCE(c.updated_at, c.created_at, ''), COALESCE((SELECT MAX(m.created_at) FROM messages m WHERE m.chat_id = c.id), '')) AS last_activity, " +
+            "c.created_at " +
             "FROM chats c " +
             "LEFT JOIN characters ch ON ch.id = c.character_id " +
             "LEFT JOIN personas p ON p.id = c.persona_id " +
-            "ORDER BY c.id DESC";
+            "ORDER BY last_activity DESC, c.id DESC";
         Cursor cur = db.rawQuery(sql, null);
         while (cur.moveToNext()) {
             JSONObject o = new JSONObject();
@@ -1808,6 +1941,8 @@ public class LocalBackendServer {
             o.put("persona_name", cur.getString(10) != null ? cur.getString(10) : "Игрок");
             o.put("last_message", cur.getString(11) != null ? cur.getString(11) : "");
             o.put("message_count", cur.getInt(12));
+            o.put("last_activity", cur.getString(13) != null ? cur.getString(13) : "");
+            o.put("created_at", cur.getString(14) != null ? cur.getString(14) : "");
             arr.put(o);
         }
         cur.close();
@@ -1887,7 +2022,7 @@ public class LocalBackendServer {
     }
 
     private JSONObject getChatDetailsJson(int chatId) throws Exception {
-        Cursor c = db.rawQuery("SELECT id, title, character_id, persona_id, model_id, effort, memory_file_path, provider, system_prompt_path, first_message_path, project_path FROM chats WHERE id = ?", new String[]{String.valueOf(chatId)});
+        Cursor c = db.rawQuery("SELECT id, title, character_id, persona_id, model_id, effort, memory_file_path, provider, system_prompt_path, first_message_path, project_path, created_at FROM chats WHERE id = ?", new String[]{String.valueOf(chatId)});
         if (!c.moveToFirst()) {
             c.close();
             return errorJson(404, "Чат не найден");
@@ -1906,6 +2041,7 @@ public class LocalBackendServer {
         chat.put("system_prompt_path", c.getString(8) != null ? c.getString(8) : "");
         chat.put("first_message_path", c.getString(9) != null ? c.getString(9) : "");
         chat.put("project_path", c.getString(10) != null ? c.getString(10) : "");
+        chat.put("created_at", c.getString(11) != null ? c.getString(11) : "");
         c.close();
 
         JSONObject character = getCharacterByIdJson(charId);
@@ -1945,7 +2081,7 @@ public class LocalBackendServer {
 
     private JSONArray getChatMessagesArray(int chatId) throws Exception {
         JSONArray arr = new JSONArray();
-        Cursor c = db.rawQuery("SELECT id, chat_id, role, content, thoughts, swipes_json, swipe_index, created_at FROM messages WHERE chat_id = ? ORDER BY id ASC", new String[]{String.valueOf(chatId)});
+        Cursor c = db.rawQuery("SELECT id, chat_id, role, content, thoughts, swipes_json, swipe_index, created_at, thought_swipes_json FROM messages WHERE chat_id = ? ORDER BY id ASC", new String[]{String.valueOf(chatId)});
         while (c.moveToNext()) {
             arr.put(cursorToMessageJson(c));
         }
@@ -1954,7 +2090,7 @@ public class LocalBackendServer {
     }
 
     private JSONObject getMessageByIdJson(int msgId) throws Exception {
-        Cursor c = db.rawQuery("SELECT id, chat_id, role, content, thoughts, swipes_json, swipe_index, created_at FROM messages WHERE id = ?", new String[]{String.valueOf(msgId)});
+        Cursor c = db.rawQuery("SELECT id, chat_id, role, content, thoughts, swipes_json, swipe_index, created_at, thought_swipes_json FROM messages WHERE id = ?", new String[]{String.valueOf(msgId)});
         JSONObject o = null;
         if (c.moveToFirst()) {
             o = cursorToMessageJson(c);
@@ -1981,6 +2117,14 @@ public class LocalBackendServer {
         o.put("swipes", swipes);
         o.put("swipe_index", c.getInt(6));
         o.put("created_at", c.getString(7));
+        JSONArray thoughtSwipes;
+        try {
+            String ts = c.getString(8);
+            thoughtSwipes = new JSONArray(ts != null && !ts.isEmpty() ? ts : "[]");
+        } catch (Exception e) {
+            thoughtSwipes = new JSONArray();
+        }
+        o.put("thought_swipes", thoughtSwipes);
         return o;
     }
 
@@ -2026,23 +2170,15 @@ public class LocalBackendServer {
         String[] result;
         try {
             result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, history, chat.optString("memory_file_path", ""), prog);
+            prog.throwIfCancelled();
             prog.status = "completed";
             prog.phase = "completed";
             prog.finishedAtMs = System.currentTimeMillis();
             prog.statusText = "✅ Ответ получен от " + baseModel + " (" + prog.textChars + " симв.)";
             prog.addLog("✅ Генерация успешно завершена за " + String.format(Locale.US, "%.1f", prog.getElapsedMs() / 1000.0) + " сек");
         } catch (Exception e) {
-            String errMsg = e.getMessage() != null ? e.getMessage() : "Ошибка обращения к AGY";
-            prog.status = "error";
-            prog.phase = "error";
-            prog.error = errMsg;
-            prog.finishedAtMs = System.currentTimeMillis();
-            prog.statusText = "❌ Ошибка (" + baseModel + "): " + errMsg;
-            prog.addLog("❌ Завершено с ошибкой: " + errMsg);
             db.delete("messages", "id = ?", new String[]{String.valueOf(userMsgId)});
-            JSONObject errRes = errorJson(401, errMsg);
-            errRes.put("generation", prog.toJson());
-            return errRes;
+            return generationFailure(prog, baseModel, e);
         } finally {
             activeGenerations.remove(chatId);
         }
@@ -2052,20 +2188,63 @@ public class LocalBackendServer {
 
         JSONArray aiSwipes = new JSONArray();
         aiSwipes.put(replyText);
+        JSONArray aiThoughtSwipes = new JSONArray();
+        aiThoughtSwipes.put(thoughtsText != null ? thoughtsText : "");
         ContentValues aCv = new ContentValues();
         aCv.put("chat_id", chatId);
         aCv.put("role", "assistant");
         aCv.put("content", replyText);
         aCv.put("thoughts", thoughtsText);
         aCv.put("swipes_json", aiSwipes.toString());
+        aCv.put("thought_swipes_json", aiThoughtSwipes.toString());
         aCv.put("swipe_index", 0);
         int aiMsgId = (int) db.insert("messages", null, aCv);
+        touchChat(chatId);
 
         JSONObject res = new JSONObject();
         res.put("assistantMessage", getMessageByIdJson(aiMsgId));
         res.put("messages", getChatMessagesArray(chatId));
         res.put("generation", prog.toJson());
         return res;
+    }
+
+    /** Marks a failed or cancelled generation and builds the error response the UI expects. */
+    private JSONObject generationFailure(GenerationProgress prog, String baseModel, Exception e) throws Exception {
+        boolean cancelled = prog.cancelled;
+        String errMsg = cancelled
+            ? CANCELLED_MSG
+            : (e.getMessage() != null ? e.getMessage() : "Ошибка обращения к AGY");
+        prog.status = cancelled ? "cancelled" : "error";
+        prog.phase = cancelled ? "cancelled" : "error";
+        prog.error = errMsg;
+        prog.finishedAtMs = System.currentTimeMillis();
+        prog.statusText = cancelled ? "⏹ " + CANCELLED_MSG : "❌ Ошибка (" + baseModel + "): " + errMsg;
+        prog.addLog(cancelled ? "⏹ " + CANCELLED_MSG : "❌ Завершено с ошибкой: " + errMsg);
+        JSONObject errRes = errorJson(cancelled ? 409 : 401, errMsg);
+        errRes.put("cancelled", cancelled);
+        errRes.put("generation", prog.toJson());
+        return errRes;
+    }
+
+    private void touchChat(int chatId) {
+        try {
+            db.execSQL("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", new Object[]{chatId});
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static JSONArray alignedThoughtSwipes(JSONObject msg, int swipeCount) {
+        JSONArray src = msg.optJSONArray("thought_swipes");
+        JSONArray out = new JSONArray();
+        for (int i = 0; i < swipeCount; i++) {
+            String t = src != null ? src.optString(i, "") : "";
+            // Legacy rows kept a single thoughts value for whatever swipe was current.
+            if (t.isEmpty() && (src == null || src.length() == 0) && i == msg.optInt("swipe_index", 0)) {
+                t = msg.optString("thoughts", "");
+            }
+            out.put(t);
+        }
+        return out;
     }
 
     private JSONObject handleSwipeOrRegenerate(int msgId, JSONObject body) throws Exception {
@@ -2080,9 +2259,12 @@ public class LocalBackendServer {
             int idx = body.optInt("index", 0);
             int safeIdx = Math.max(0, Math.min(idx, swipes.length() - 1));
             String selectedText = swipes.optString(safeIdx, msg.optString("content"));
+            JSONArray thoughtSwipes = alignedThoughtSwipes(msg, swipes.length());
             ContentValues cv = new ContentValues();
             cv.put("swipe_index", safeIdx);
             cv.put("content", selectedText);
+            cv.put("thoughts", thoughtSwipes.optString(safeIdx, ""));
+            cv.put("thought_swipes_json", thoughtSwipes.toString());
             db.update("messages", cv, "id = ?", new String[]{String.valueOf(msgId)});
 
             JSONObject res = new JSONObject();
@@ -2122,37 +2304,33 @@ public class LocalBackendServer {
             String[] result;
             try {
                 result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, historyBefore, chat.optString("memory_file_path", ""), prog);
+                prog.throwIfCancelled();
                 prog.status = "completed";
                 prog.phase = "completed";
                 prog.finishedAtMs = System.currentTimeMillis();
                 prog.statusText = "✅ Новый вариант получен от " + baseModel + " (" + prog.textChars + " симв.)";
                 prog.addLog("✅ Перегенерация успешно завершена за " + String.format(Locale.US, "%.1f", prog.getElapsedMs() / 1000.0) + " сек");
             } catch (Exception e) {
-                String errMsg = e.getMessage() != null ? e.getMessage() : "Ошибка обращения к AGY";
-                prog.status = "error";
-                prog.phase = "error";
-                prog.error = errMsg;
-                prog.finishedAtMs = System.currentTimeMillis();
-                prog.statusText = "❌ Ошибка (" + baseModel + "): " + errMsg;
-                prog.addLog("❌ Завершено с ошибкой: " + errMsg);
-                JSONObject errRes = errorJson(401, errMsg);
-                errRes.put("generation", prog.toJson());
-                return errRes;
+                return generationFailure(prog, baseModel, e);
             } finally {
                 activeGenerations.remove(chatId);
             }
 
             String newReply = result[0];
-            String newThoughts = result[1];
+            String newThoughts = result[1] != null ? result[1] : "";
+            JSONArray thoughtSwipes = alignedThoughtSwipes(msg, swipes.length());
             swipes.put(newReply);
+            thoughtSwipes.put(newThoughts);
             int newIdx = swipes.length() - 1;
 
             ContentValues cv = new ContentValues();
             cv.put("content", newReply);
             cv.put("thoughts", newThoughts);
             cv.put("swipes_json", swipes.toString());
+            cv.put("thought_swipes_json", thoughtSwipes.toString());
             cv.put("swipe_index", newIdx);
             db.update("messages", cv, "id = ?", new String[]{String.valueOf(msgId)});
+            touchChat(chatId);
 
             JSONObject res = new JSONObject();
             res.put("message", getMessageByIdJson(msgId));
@@ -2823,30 +3001,16 @@ public class LocalBackendServer {
     }
 
     /**
-     * Builds the single stdin prompt handed to `claude -p`. The character card,
-     * persona card and chat memory are prepended as context (the system prompt is
-     * fully replaced by the user's chosen .md and need not contain them), followed
-     * by the full transcript and a short directive to continue as the character.
+     * Builds the single stdin prompt handed to `claude -p`: the full transcript
+     * plus a short directive to continue as the character. The character card,
+     * persona and chat memory travel in the system prompt (buildSystemPrompt),
+     * exactly as for the Vertex providers.
      */
-    private String buildClaudeTranscript(JSONObject character, JSONObject persona, JSONArray history, String memoryContent) throws Exception {
+    private String buildClaudeTranscript(JSONObject character, JSONObject persona, JSONArray history) throws Exception {
         String charName = character.optString("name", "Персонаж");
         String userName = persona.optString("name", "Игрок");
-        String charFile = character.optString("fileContent", "").trim();
-        String personaFile = persona.optString("fileContent", "").trim();
 
         StringBuilder sb = new StringBuilder();
-        if (!charFile.isEmpty()) {
-            sb.append("=== Карточка персонажа (").append(charName).append(") ===\n");
-            sb.append(charFile.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
-        }
-        if (!personaFile.isEmpty()) {
-            sb.append("=== Карточка игрока (").append(userName).append(") ===\n");
-            sb.append(personaFile.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
-        }
-        if (memoryContent != null && !memoryContent.trim().isEmpty()) {
-            sb.append("=== Память диалога ===\n").append(memoryContent.trim()).append("\n\n");
-        }
-
         sb.append("=== История диалога ===\n");
         for (int i = 0; i < history.length(); i++) {
             JSONObject m = history.optJSONObject(i);
@@ -2889,15 +3053,14 @@ public class LocalBackendServer {
         prog.vertexModel = "claude-code-cli";
         prog.effort = cliEffort;
 
-        // Per-chat Claude fields.
-        String sysPromptPath = "";
+        // Per-chat working directory (legacy system_prompt_path is no longer used:
+        // every provider now gets the same unified system prompt).
         String projectPathRel = "";
-        Cursor cc = db.rawQuery("SELECT system_prompt_path, project_path FROM chats WHERE id = ?",
+        Cursor cc = db.rawQuery("SELECT project_path FROM chats WHERE id = ?",
             new String[]{String.valueOf(chatId)});
         try {
             if (cc.moveToFirst()) {
-                sysPromptPath = cc.getString(0) != null ? cc.getString(0) : "";
-                projectPathRel = cc.getString(1) != null ? cc.getString(1) : "";
+                projectPathRel = cc.getString(0) != null ? cc.getString(0) : "";
             }
         } finally {
             cc.close();
@@ -2920,17 +3083,14 @@ public class LocalBackendServer {
             throw new Exception("Нет авторизации Claude. Откройте «Настройки» → «Claude Code CLI» и войдите по подписке.");
         }
 
-        // The chosen system-prompt .md lives in the workspace, bound into the
-        // sandbox at /workspace. Translate its relative path to the guest path.
-        String guestSysPrompt = "";
-        if (sysPromptPath != null && !sysPromptPath.trim().isEmpty()) {
-            String rel = sanitizeRelPath(sysPromptPath);
-            File onDisk = new File(workspaceDir, rel);
-            if (!onDisk.isFile()) {
-                throw new Exception("Файл системного промпта не найден в workspace: " + rel);
-            }
-            guestSysPrompt = ClaudeRuntime.GUEST_WORKSPACE + "/" + rel;
-        }
+        // The unified system prompt is written to a generated file inside the
+        // workspace (bound into the sandbox at /workspace) and always passed with
+        // --system-prompt-file, so the CLI never falls back to its own default
+        // coding-assistant prompt.
+        String systemPrompt = buildSystemPrompt(character, persona, memoryRelPath);
+        String sysPromptRel = ".agy/system_prompt_chat_" + chatId + ".md";
+        writeTextFile(new File(workspaceDir, sysPromptRel), systemPrompt);
+        String guestSysPrompt = ClaudeRuntime.GUEST_WORKSPACE + "/" + sysPromptRel;
 
         // Resolve the guest working directory (a workspace-relative project folder).
         String guestCwd = ClaudeRuntime.GUEST_WORKSPACE;
@@ -2941,11 +3101,9 @@ public class LocalBackendServer {
             guestCwd = ClaudeRuntime.GUEST_WORKSPACE + "/" + rel;
         }
 
-        String memoryContent = (memoryRelPath != null && !memoryRelPath.isEmpty())
-            ? readTextFile(new File(workspaceDir, memoryRelPath)).trim() : "";
-        String transcript = buildClaudeTranscript(character, persona, history, memoryContent);
+        String transcript = buildClaudeTranscript(character, persona, history);
         prog.contextMessagesCount = history.length();
-        prog.promptChars = transcript.length();
+        prog.promptChars = systemPrompt.length() + transcript.length();
 
         List<String> args = new ArrayList<>();
         args.add("-p");
@@ -2963,20 +3121,20 @@ public class LocalBackendServer {
         args.add("--permission-mode");
         args.add("dontAsk");
         args.add("--no-session-persistence");
-        if (!guestSysPrompt.isEmpty()) {
-            args.add("--system-prompt-file");
-            args.add(guestSysPrompt);
-        }
+        args.add("--system-prompt-file");
+        args.add(guestSysPrompt);
 
         prog.phase = "connecting";
         prog.endpoint = "proot · claude " + cliModel + " (" + cliEffort + ")";
         prog.statusText = "🤖 Запуск Claude Code (" + cliModel + " • " + cliEffort.toUpperCase(Locale.ROOT) + ")...";
         prog.addLog("proot → claude -p --model " + cliModel + " --effort " + cliEffort
-            + (guestSysPrompt.isEmpty() ? "" : " --system-prompt-file " + guestSysPrompt));
+            + " --system-prompt-file " + guestSysPrompt + " (" + systemPrompt.length() + " симв.)");
 
+        prog.throwIfCancelled();
         ProcessBuilder pb = claudeRuntime.newClaudeProcess(args, guestCwd);
         pb.environment().put("CI", "1"); // non-interactive generation only
         Process proc = pb.start();
+        prog.activeProcess = proc;
 
         // Feed the transcript on stdin and close it so -p starts generating.
         try {
@@ -3120,6 +3278,55 @@ public class LocalBackendServer {
         return new String[]{reply, thoughts};
     }
 
+    /**
+     * The complete system prompt of a chat, identical for every provider.
+     *
+     * The user's own instructions (workspace GEMINI.md, edited in the UI as
+     * «Системный промпт») come first and fully define behaviour: nothing else is
+     * prepended or hidden. Below them, in fixed tags, the character card, the
+     * chat's persona and (if filled in) the chat memory are appended.
+     */
+    private String buildSystemPrompt(JSONObject character, JSONObject persona, String memoryRelPath) {
+        String charName = character.optString("name", "Персонаж");
+        String userName = persona.optString("name", "Игрок");
+        String rules = readTextFile(new File(workspaceDir, "GEMINI.md")).trim();
+        // Older builds seeded the file with just this heading; it is not an instruction.
+        if (rules.equals("# GEMINI.md")) rules = "";
+        String charCard = character.optString("fileContent", "").trim();
+        String personaCard = persona.optString("fileContent", "").trim();
+        String memory = readChatMemory(memoryRelPath);
+
+        StringBuilder sb = new StringBuilder();
+        if (!rules.isEmpty()) {
+            sb.append(applyMacros(rules, charName, userName)).append("\n\n");
+        }
+        if (!charCard.isEmpty()) {
+            sb.append("<character_persona>\n").append(applyMacros(charCard, charName, userName)).append("\n</character_persona>\n\n");
+        }
+        if (!personaCard.isEmpty()) {
+            sb.append("<user_persona>\n").append(applyMacros(personaCard, charName, userName)).append("\n</user_persona>\n\n");
+        }
+        if (!memory.isEmpty()) {
+            sb.append("<chat_memory>\n").append(applyMacros(memory, charName, userName)).append("\n</chat_memory>\n\n");
+        }
+        return sb.toString().trim();
+    }
+
+    private static String applyMacros(String text, String charName, String userName) {
+        return text.replace("{{char}}", charName).replace("{{user}}", userName);
+    }
+
+    /** Chat memory text, or "" when the file only holds its auto-created heading. */
+    private String readChatMemory(String memoryRelPath) {
+        if (memoryRelPath == null || memoryRelPath.trim().isEmpty()) return "";
+        String text = readTextFile(new File(workspaceDir, sanitizeRelPath(memoryRelPath))).trim();
+        if (text.startsWith("# Память чата")) {
+            int nl = text.indexOf('\n');
+            text = nl >= 0 ? text.substring(nl + 1).trim() : "";
+        }
+        return text;
+    }
+
     private String[] generateRoleplayReply(
         int chatId,
         String projectId,
@@ -3138,33 +3345,7 @@ public class LocalBackendServer {
             return callClaudeCodeCli(chatId, baseModel, effort, character, persona, history, memoryRelPath, prog);
         }
 
-        String charName = character.optString("name", "Персонаж");
-        String userName = persona.optString("name", "Игрок");
-        String charFileContent = character.optString("fileContent", "").trim();
-        String personaFileContent = persona.optString("fileContent", "").trim();
-        String geminiRules = readTextFile(new File(workspaceDir, "GEMINI.md")).trim();
-        String loreContent = readTextFile(new File(workspaceDir, "lore/worlds.md")).trim();
-        String memoryContent = !memoryRelPath.isEmpty() ? readTextFile(new File(workspaceDir, memoryRelPath)).trim() : "";
-
-        // Build clean systemInstruction strictly from GEMINI.md and user files (NO hidden prompts!)
-        StringBuilder sysBuilder = new StringBuilder();
-        if (!geminiRules.isEmpty()) {
-            sysBuilder.append(geminiRules.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
-        }
-        if (!charFileContent.isEmpty()) {
-            sysBuilder.append("=== ").append(character.optString("file_path", "characters/character.md")).append(" ===\n");
-            sysBuilder.append(charFileContent.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
-        }
-        if (!personaFileContent.isEmpty()) {
-            sysBuilder.append("=== ").append(persona.optString("file_path", "personas/persona.md")).append(" ===\n");
-            sysBuilder.append(personaFileContent.replace("{{char}}", charName).replace("{{user}}", userName)).append("\n\n");
-        }
-        if (!loreContent.isEmpty()) {
-            sysBuilder.append("=== lore/worlds.md ===\n").append(loreContent).append("\n\n");
-        }
-        if (!memoryContent.isEmpty()) {
-            sysBuilder.append("=== ").append(memoryRelPath).append(" ===\n").append(memoryContent).append("\n\n");
-        }
+        String systemInstructionText = buildSystemPrompt(character, persona, memoryRelPath);
 
         // Build clean conversation contents array (strictly alternating user/model turns)
         // Always include 100% of the conversation history (#1..#N) so the model receives the complete story context
@@ -3217,12 +3398,10 @@ public class LocalBackendServer {
             contents.put(turn);
         }
 
-        String systemInstructionText = sysBuilder.toString().trim();
         prog.contextMessagesCount = contents.length();
         prog.promptChars = systemInstructionText.length() + historyChars;
         prog.addLog("Контекст подготовлен: системный промпт=" + systemInstructionText.length()
-            + " симв. (GEMINI.md=" + geminiRules.length() + ", перс=" + charFileContent.length()
-            + "), полная история=" + contents.length() + " ходов (" + historyChars + " симв., 100% без обрезки)");
+            + " симв., полная история=" + contents.length() + " ходов (" + historyChars + " симв., 100% без обрезки)");
 
         return callAntigravityGateway(projectId, baseModel, effort, systemInstructionText, contents, prog);
     }
@@ -3291,7 +3470,9 @@ public class LocalBackendServer {
             anthReq.put("messages", anthMessages);
 
             URL url = new URL(urlStr);
+            prog.throwIfCancelled();
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            prog.activeConnection = conn;
             conn.setRequestMethod("POST");
             conn.setConnectTimeout(25000);
             conn.setReadTimeout(180000);
@@ -3366,6 +3547,7 @@ public class LocalBackendServer {
         boolean reduceThinkingForMaxTokens = false;
 
         for (int attemptIdx = 0; attemptIdx < maxAttempts; attemptIdx++) {
+            prog.throwIfCancelled();
             int effectiveStage = (startWithNsfwBypass && attemptIdx == 0) ? 1 : attemptIdx;
 
             String activeSafetyThreshold;
@@ -3437,7 +3619,9 @@ public class LocalBackendServer {
             prog.addLog("Параметры генерации: " + prog.thinkingConfigSummary + ", контекст=" + stageContents.length() + " ходов (100%), project=" + proj);
 
             URL url = new URL(urlStr);
+            prog.throwIfCancelled();
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            prog.activeConnection = conn;
             conn.setRequestMethod("POST");
             conn.setConnectTimeout(25000);
             conn.setReadTimeout(180000);

@@ -1,24 +1,25 @@
 (function () {
-  // Android 16 native WindowInsets hook called by MainActivity.java
+  'use strict';
+
+  // ==========================================================================
+  // NATIVE BRIDGE CONTRACT
+  // Called by MainActivity / LocalBackendServer. Names and signatures are part
+  // of the contract with every shipped native engine — do not rename.
+  // ==========================================================================
   window.__setAndroidInsets = function (topPx, bottomPx) {
     document.documentElement.style.setProperty('--safe-top', topPx + 'px');
     document.documentElement.style.setProperty('--safe-bottom', bottomPx + 'px');
   };
 
   const DEFAULT_LAN_URL = 'http://127.0.0.1:3001';
-  const isFileProtocol = window.location.protocol === 'file:';
-  const hasEmbeddedApkServer = typeof window.AndroidServer !== 'undefined';
-
-  // Pending promises for embedded AndroidServer.requestAsync calls
+  const hasBridge = typeof window.AndroidServer !== 'undefined';
   const pendingAndroidRequests = new Map();
   let androidReqCounter = 1;
 
   function decodeBase64Utf8(b64) {
     const binString = window.atob(b64);
     const bytes = new Uint8Array(binString.length);
-    for (let i = 0; i < binString.length; i++) {
-      bytes[i] = binString.charCodeAt(i);
-    }
+    for (let i = 0; i < binString.length; i++) bytes[i] = binString.charCodeAt(i);
     return new TextDecoder('utf-8').decode(bytes);
   }
 
@@ -27,8 +28,7 @@
     if (!entry) return;
     pendingAndroidRequests.delete(reqId);
     try {
-      const jsonStr = decodeBase64Utf8(b64Json);
-      const data = JSON.parse(jsonStr || '{}');
+      const data = JSON.parse(decodeBase64Utf8(b64Json) || '{}');
       if (status >= 200 && status < 300) {
         entry.resolve(data);
       } else {
@@ -43,122 +43,26 @@
   };
 
   function getServerBaseUrl() {
-    if (!isFileProtocol && window.location.origin && window.location.origin !== 'null') {
-      return window.location.origin;
-    }
+    const loc = window.location || {};
+    if (loc.protocol !== 'file:' && loc.origin && loc.origin !== 'null') return loc.origin;
     return DEFAULT_LAN_URL;
   }
 
-  const state = {
-    serverUrl: getServerBaseUrl(),
-    projectId: 'project-4c7a8e8a-764a-42bc-bdf',
-    agyAuthenticated: false,
-    agyEmail: '',
-    selectedModel: 'gemini-4-argon',
-    selectedEffort: 'high',
-    safetyThreshold: 'OFF',
-    activePersonaId: 1,
-    claudeRuntimeReady: false,
-    claudeAuthenticated: false,
-    claudeProjectPath: '',
-    models: [],
-    characters: [],
-    personas: [],
-    chats: [],
-    collapsedChatGroups: {},
-    currentChatId: null,
-    currentChatData: null,
-    currentFilesPath: '',
-    pollTimer: null,
-    elapsedTimer: null,
-    generationStartMs: 0,
-    streamingExpanded: false,
-    lastGeneration: null,
-    isSending: false,
-    isKeyboardOpen: false,
-    ignoreScrollEvents: false,
-  };
-
-  let navTransitionUntil = 0;
-
-  function setBottomNavHidden(hidden) {
-    const nav = document.getElementById('bottomNav');
-    if (!nav) return;
-    const isCurrentlyHidden = nav.classList.contains('nav-hidden');
-    if (isCurrentlyHidden === Boolean(hidden)) return;
-    navTransitionUntil = Date.now() + 260;
-    nav.classList.toggle('nav-hidden', Boolean(hidden));
-  }
-
-  function autoResizeChatInput() {
-    const input = document.getElementById('chatInput');
-    if (!input) return;
-    input.style.height = 'auto';
-    const maxH = 125; // 5 visible lines (5 * 21px + 20px vertical padding/border)
-    const scrollH = input.scrollHeight;
-    const nextH = Math.min(Math.max(scrollH, 41), maxH);
-    input.style.height = nextH + 'px';
-    input.style.overflowY = scrollH > maxH ? 'auto' : 'hidden';
-  }
-
-  // Callback invoked by Android LocalBackendServer when OAuth callback completes in background
-  window.__onAgyOAuthSuccess = function (b64Json) {
-    try {
-      const jsonStr = decodeBase64Utf8(b64Json);
-      const data = JSON.parse(jsonStr || '{}');
-      state.agyAuthenticated = Boolean(data.authenticated);
-      state.agyEmail = data.email || state.agyEmail;
-      if (data.projectId) {
-        state.projectId = data.projectId;
-        const projInput = document.getElementById('inputProjectId');
-        if (projInput) projInput.value = state.projectId;
-      }
-      renderAgyAuthStatus();
-      updateHeaderIndicators(true);
-      showToast(`✅ Вы вошли в Google Antigravity${state.agyEmail ? ' (' + state.agyEmail + ')' : ''}!`);
-    } catch (e) {}
-  };
-
-  const FALLBACK_AVATAR =
-    "data:image/svg+xml;utf8," +
-    encodeURIComponent(
-      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><rect width="120" height="120" rx="24" fill="#1b1f27"/><circle cx="60" cy="46" r="22" fill="#7c90c9"/><path d="M22 110 C26 76, 94 76, 98 110 Z" fill="#465685"/></svg>'
-    );
-
-  function resolveAvatarUrl(url) {
-    if (!url) return FALLBACK_AVATAR;
-    if (url.startsWith('data:') || url.startsWith('http://') || url.startsWith('https://') || url.startsWith('file:')) {
-      return url;
-    }
-    if (hasEmbeddedApkServer) {
-      return FALLBACK_AVATAR;
-    }
-    return state.serverUrl + (url.startsWith('/') ? url : '/' + url);
-  }
-
-  function showToast(msg) {
-    const box = document.getElementById('toastBox');
-    if (!box) return;
-    box.textContent = msg;
-    box.classList.remove('hidden');
-    clearTimeout(box._timer);
-    box._timer = setTimeout(() => box.classList.add('hidden'), 2800);
-  }
-
-  async function apiFetch(endpoint, options = {}) {
-    if (typeof window.AndroidServer !== 'undefined' && typeof window.AndroidServer.requestAsync === 'function') {
-      const method = (options.method || 'GET').toUpperCase();
-      const bodyStr = typeof options.body === 'string' ? options.body : (options.body ? JSON.stringify(options.body) : '');
+  async function api(endpoint, options = {}) {
+    const method = (options.method || 'GET').toUpperCase();
+    const bodyStr = typeof options.body === 'string' ? options.body : (options.body ? JSON.stringify(options.body) : '');
+    if (hasBridge && typeof window.AndroidServer.requestAsync === 'function') {
       const reqId = 'req_' + (androidReqCounter++) + '_' + Date.now();
       return new Promise((resolve, reject) => {
         pendingAndroidRequests.set(reqId, { resolve, reject });
         window.AndroidServer.requestAsync(reqId, method, endpoint, bodyStr);
       });
     }
-
-    const url = state.serverUrl + endpoint;
-    const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
-    const res = await fetch(url, Object.assign({}, options, { headers }));
+    const res = await fetch(state.serverUrl + endpoint, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: bodyStr || undefined,
+    });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const err = new Error(data.error || `Ошибка сервера (${res.status})`);
@@ -169,12 +73,16 @@
     return data;
   }
 
+  // ==========================================================================
+  // PURE HELPERS (unit-tested through window.__appInternals)
+  // ==========================================================================
   function escapeHtml(str) {
     return String(str ?? '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function stripMarkdownPreview(rawText) {
@@ -190,51 +98,48 @@
       .trim();
   }
 
-  function formatInlineMarkdown(escapedText, inlineCodes) {
+  // Wraps spoken lines in a span so they can be tinted. Runs on already-escaped
+  // text, where straight double quotes appear as &quot;.
+  function highlightDialogue(escapedText) {
+    return escapedText
+      .replace(/«[^«»\n]{1,1200}»/g, '<span class="rp-dialogue">$&</span>')
+      .replace(/„[^„“\n]{1,1200}“/g, '<span class="rp-dialogue">$&</span>')
+      .replace(/“[^“”\n]{1,1200}”/g, '<span class="rp-dialogue">$&</span>')
+      .replace(/&quot;(?:(?!&quot;)[^\n]){1,1200}&quot;/g, '<span class="rp-dialogue">$&</span>');
+  }
+
+  function formatInlineMarkdown(escapedText, inlineCodes, opts) {
     let s = escapedText;
-    // Extract inline code `...`
     s = s.replace(/`([^`\n]+)`/g, (_, code) => {
       const idx = inlineCodes.length;
       inlineCodes.push(`<code class="md-inline-code">${code}</code>`);
       return `\u0000INLINECODE_${idx}\u0000`;
     });
-
-    // Bold + Italic ***text*** or ___text___
+    if (opts && opts.dialogue) s = highlightDialogue(s);
     s = s.replace(/\*\*\*([\s\S]+?)\*\*\*/g, '<strong><em class="rp-italic">$1</em></strong>');
     s = s.replace(/___([\s\S]+?)___/g, '<strong><em class="rp-italic">$1</em></strong>');
-
-    // Bold **text** or __text__
     s = s.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
     s = s.replace(/__([\s\S]+?)__/g, '<strong>$1</strong>');
-
-    // Italic *text* (renders clean italic without asterisks, colored muted gray via CSS)
     s = s.replace(/\*([^*]+?)\*/g, '<em class="rp-italic">$1</em>');
-    // Italic _text_ (word-bounded so snake_case identifiers remain untouched)
+    // Word-bounded so snake_case identifiers remain untouched
     s = s.replace(/(^|[\s(>«"'])_([^_\n]+?)_(?=$|[\s.,!?:;)<»"'])/g, '$1<em class="rp-italic">$2</em>');
-
-    // Strikethrough ~~text~~
     s = s.replace(/~~([\s\S]+?)~~/g, '<del>$1</del>');
-
-    // Restore inline code
     s = s.replace(/\u0000INLINECODE_(\d+)\u0000/g, (_, idx) => inlineCodes[Number(idx)] || '');
     return s;
   }
 
   /**
-   * Full Markdown renderer for Roleplay messages:
-   * - *action* -> gray italic <em> without asterisks so dialogue stands out
-   * - **bold**, ***bold-italic***, ~~strikethrough~~, `inline code`, ```code blocks```
-   * - Headings, blockquotes, lists, horizontal rules, and clean paragraphs
+   * Markdown renderer for roleplay prose: *action* → muted italic, **bold**,
+   * ***both***, ~~strike~~, `code`, fenced code, headings, quotes, lists, rules.
+   * Input is escaped first; only the tags produced here reach the DOM.
+   * opts.dialogue tints «…» / "…" speech.
    */
-  function formatRoleplayHtml(rawText) {
+  function formatRoleplayHtml(rawText, opts) {
     if (!rawText) return '<p></p>';
-    const normalized = String(rawText).replace(/\r\n/g, '\n');
-    const escaped = escapeHtml(normalized);
-
+    const escaped = escapeHtml(String(rawText).replace(/\r\n/g, '\n'));
     const codeBlocks = [];
     const inlineCodes = [];
 
-    // 1. Extract fenced code blocks ```lang ... ```
     const withoutCodeBlocks = escaped.replace(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
       const idx = codeBlocks.length;
       const langBadge = lang ? `<div class="md-code-lang">${lang}</div>` : '';
@@ -242,11 +147,8 @@
       return `\n\n\u0000CODEBLOCK_${idx}\u0000\n\n`;
     });
 
-    // 2. Split into blocks by blank lines
-    const rawBlocks = withoutCodeBlocks.split(/\n{2,}/);
     const htmlBlocks = [];
-
-    for (let block of rawBlocks) {
+    for (const block of withoutCodeBlocks.split(/\n{2,}/)) {
       const trimmed = block.trim();
       if (!trimmed) continue;
 
@@ -255,3248 +157,4225 @@
         htmlBlocks.push(codeBlocks[Number(codeMatch[1])] || '');
         continue;
       }
-
       if (/^(?:---|___|\*\*\*)$/.test(trimmed)) {
         htmlBlocks.push('<hr class="md-hr" />');
         continue;
       }
 
       const lines = trimmed.split('\n');
-
-      // Blockquote (lines starting with >)
       if (lines.every(l => /^\s*&gt;\s?/.test(l))) {
         const quoteInner = lines.map(l => l.replace(/^\s*&gt;\s?/, '')).join('\n');
-        htmlBlocks.push(
-          `<blockquote class="md-quote">${formatInlineMarkdown(quoteInner, inlineCodes).replace(/\n/g, '<br/>')}</blockquote>`
-        );
+        htmlBlocks.push(`<blockquote class="md-quote">${formatInlineMarkdown(quoteInner, inlineCodes, opts).replace(/\n/g, '<br/>')}</blockquote>`);
         continue;
       }
-
-      // Unordered list (- item or • item)
       if (lines.every(l => /^\s*[-•]\s+/.test(l))) {
-        const itemsHtml = lines
-          .map(l => `<li>${formatInlineMarkdown(l.replace(/^\s*[-•]\s+/, ''), inlineCodes)}</li>`)
-          .join('');
-        htmlBlocks.push(`<ul class="md-list">${itemsHtml}</ul>`);
+        htmlBlocks.push(`<ul class="md-list">${lines.map(l => `<li>${formatInlineMarkdown(l.replace(/^\s*[-•]\s+/, ''), inlineCodes, opts)}</li>`).join('')}</ul>`);
         continue;
       }
-
-      // Ordered list (1. item)
       if (lines.every(l => /^\s*\d+[.)]\s+/.test(l))) {
-        const itemsHtml = lines
-          .map(l => `<li>${formatInlineMarkdown(l.replace(/^\s*\d+[.)]\s+/, ''), inlineCodes)}</li>`)
-          .join('');
-        htmlBlocks.push(`<ol class="md-list">${itemsHtml}</ol>`);
+        htmlBlocks.push(`<ol class="md-list">${lines.map(l => `<li>${formatInlineMarkdown(l.replace(/^\s*\d+[.)]\s+/, ''), inlineCodes, opts)}</li>`).join('')}</ol>`);
         continue;
       }
-
-      // Single-line heading (# .. ####)
       if (lines.length === 1 && /^#{1,4}\s+/.test(lines[0])) {
         const hMatch = lines[0].match(/^(#{1,4})\s+(.+)$/);
         if (hMatch) {
-          const level = hMatch[1].length;
-          htmlBlocks.push(`<div class="md-heading md-h${level}">${formatInlineMarkdown(hMatch[2], inlineCodes)}</div>`);
+          htmlBlocks.push(`<div class="md-heading md-h${hMatch[1].length}">${formatInlineMarkdown(hMatch[2], inlineCodes, opts)}</div>`);
           continue;
         }
       }
 
-      const formattedPara = formatInlineMarkdown(trimmed, inlineCodes)
+      const formattedPara = formatInlineMarkdown(trimmed, inlineCodes, opts)
         .split('\n')
         .map(line => {
           const hMatch = line.match(/^(#{1,4})\s+(.+)$/);
-          if (hMatch) {
-            return `<span class="md-heading-inline md-h${hMatch[1].length}">${hMatch[2]}</span>`;
-          }
-          return line;
+          return hMatch ? `<span class="md-heading-inline md-h${hMatch[1].length}">${hMatch[2]}</span>` : line;
         })
         .join('<br/>');
-
-      const withRestoredCode = formattedPara.replace(/\u0000CODEBLOCK_(\d+)\u0000/g, (_, idx) => codeBlocks[Number(idx)] || '');
-      htmlBlocks.push(`<p>${withRestoredCode}</p>`);
+      htmlBlocks.push(`<p>${formattedPara.replace(/\u0000CODEBLOCK_(\d+)\u0000/g, (_, idx) => codeBlocks[Number(idx)] || '')}</p>`);
     }
-
     return htmlBlocks.join('') || '<p></p>';
   }
 
-  function getShortModelName(modelId) {
-    const cleanId = String(modelId || 'gemini-4-argon').replace(/-(low|medium|high|max)$/i, '');
-    const found = state.models.find(m => m.id === cleanId || m.id === modelId);
-    if (found) return found.name;
-    return cleanId || 'Gemini 4 Argon';
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+  const WEEKDAYS_SHORT = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+
+  /** Parses SQLite CURRENT_TIMESTAMP ("YYYY-MM-DD HH:MM:SS", UTC) and ISO strings. */
+  function parseServerTime(value) {
+    if (!value) return null;
+    const str = String(value).trim();
+    const m = str.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/);
+    if (m && !m[7]) {
+      return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)));
+    }
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
   }
 
-  function getCompactModelLabel(modelId, effort) {
-    const full = getShortModelName(modelId);
-    const shortName = full
-      .replace(/^Claude\s+/i, '')
-      .replace(/\s*\(Thinking\)/i, '')
-      .replace(/\s*\(Medium\)/i, '')
-      .trim();
-    const eff = String(effort || 'high').toUpperCase();
-    return `${shortName} · ${eff}`;
+  const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+  /** Compact time for lists: "только что", "5 мин", "21:04", "вчера", "пн", "12 окт", "12.10.25". */
+  function formatRelativeTime(date, now) {
+    if (!date) return '';
+    const ref = now || new Date();
+    const diffSec = (ref.getTime() - date.getTime()) / 1000;
+    if (diffSec < 60) return 'только что';
+    if (diffSec < 3600) return Math.floor(diffSec / 60) + ' мин';
+    if (sameDay(date, ref)) return pad2(date.getHours()) + ':' + pad2(date.getMinutes());
+    const yesterday = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate() - 1);
+    if (sameDay(date, yesterday)) return 'вчера';
+    if (diffSec < 6 * 86400) return WEEKDAYS_SHORT[date.getDay()];
+    if (date.getFullYear() === ref.getFullYear()) return date.getDate() + ' ' + MONTHS_SHORT[date.getMonth()];
+    return pad2(date.getDate()) + '.' + pad2(date.getMonth() + 1) + '.' + String(date.getFullYear()).slice(2);
   }
 
-  function renderAgyAuthStatus() {
-    const badge = document.getElementById('agyAuthStatusBadge');
-    const loginBtn = document.getElementById('agyOAuthLoginBtn');
-    const logoutBtn = document.getElementById('agyOAuthLogoutBtn');
-
-    if (badge) {
-      if (state.agyAuthenticated) {
-        badge.textContent = `✅ Авторизован в Google Antigravity${state.agyEmail ? ' (' + state.agyEmail + ')' : ''} • Project ID: ${state.projectId}`;
-        badge.style.color = 'var(--success)';
-      } else {
-        badge.textContent = '⚠️ Вход в Google Antigravity не выполнен. Нажмите кнопку ниже, чтобы войти через аккаунт Google (без API ключа).';
-        badge.style.color = 'var(--warning)';
-      }
-    }
-
-    if (loginBtn) {
-      loginBtn.textContent = state.agyAuthenticated
-        ? '🔄 Переподключить аккаунт Google (AGY)'
-        : '🔑 Войти через Google (AGY — без API ключа)';
-    }
-    if (logoutBtn) {
-      logoutBtn.classList.toggle('hidden', !state.agyAuthenticated);
-    }
+  /** Message timestamp: "21:04" today, otherwise "12 окт, 21:04". */
+  function formatMessageTime(date, now) {
+    if (!date) return '';
+    const ref = now || new Date();
+    const hm = pad2(date.getHours()) + ':' + pad2(date.getMinutes());
+    if (sameDay(date, ref)) return hm;
+    const day = date.getDate() + ' ' + MONTHS_SHORT[date.getMonth()];
+    return (date.getFullYear() === ref.getFullYear() ? day : day + ' ' + date.getFullYear()) + ', ' + hm;
   }
 
-  async function checkAgyAuthStatus() {
-    try {
-      const data = await apiFetch('/api/agy/auth/status');
-      state.agyAuthenticated = Boolean(data.authenticated);
-      state.agyEmail = data.email || '';
-      if (data.projectId) {
-        state.projectId = data.projectId;
-        const projInput = document.getElementById('inputProjectId');
-        if (projInput) projInput.value = state.projectId;
-      }
-      renderAgyAuthStatus();
-      updateHeaderIndicators(true);
-    } catch (e) {}
+  function pluralRu(n, one, few, many) {
+    const abs = Math.abs(Number(n) || 0);
+    const mod10 = abs % 10;
+    const mod100 = abs % 100;
+    if (mod10 === 1 && mod100 !== 11) return one;
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return few;
+    return many;
   }
 
-  function updateHeaderIndicators(online = true) {
-    const isOnlineAndAuth = Boolean(online && state.agyAuthenticated);
-    document.querySelectorAll('.js-conn-dot').forEach(dot => {
-      dot.classList.toggle('offline', !isOnlineAndAuth);
-    });
-
-    const activeChatModel = state.currentChatData && state.currentChatData.chat
-      ? state.currentChatData.chat.model_id
-      : state.selectedModel;
-    const activeEffort = state.currentChatData && state.currentChatData.chat
-      ? state.currentChatData.chat.effort
-      : state.selectedEffort;
-    const compactLabel = getCompactModelLabel(activeChatModel, activeEffort);
-
-    document.querySelectorAll('.js-model-label').forEach(lbl => {
-      lbl.textContent = compactLabel;
-    });
-
-    const activePersona = state.personas.find(p => p.id === Number(state.activePersonaId)) || state.personas[0];
-    const banner = document.getElementById('activePersonaBanner');
-    if (banner) {
-      banner.textContent = activePersona
-        ? `Персона: ${activePersona.name}`
-        : 'Персона не выбрана';
-    }
+  function formatCount(n) {
+    return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
   }
 
-  // ==========================================================================
-  // INITIALIZATION & DATA LOADING
-  // ==========================================================================
-  async function initApp() {
-    try {
-      const [settingsData, modelsData, charsData, personasData, chatsData] = await Promise.all([
-        apiFetch('/api/settings'),
-        apiFetch('/api/models'),
-        apiFetch('/api/characters'),
-        apiFetch('/api/personas'),
-        apiFetch('/api/chats'),
-      ]);
-
-      state.projectId = settingsData.projectId || state.projectId;
-      state.agyAuthenticated = Boolean(settingsData.agyAuthenticated);
-      state.agyEmail = settingsData.agyEmail || '';
-      state.selectedModel = settingsData.selectedModel || state.selectedModel;
-      state.selectedEffort = settingsData.selectedEffort || state.selectedEffort;
-      state.safetyThreshold = settingsData.safetyThreshold || 'OFF';
-      state.activePersonaId = settingsData.activePersonaId || state.activePersonaId;
-      state.claudeRuntimeReady = Boolean(settingsData.claudeRuntimeReady);
-      state.claudeAuthenticated = Boolean(settingsData.claudeAuthenticated);
-      state.claudeProjectPath = settingsData.claudeProjectPath || '';
-
-      state.models = modelsData.models || [];
-      state.characters = charsData.characters || [];
-      state.personas = personasData.personas || [];
-      state.chats = chatsData.chats || [];
-
-      document.getElementById('inputProjectId').value = state.projectId;
-      const safetySelect = document.getElementById('inputSafetyThreshold');
-      if (safetySelect) safetySelect.value = state.safetyThreshold;
-
-      const connBadge = document.getElementById('serverConnectionStatus');
-      if (connBadge) {
-        const isEmbedded = typeof window.AndroidServer !== 'undefined' || settingsData.embeddedServer;
-        connBadge.textContent = isEmbedded
-          ? `✅ Встроенный сервер внутри APK активен • БД SQLite + чистый GEMINI.md • Моделей: ${state.models.length}`
-          : `✅ Локальный сервер активен • Моделей: ${state.models.length}`;
-        connBadge.style.color = 'var(--success)';
-      }
-
-      renderAgyAuthStatus();
-      renderClaudeStatus();
-      const claudeProjInput = document.getElementById('inputClaudeProjectPath');
-      if (claudeProjInput) claudeProjInput.value = state.claudeProjectPath;
-      updateHeaderIndicators(true);
-      renderChatsList();
-      renderCharactersAndPersonas();
-      renderModelsLists();
-      updateEffortButtons();
-      loadFiles(state.currentFilesPath);
-
-      // Automatically check for new versions in Git on app startup
-      setTimeout(() => {
-        checkForUpdates(false);
-      }, 300);
-    } catch (err) {
-      updateHeaderIndicators(false);
-      const connBadge = document.getElementById('serverConnectionStatus');
-      if (connBadge) {
-        connBadge.textContent = `❌ Ошибка инициализации: ${err.message}`;
-        connBadge.style.color = 'var(--danger)';
-      }
-    }
+  function initialsOf(name) {
+    const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return '?';
+    const first = Array.from(parts[0])[0] || '';
+    const second = parts.length > 1 ? (Array.from(parts[1])[0] || '') : '';
+    return (first + second).toUpperCase();
   }
 
-  // ==========================================================================
-  // CHATS LIST (GROUPED BY CHARACTER) & ACTIVE CHAT ROOM
-  // ==========================================================================
-  async function loadChatsList() {
-    const data = await apiFetch('/api/chats');
-    state.chats = data.chats || [];
-    renderChatsList();
+  function hueFromString(s) {
+    let h = 0;
+    for (const ch of String(s || '')) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+    return h % 360;
   }
 
-  function formatChatCountLabel(count) {
-    const n = Math.abs(Number(count) || 0);
-    const mod10 = n % 10;
-    const mod100 = n % 100;
-    if (mod10 === 1 && mod100 !== 11) return `${n} чат`;
-    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${n} чата`;
-    return `${n} чатов`;
+  function initialsAvatar(name) {
+    const hue = hueFromString(name);
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+      + `<rect width="100" height="100" fill="hsl(${hue},38%,30%)"/>`
+      + `<text x="50" y="50" dy=".36em" text-anchor="middle" font-family="sans-serif" font-size="38" font-weight="600" fill="hsl(${hue},70%,88%)">${escapeHtml(initialsOf(name))}</text></svg>`;
+    return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
   }
 
-  function toggleChatGroup(groupKey) {
-    if (!groupKey) return;
-    state.collapsedChatGroups[groupKey] = !state.collapsedChatGroups[groupKey];
-    renderChatsList();
+  function resolveAvatarUrl(url, name) {
+    const u = String(url || '');
+    if (u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('http://') || u.startsWith('https://') || u.startsWith('file:')) {
+      return u;
+    }
+    if (u && !hasBridge) return state.serverUrl + (u.startsWith('/') ? u : '/' + u);
+    return initialsAvatar(name || '');
   }
 
-  function renderChatsList() {
-    const container = document.getElementById('chatsListContainer');
-    if (!container) return;
-
-    if (!state.chats.length) {
-      const hasChars = state.characters.length > 0;
-      container.innerHTML = `
-        <div class="settings-card empty-state-card">
-          <div class="empty-state-icon">🎭</div>
-          <div class="card-title">Пока нет активных чатов</div>
-          <p class="card-hint">${
-            hasChars
-              ? 'Выберите своего персонажа и персону, чтобы начать новый диалог.'
-              : 'Сначала добавьте своего персонажа во вкладке «Персонажи», чтобы начать общение.'
-          }</p>
-          <button class="btn-primary" onclick="${
-            hasChars
-              ? 'window.appUI.openNewChatModal()'
-              : "window.appUI.openTab('characters'); window.appUI.openCharacterEditor(null);"
-          }">${hasChars ? '+ Начать новый чат' : '+ Создать персонажа'}</button>
-        </div>
-      `;
-      return;
-    }
-
-    // Group chats by character so all chats with the same character are united
-    const groupsMap = new Map();
-    for (const c of state.chats) {
-      const charId = Number(c.character_id) || 0;
-      const charName = (c.character_name || 'Персонаж').trim();
-      const key = charId > 0 ? `char_${charId}` : `name_${charName.toLowerCase()}`;
-      if (!groupsMap.has(key)) {
-        groupsMap.set(key, {
-          key,
-          characterId: charId,
-          characterName: charName,
-          characterAvatar: c.character_avatar || '',
-          chats: [],
-          totalMessages: 0,
-        });
-      }
-      const g = groupsMap.get(key);
-      g.chats.push(c);
-      g.totalMessages += Number(c.message_count || 0);
-      if (!g.characterAvatar && c.character_avatar) {
-        g.characterAvatar = c.character_avatar;
-      }
-    }
-
-    const groups = Array.from(groupsMap.values());
-    container.innerHTML = groups
-      .map(group => {
-        const isCollapsed = Boolean(state.collapsedChatGroups[group.key]);
-        const avatarSrc = resolveAvatarUrl(group.characterAvatar);
-        const countBadge = formatChatCountLabel(group.chats.length);
-
-        const itemsHtml = group.chats
-          .map((c, idx) => {
-            const preview = stripMarkdownPreview(c.last_message || '').slice(0, 110);
-            const effLabel = String(c.effort || 'high').toUpperCase();
-            const sessionLabel = group.chats.length > 1
-              ? `Диалог #${group.chats.length - idx} (ID ${c.id})`
-              : `Диалог #${c.id}`;
-            return `
-              <div class="chat-group-item" onclick="window.appUI.openChatRoom(${c.id})">
-                <div class="chat-group-item-top">
-                  <span class="chat-group-item-title">${escapeHtml(sessionLabel)} • 👤 ${escapeHtml(c.persona_name || 'Игрок')}</span>
-                  <div class="chat-card-actions">
-                    <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.openExportChatModal(${c.id})" title="Экспортировать чат">📤</button>
-                    <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.deleteChat(${c.id})" title="Удалить чат">🗑</button>
-                  </div>
-                </div>
-                <div class="chat-group-item-preview">${escapeHtml(preview || 'Нет сообщений — нажмите, чтобы написать первым')}</div>
-                <div class="chat-group-item-meta">
-                  <span>${escapeHtml(getShortModelName(c.model_id))} (${escapeHtml(effLabel)})</span>
-                  <span>•</span>
-                  <span>💬 ${c.message_count || 0} сообщ.</span>
-                </div>
-              </div>
-            `;
-          })
-          .join('');
-
-        return `
-          <div class="chat-group-card ${isCollapsed ? 'collapsed' : ''}">
-            <div class="chat-group-header" onclick="window.appUI.toggleChatGroup('${escapeHtml(group.key)}')">
-              <img
-                class="chat-group-avatar"
-                src="${escapeHtml(avatarSrc)}"
-                alt="${escapeHtml(group.characterName)}"
-                onclick="event.stopPropagation(); window.appUI.openAvatarViewer(this.src, '${escapeHtml(group.characterName)}')"
-                title="Нажмите, чтобы открыть изображение персонажа"
-              />
-              <div class="chat-group-info">
-                <div class="chat-group-title-row">
-                  <span class="chat-group-name">${escapeHtml(group.characterName)}</span>
-                  <span class="chat-group-badge">${escapeHtml(countBadge)}</span>
-                </div>
-                <div class="chat-group-sub">Всего сообщений: ${group.totalMessages} • Нажмите для сворачивания</div>
-              </div>
-              <div class="chat-group-actions">
-                ${
-                  group.characterId > 0
-                    ? `<button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.openNewChatModal(${group.characterId})" title="Новый чат с этим персонажем">+ Чат</button>`
-                    : ''
-                }
-                <span class="chat-group-chevron">▾</span>
-              </div>
-            </div>
-            <div class="chat-group-items">
-              ${itemsHtml}
-            </div>
-          </div>
-        `;
-      })
-      .join('');
-  }
-
-  async function openChatRoom(chatId) {
-    try {
-      const data = await apiFetch(`/api/chats/${chatId}`);
-      state.currentChatId = chatId;
-      state.currentChatData = data;
-      if (data.chat && data.chat.model_id) {
-        state.selectedModel = data.chat.model_id;
-      }
-      if (data.chat && data.chat.effort) {
-        state.selectedEffort = data.chat.effort;
-      }
-
-      document.getElementById('chatsListView').classList.add('hidden');
-      document.getElementById('chatRoomView').classList.remove('hidden');
-
-      renderActiveChatRoom();
-      autoResizeChatInput();
-      renderModelsLists();
-      updateEffortButtons();
-      updateHeaderIndicators(true);
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  function closeChatRoom() {
-    stopGenerationPolling(true);
-    state.currentChatId = null;
-    state.currentChatData = null;
-    document.getElementById('chatRoomView').classList.add('hidden');
-    document.getElementById('chatsListView').classList.remove('hidden');
-    setBottomNavHidden(false);
-    updateHeaderIndicators(true);
-    loadChatsList();
-  }
-
-  function renderActiveChatRoom() {
-    if (!state.currentChatData) return;
-    const character = state.currentChatData.character || { name: 'Персонаж', avatar_url: '', file_path: '' };
-    const persona = state.currentChatData.persona || { name: 'Игрок', avatar_url: '', file_path: '' };
-    const messages = state.currentChatData.messages || [];
-
-    const headerAvatar = document.getElementById('chatHeaderAvatar');
-    if (headerAvatar) {
-      headerAvatar.src = resolveAvatarUrl(character.avatar_url);
-    }
-    document.getElementById('chatHeaderCharName').textContent = character.name || 'Персонаж';
-    document.getElementById('chatHeaderSub').textContent = `👤 ${persona.name || 'Игрок'}${character.file_path ? ' • ' + character.file_path : ''}`;
-    const personaChip = document.getElementById('chatPersonaChip');
-    if (personaChip) {
-      personaChip.title = `Активная персона: ${persona.name || 'Игрок'}`;
-    }
-
-    const msgContainer = document.getElementById('chatMessagesContainer');
-    if (!messages.length) {
-      msgContainer.innerHTML = `
-        <div class="card-hint" style="text-align:center; padding: 28px 16px;">
-          Начальное сообщение не задано. Напишите первую реплику ниже, чтобы начать диалог с <b>${escapeHtml(character.name || 'персонажем')}</b>.
-        </div>
-      `;
-      return;
-    }
-
-    msgContainer.innerHTML = messages
-      .map((m, idx) => {
-        const isUser = m.role === 'user';
-        const senderName = isUser ? (persona.name || 'Игрок') : (character.name || 'Персонаж');
-        const avatar = resolveAvatarUrl(isUser ? persona.avatar_url : character.avatar_url);
-        const swipesCount = Array.isArray(m.swipes) ? m.swipes.length : 1;
-        const curSwipe = (m.swipe_index || 0) + 1;
-
-        const thoughtsBlock = m.thoughts
-          ? `<details class="msg-thoughts-details">
-               <summary>💭 Мысли персонажа</summary>
-               <div class="msg-thoughts-body">${escapeHtml(m.thoughts)}</div>
-             </details>`
-          : '';
-
-        const swipeControls = !isUser
-          ? `<div class="swipe-controls">
-               ${
-                 swipesCount > 1
-                   ? `<button class="toolbar-btn" onclick="window.appUI.swipeMessage(${m.id}, ${(m.swipe_index || 0) - 1})" ${m.swipe_index <= 0 ? 'disabled' : ''}>◀</button>
-                      <span class="swipe-counter">${curSwipe} / ${swipesCount}</span>
-                      <button class="toolbar-btn" onclick="window.appUI.swipeMessage(${m.id}, ${(m.swipe_index || 0) + 1})" ${m.swipe_index >= swipesCount - 1 ? 'disabled' : ''}>▶</button>`
-                   : `<span class="msg-meta-label">${idx === 0 ? 'Приветствие' : 'Ответ'}</span>`
-               }
-               ${
-                 idx > 0
-                   ? `<button class="toolbar-btn" onclick="window.appUI.regenerateMessage(${m.id})" title="Сгенерировать новый вариант ответа">🔄 Реролл</button>`
-                   : ''
-               }
-             </div>`
-          : `<div class="swipe-controls"><span class="msg-meta-label">Вы</span></div>`;
-
-        return `
-          <div class="msg-row ${isUser ? 'user' : 'assistant'}">
-            <div class="msg-head">
-              <img
-                class="msg-avatar"
-                src="${escapeHtml(avatar)}"
-                alt="${escapeHtml(senderName)}"
-                onclick="event.stopPropagation(); window.appUI.openAvatarViewer(this.src, '${escapeHtml(senderName)}')"
-                title="Нажмите, чтобы открыть и увеличить аватар"
-              />
-              <span class="msg-sender-name">${escapeHtml(senderName)}</span>
-            </div>
-            <div class="msg-bubble">
-              ${thoughtsBlock}
-              <div class="msg-text">${formatRoleplayHtml(m.content)}</div>
-              <div class="msg-toolbar">
-                ${swipeControls}
-                <div class="swipe-controls">
-                  <button class="toolbar-btn" onclick="window.appUI.openEditMessageModal(${m.id})" title="Редактировать сообщение">✏️</button>
-                  ${
-                    idx > 0
-                      ? `<button class="toolbar-btn" onclick="window.appUI.deleteMessage(${m.id})" title="Удалить сообщение">🗑</button>`
-                      : ''
-                  }
-                </div>
-              </div>
-            </div>
-          </div>
-        `;
-      })
-      .join('');
-
-    state.ignoreScrollEvents = true;
-    msgContainer.scrollTop = msgContainer.scrollHeight;
-    setTimeout(() => {
-      state.ignoreScrollEvents = false;
-    }, 120);
-  }
-
-  const PHASE_LABELS = {
-    init: '1/6 • Инициализация запроса',
-    context: '2/6 • Сборка контекста и промтов',
-    oauth_check: '3/6 • Проверка Google OAuth сессии',
-    oauth_refresh: '3/6 • Обновление токена доступа OAuth',
-    connecting: '4/6 • Подключение к Vertex AI (SSE)',
-    waiting_first_token: '5/6 • Ожидание первого токена от модели',
-    thinking: '5/6 • Глубокое размышление (Thinking)',
-    streaming_text: '6/6 • Потоковая генерация текста (SSE)',
-    completed: '✅ Завершено успешно',
-    error: '❌ Остановлено из-за ошибки',
-  };
-
-  function toggleStreamingDetails() {
-    state.streamingExpanded = !state.streamingExpanded;
-    const box = document.getElementById('chatStreamingBox');
-    const panel = document.getElementById('streamingDetailsPanel');
-    const expandBtn = document.getElementById('streamingExpandBtn');
-    if (box) box.classList.toggle('expanded', state.streamingExpanded);
-    if (panel) panel.classList.toggle('hidden', !state.streamingExpanded);
-    if (expandBtn) {
-      expandBtn.textContent = state.streamingExpanded ? '⤡ Свернуть' : '⤢ Подробнее';
-    }
-    if (state.streamingExpanded && state.lastGeneration) {
-      renderGenerationProgress(state.lastGeneration);
-    }
-  }
-
-  function closeStreamingBox() {
-    stopGenerationPolling(true);
-  }
-
-  function renderGenerationProgress(g) {
-    if (!g) return;
-    state.lastGeneration = g;
-
-    const box = document.getElementById('chatStreamingBox');
-    const spinner = document.getElementById('streamingSpinner');
-    const statusText = document.getElementById('streamingStatusText');
-    const elapsedBadge = document.getElementById('streamingElapsedBadge');
-    const closeBtn = document.getElementById('streamingCloseBtn');
-    const thoughtsPreview = document.getElementById('streamingThoughtsPreview');
-    const textPreview = document.getElementById('streamingTextPreview');
-
-    const isError = g.phase === 'error' || Boolean(g.error);
-    if (box) {
-      box.classList.remove('hidden');
-      box.classList.toggle('error-state', isError);
-      box.classList.toggle('expanded', state.streamingExpanded);
-    }
-    if (spinner) {
-      spinner.classList.toggle('hidden', isError || g.phase === 'completed');
-    }
-    if (closeBtn) {
-      closeBtn.classList.toggle('hidden', !isError && g.phase !== 'completed');
-    }
-    if (statusText) {
-      statusText.textContent = g.statusText || (isError ? `❌ ${g.error}` : 'Выполнение запроса...');
-    }
-    if (elapsedBadge && typeof g.elapsedMs === 'number') {
-      elapsedBadge.textContent = (g.elapsedMs / 1000).toFixed(1) + 'с';
-    }
-
-    // Compact previews
-    if (thoughtsPreview) {
-      if (g.thoughts) {
-        thoughtsPreview.classList.remove('hidden');
-        thoughtsPreview.textContent = `💭 [${g.thoughtsChars || g.thoughts.length} симв.] ` + g.thoughts.slice(-260);
-      } else {
-        thoughtsPreview.classList.add('hidden');
-        thoughtsPreview.textContent = '';
-      }
-    }
-    if (textPreview) {
-      if (isError && g.error) {
-        textPreview.textContent = g.error;
-      } else if (g.text) {
-        textPreview.textContent = g.text.slice(-340);
-      } else {
-        textPreview.textContent = '';
-      }
-    }
-
-    // Detailed Expanded Panel
-    const metaModel = document.getElementById('streamMetaModel');
-    const metaPhase = document.getElementById('streamMetaPhase');
-    const metaHttp = document.getElementById('streamMetaHttp');
-    const metaContext = document.getElementById('streamMetaContext');
-    const metaConfig = document.getElementById('streamMetaConfig');
-    const metaEndpoint = document.getElementById('streamMetaEndpoint');
-    const logsBadge = document.getElementById('streamLogsCountBadge');
-    const logsList = document.getElementById('streamingLogsList');
-    const thoughtsFullWrap = document.getElementById('streamingThoughtsFullWrap');
-    const thoughtsFull = document.getElementById('streamingThoughtsFull');
-    const thoughtsCounter = document.getElementById('streamThoughtsCounter');
-    const textFullWrap = document.getElementById('streamingTextFullWrap');
-    const textFull = document.getElementById('streamingTextFull');
-    const textCounter = document.getElementById('streamTextCounter');
-
-    const modelName = getShortModelName(g.model);
-    const vertexSuffix = g.vertexModel && g.vertexModel !== g.model ? ` → Vertex: ${g.vertexModel}` : '';
-    if (metaModel) {
-      metaModel.textContent = `${modelName} (${g.model || '—'}) • ${String(g.effort || 'high').toUpperCase()}${vertexSuffix}`;
-    }
-    if (metaPhase) {
-      const basePhase = PHASE_LABELS[g.phase] || g.phase || '—';
-      metaPhase.textContent = g.finishReason ? `${basePhase} (finishReason: ${g.finishReason})` : basePhase;
-    }
-    if (metaHttp) {
-      const httpStr = g.httpStatus ? `HTTP ${g.httpStatus}` : 'Ожидание ответа...';
-      metaHttp.textContent = `${httpStr} • SSE чанков: ${g.chunksCount || 0} • Мысли: ${g.thoughtsChars || 0} симв. • Текст: ${g.textChars || 0} симв.`;
-    }
-    if (metaContext) {
-      metaContext.textContent = `Сообщений в контексте: ${g.contextMessagesCount || 0} • Размер промта: ${g.promptChars || 0} симв.`;
-    }
-    if (metaConfig) {
-      metaConfig.textContent = `Без автосмены модели • ${g.thinkingConfig || '—'}`;
-    }
-    if (metaEndpoint) {
-      metaEndpoint.textContent = g.endpoint || `Project: ${g.projectId || state.projectId} (ожидание соединения...)`;
-    }
-
-    const logs = Array.isArray(g.logs) ? g.logs : [];
-    if (logsBadge) {
-      logsBadge.textContent = `${logs.length} ${logs.length === 1 ? 'шаг' : (logs.length >= 2 && logs.length <= 4 ? 'шага' : 'шагов')}`;
-    }
-    if (logsList) {
-      logsList.innerHTML = logs
-        .map(line => {
-          const isErrLine = line.includes('❌') || line.includes('ОШИБКА') || line.includes('ошибк');
-          const isOkLine = line.includes('✅');
-          const cls = isErrLine ? 'stream-log-line log-error' : (isOkLine ? 'stream-log-line log-ok' : 'stream-log-line');
-          return `<div class="${cls}">${escapeHtml(line)}</div>`;
-        })
-        .join('');
-      logsList.scrollTop = logsList.scrollHeight;
-    }
-
-    if (thoughtsFullWrap && thoughtsFull && thoughtsCounter) {
-      if (g.thoughts) {
-        thoughtsFullWrap.classList.remove('hidden');
-        thoughtsCounter.textContent = `${g.thoughtsChars || g.thoughts.length} симв.`;
-        thoughtsFull.textContent = g.thoughts;
-        thoughtsFull.scrollTop = thoughtsFull.scrollHeight;
-      } else {
-        thoughtsFullWrap.classList.add('hidden');
-        thoughtsFull.textContent = '';
-      }
-    }
-
-    if (textFullWrap && textFull && textCounter) {
-      if (g.text || (isError && g.error)) {
-        textFullWrap.classList.remove('hidden');
-        const contentToShow = g.text || g.error || '';
-        textCounter.textContent = `${g.textChars || contentToShow.length} симв.`;
-        textFull.textContent = contentToShow;
-        textFull.scrollTop = textFull.scrollHeight;
-      } else {
-        textFullWrap.classList.add('hidden');
-        textFull.textContent = '';
-      }
-    }
-  }
-
-  function startGenerationPolling(chatId) {
-    stopGenerationPolling(false);
-    state.generationStartMs = Date.now();
-    const activeModel = state.currentChatData && state.currentChatData.chat
-      ? state.currentChatData.chat.model_id
-      : state.selectedModel;
-    const activeEffort = state.currentChatData && state.currentChatData.chat
-      ? state.currentChatData.chat.effort
-      : state.selectedEffort;
-
-    const initialProg = {
-      phase: 'init',
-      statusText: `🚀 Отправка запроса строго к ${getShortModelName(activeModel)} (${String(activeEffort).toUpperCase()})...`,
-      model: activeModel,
-      vertexModel: '',
-      effort: activeEffort,
-      thinkingConfig: 'Подготовка параметров...',
-      projectId: state.projectId,
-      endpoint: 'Подготовка соединения с Google Cloud AI Companion...',
-      httpStatus: 0,
-      chunksCount: 0,
-      thoughtsChars: 0,
-      textChars: 0,
-      contextMessagesCount: (state.currentChatData && Array.isArray(state.currentChatData.messages)) ? state.currentChatData.messages.length : 0,
-      promptChars: 0,
-      finishReason: '',
-      error: '',
-      elapsedMs: 0,
-      thoughts: '',
-      text: '',
-      logs: [`[00:00.0] 🚀 Инициализация запроса к модели ${activeModel} (effort=${activeEffort})...`],
-    };
-    renderGenerationProgress(initialProg);
-
-    const detailsPanel = document.getElementById('streamingDetailsPanel');
-    const expandBtn = document.getElementById('streamingExpandBtn');
-    if (detailsPanel) detailsPanel.classList.toggle('hidden', !state.streamingExpanded);
-    if (expandBtn) expandBtn.textContent = state.streamingExpanded ? '⤡ Свернуть' : '⤢ Подробнее';
-
-    // Smooth local elapsed timer (ticks every 200ms even while waiting on network chunk)
-    state.elapsedTimer = setInterval(() => {
-      const elapsedBadge = document.getElementById('streamingElapsedBadge');
-      if (elapsedBadge && state.generationStartMs > 0) {
-        const sec = (Date.now() - state.generationStartMs) / 1000;
-        elapsedBadge.textContent = sec.toFixed(1) + 'с';
-      }
-    }, 200);
-
-    state.pollTimer = setInterval(async () => {
-      try {
-        const data = await apiFetch(`/api/chats/${chatId}/generation`);
-        if (data.generation) {
-          renderGenerationProgress(data.generation);
-        }
-      } catch (e) {}
-    }, 400);
-  }
-
-  function stopGenerationPolling(hideBox = true) {
-    if (state.pollTimer) {
-      clearInterval(state.pollTimer);
-      state.pollTimer = null;
-    }
-    if (state.elapsedTimer) {
-      clearInterval(state.elapsedTimer);
-      state.elapsedTimer = null;
-    }
-    state.generationStartMs = 0;
-    if (hideBox) {
-      const box = document.getElementById('chatStreamingBox');
-      if (box) {
-        box.classList.add('hidden');
-        box.classList.remove('error-state');
-      }
-    }
-  }
-
-  async function handleGenerationFailure(chatId, err) {
-    stopGenerationPolling(false);
-    if (err && err.data && err.data.generation) {
-      renderGenerationProgress(err.data.generation);
-      return;
-    }
-    try {
-      const genData = await apiFetch(`/api/chats/${chatId}/generation`);
-      if (genData && genData.lastGeneration) {
-        renderGenerationProgress(genData.lastGeneration);
-        return;
-      }
-    } catch (e) {}
-
-    // Fallback error progress if server didn't attach generation object
-    const fallbackErr = Object.assign({}, state.lastGeneration || {}, {
-      phase: 'error',
-      error: err ? err.message : 'Неизвестная ошибка',
-      statusText: '❌ Ошибка: ' + (err ? err.message : 'Неизвестная ошибка'),
-      logs: ((state.lastGeneration && state.lastGeneration.logs) || []).concat([
-        `[ошибка] ❌ ${err ? err.message : 'Сбой запроса'}`
-      ]),
-    });
-    renderGenerationProgress(fallbackErr);
-  }
-
-  async function sendMessage() {
-    if (state.isSending || !state.currentChatId) return;
-    const input = document.getElementById('chatInput');
-    const text = input.value.trim();
-    if (!text) return;
-
-    state.isSending = true;
-    document.getElementById('sendMsgBtn').disabled = true;
-    input.value = '';
-    autoResizeChatInput();
-
-    const tempMsgId = Date.now();
-    // Optimistically append user message to UI
-    if (state.currentChatData && Array.isArray(state.currentChatData.messages)) {
-      state.currentChatData.messages.push({
-        id: tempMsgId,
-        role: 'user',
-        content: text,
-        swipes: [text],
-        swipe_index: 0,
-      });
-      renderActiveChatRoom();
-    }
-
-    const chatId = state.currentChatId;
-    startGenerationPolling(chatId);
-
-    try {
-      const res = await apiFetch(`/api/chats/${chatId}/messages`, {
-        method: 'POST',
-        body: JSON.stringify({ content: text }),
-      });
-      if (res && res.generation) {
-        state.lastGeneration = res.generation;
-      }
-      stopGenerationPolling(true);
-      if (state.currentChatData && state.currentChatId === chatId) {
-        state.currentChatData.messages = res.messages;
-        renderActiveChatRoom();
-      }
-    } catch (err) {
-      await handleGenerationFailure(chatId, err);
-      // Remove optimistic message and restore user input so nothing is lost or polluted
-      if (state.currentChatData && Array.isArray(state.currentChatData.messages)) {
-        state.currentChatData.messages = state.currentChatData.messages.filter(m => m.id !== tempMsgId);
-        renderActiveChatRoom();
-      }
-      input.value = text;
-      autoResizeChatInput();
-      showToast(err.message);
-      if (!state.agyAuthenticated) {
-        openTab('settings');
-      }
-    } finally {
-      state.isSending = false;
-      document.getElementById('sendMsgBtn').disabled = false;
-    }
-  }
-
-  async function swipeMessage(msgId, newIndex) {
-    try {
-      const res = await apiFetch(`/api/messages/${msgId}/swipe`, {
-        method: 'POST',
-        body: JSON.stringify({ action: 'select', index: newIndex }),
-      });
-      if (state.currentChatData) {
-        const idx = state.currentChatData.messages.findIndex(m => m.id === msgId);
-        if (idx !== -1) {
-          state.currentChatData.messages[idx] = res.message;
-          renderActiveChatRoom();
-        }
-      }
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function regenerateMessage(msgId) {
-    if (state.isSending || !state.currentChatId) return;
-    state.isSending = true;
-    const chatId = state.currentChatId;
-    startGenerationPolling(chatId);
-    try {
-      const res = await apiFetch(`/api/messages/${msgId}/swipe`, {
-        method: 'POST',
-        body: JSON.stringify({ action: 'regenerate' }),
-      });
-      if (res && res.generation) {
-        state.lastGeneration = res.generation;
-      }
-      stopGenerationPolling(true);
-      if (state.currentChatData) {
-        const idx = state.currentChatData.messages.findIndex(m => m.id === msgId);
-        if (idx !== -1) {
-          state.currentChatData.messages[idx] = res.message;
-          renderActiveChatRoom();
-        }
-      }
-      showToast('✨ Сгенерирован новый вариант ответа!');
-    } catch (err) {
-      await handleGenerationFailure(chatId, err);
-      showToast('Ошибка реролла: ' + err.message);
-    } finally {
-      state.isSending = false;
-    }
-  }
-
-  function openEditMessageModal(msgId) {
-    if (!state.currentChatData) return;
-    const msg = state.currentChatData.messages.find(m => m.id === msgId);
-    if (!msg) return;
-    document.getElementById('editMsgIdInput').value = String(msgId);
-    document.getElementById('editMsgContentInput').value = msg.content;
-    document.getElementById('editMessageModal').classList.remove('hidden');
-  }
-
-  async function saveEditedMessage() {
-    const msgId = Number(document.getElementById('editMsgIdInput').value);
-    const content = document.getElementById('editMsgContentInput').value;
-    try {
-      const res = await apiFetch(`/api/messages/${msgId}`, {
-        method: 'PUT',
-        body: JSON.stringify({ content }),
-      });
-      if (state.currentChatData) {
-        const idx = state.currentChatData.messages.findIndex(m => m.id === msgId);
-        if (idx !== -1) state.currentChatData.messages[idx] = res.message;
-        renderActiveChatRoom();
-      }
-      closeModal('editMessageModal');
-      showToast('Сообщение обновлено');
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function deleteMessage(msgId) {
-    try {
-      await apiFetch(`/api/messages/${msgId}`, { method: 'DELETE' });
-      if (state.currentChatData) {
-        state.currentChatData.messages = state.currentChatData.messages.filter(m => m.id !== msgId);
-        renderActiveChatRoom();
-      }
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function deleteChat(chatId) {
-    try {
-      await apiFetch(`/api/chats/${chatId}`, { method: 'DELETE' });
-      await loadChatsList();
-      showToast('Чат удалён');
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  function insertAsterisks() {
-    const input = document.getElementById('chatInput');
-    const start = input.selectionStart || 0;
-    const end = input.selectionEnd || 0;
-    const val = input.value;
-    const selected = val.slice(start, end);
-    const replacement = `*${selected || 'действие'}* `;
-    input.value = val.slice(0, start) + replacement + val.slice(end);
-    input.focus();
-  }
-
-  // ==========================================================================
-  // NEW CHAT MODAL
-  // ==========================================================================
-  function openNewChatModal(preselectedCharId) {
-    if (!state.characters.length) {
-      showToast('Сначала создайте персонажа во вкладке «Персонажи»');
-      openTab('characters');
-      switchCharSubtab('characters');
-      return;
-    }
-
-    const charSel = document.getElementById('newChatCharSelect');
-    charSel.innerHTML = state.characters
-      .map(c => `<option value="${c.id}" ${c.id === preselectedCharId ? 'selected' : ''}>🎭 ${escapeHtml(c.name)} (${escapeHtml(c.file_path)})</option>`)
-      .join('');
-
-    const personaSel = document.getElementById('newChatPersonaSelect');
-    if (state.personas.length) {
-      personaSel.innerHTML = state.personas
-        .map(p => `<option value="${p.id}" ${p.id === Number(state.activePersonaId) ? 'selected' : ''}>👤 ${escapeHtml(p.name)} (${escapeHtml(p.file_path)})</option>`)
-        .join('');
-    } else {
-      personaSel.innerHTML = `<option value="0" selected>👤 Игрок (без карточки персоны)</option>`;
-    }
-
-    const modelSel = document.getElementById('newChatModelSelect');
-    modelSel.innerHTML = state.models
-      .map(m => `<option value="${escapeHtml(m.id)}" ${m.id === state.selectedModel ? 'selected' : ''}>${escapeHtml(m.name)}${m.badge ? ' — ' + escapeHtml(m.badge) : ''}</option>`)
-      .join('');
-
-    const effortSel = document.getElementById('newChatEffortSelect');
-    if (effortSel) {
-      effortSel.value = state.selectedEffort || 'high';
-    }
-
-    // Force the .md pickers to refresh from workspace each time the modal opens.
-    const sysSel = document.getElementById('newChatSysPromptSelect');
-    if (sysSel) sysSel.dataset.loaded = '';
-
-    onNewChatCharacterChange();
-    onNewChatModelChange();
-    document.getElementById('newChatModal').classList.remove('hidden');
-  }
-
-  function onNewChatCharacterChange() {
-    const charId = Number(document.getElementById('newChatCharSelect').value);
-    const char = state.characters.find(c => c.id === charId) || state.characters[0];
-    document.getElementById('newChatGreetingInput').value = char ? (char.first_message || '') : '';
-  }
-
-  async function confirmCreateChat() {
-    const characterId = Number(document.getElementById('newChatCharSelect').value);
-    const personaId = Number(document.getElementById('newChatPersonaSelect').value);
-    const modelId = document.getElementById('newChatModelSelect').value;
-    const effortSel = document.getElementById('newChatEffortSelect');
-    const effort = effortSel ? effortSel.value : state.selectedEffort;
-    let customFirstMessage = document.getElementById('newChatGreetingInput').value;
-
-    const payload = { characterId, personaId, modelId, effort };
-
-    if (isClaudeCliModel(modelId)) {
-      const sysSel = document.getElementById('newChatSysPromptSelect');
-      const firstSel = document.getElementById('newChatFirstMsgSelect');
-      const projInput = document.getElementById('newChatProjectPath');
-      payload.provider = 'claude-cli';
-      payload.systemPromptPath = sysSel ? sysSel.value : '';
-      payload.firstMessagePath = firstSel ? firstSel.value : '';
-      payload.projectPath = projInput ? projInput.value.trim() : '';
-      // A chosen first-message .md should win over the generic greeting textarea.
-      if (payload.firstMessagePath) customFirstMessage = '';
-    }
-    payload.customFirstMessage = customFirstMessage;
-
-    try {
-      const res = await apiFetch('/api/chats', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-      closeModal('newChatModal');
-      await loadChatsList();
-      openTab('chats');
-      openChatRoom(res.chat.id);
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  // ==========================================================================
-  // CHARACTERS & PERSONAS MANAGEMENT
-  // ==========================================================================
-  async function reloadCharactersAndPersonas() {
-    const [charsData, personasData] = await Promise.all([
-      apiFetch('/api/characters'),
-      apiFetch('/api/personas'),
-    ]);
-    state.characters = charsData.characters || [];
-    state.personas = personasData.personas || [];
-    state.activePersonaId = personasData.activePersonaId || state.activePersonaId;
-    renderCharactersAndPersonas();
-    renderChatsList();
-    updateHeaderIndicators(true);
-  }
-
-  function switchCharSubtab(sub) {
-    const isChars = sub === 'characters';
-    document.getElementById('segCharsBtn').classList.toggle('active', isChars);
-    document.getElementById('segPersonasBtn').classList.toggle('active', !isChars);
-    document.getElementById('subtabCharacters').classList.toggle('hidden', !isChars);
-    document.getElementById('subtabPersonas').classList.toggle('hidden', isChars);
-  }
-
-  function renderCharactersAndPersonas() {
-    const charGrid = document.getElementById('charactersGrid');
-    if (charGrid) {
-      if (!state.characters.length) {
-        charGrid.innerHTML = `
-          <div class="settings-card empty-state-card" style="grid-column: 1 / -1;">
-            <div class="empty-state-icon">🎭</div>
-            <div class="card-title">Список персонажей пуст</div>
-            <p class="card-hint">Стоковые персонажи отключены. Создайте собственного персонажа или добавьте .md файл в папку <code>characters/</code>.</p>
-            <button class="btn-primary" onclick="window.appUI.openCharacterEditor(null)">+ Добавить персонажа</button>
-          </div>
-        `;
-      } else {
-        charGrid.innerHTML = state.characters
-          .map(c => `
-            <div class="char-card">
-              <img
-                class="char-card-img"
-                src="${escapeHtml(resolveAvatarUrl(c.avatar_url))}"
-                alt="${escapeHtml(c.name)}"
-                style="cursor:zoom-in;"
-                onclick="event.stopPropagation(); window.appUI.openAvatarViewer(this.src, '${escapeHtml(c.name)}')"
-                title="Нажмите, чтобы увеличить изображение"
-              />
-              <div class="char-card-body">
-                <div class="char-card-name">${escapeHtml(c.name)}</div>
-                <div class="char-card-file">📄 ${escapeHtml(c.file_path)}</div>
-                <div class="char-card-greeting">${escapeHtml(stripMarkdownPreview(c.first_message || c.description_preview || 'Нет описания'))}</div>
-                <div class="char-card-actions">
-                  <button class="btn-primary btn-sm" style="flex:1;" onclick="window.appUI.openNewChatModal(${c.id})">💬 Чат</button>
-                  <button class="btn-secondary btn-sm" onclick="window.appUI.openCharacterEditor(${c.id})">✏️</button>
-                </div>
-              </div>
-            </div>
-          `)
-          .join('');
-      }
-    }
-
-    const personasList = document.getElementById('personasList');
-    if (personasList) {
-      if (!state.personas.length) {
-        personasList.innerHTML = `
-          <div class="settings-card empty-state-card">
-            <div class="empty-state-icon">👤</div>
-            <div class="card-title">Список персон пуст</div>
-            <p class="card-hint">Добавьте свою персону (описание вашего персонажа/игрока), чтобы ИИ знал, с кем ведёт диалог.</p>
-            <button class="btn-primary" onclick="window.appUI.openPersonaEditor(null)">+ Добавить персону</button>
-          </div>
-        `;
-      } else {
-        personasList.innerHTML = state.personas
-          .map(p => {
-            const isActive = p.id === Number(state.activePersonaId);
-            return `
-              <div class="chat-card ${isActive ? 'active-persona-card' : ''}">
-                <img
-                  class="chat-card-avatar"
-                  src="${escapeHtml(resolveAvatarUrl(p.avatar_url))}"
-                  alt="${escapeHtml(p.name)}"
-                  style="cursor:zoom-in;"
-                  onclick="event.stopPropagation(); window.appUI.openAvatarViewer(this.src, '${escapeHtml(p.name)}')"
-                  title="Нажмите, чтобы увеличить аватар"
-                />
-                <div class="chat-card-body">
-                  <div class="chat-card-title">
-                    <span>${escapeHtml(p.name)}</span>
-                    <div class="row-gap-sm">
-                      ${
-                        !isActive
-                          ? `<button class="btn-primary btn-sm" onclick="window.appUI.activatePersona(${p.id})">Выбрать</button>`
-                          : `<span class="model-badge">Активна</span>`
-                      }
-                      <button class="btn-secondary btn-sm" onclick="window.appUI.openPersonaEditor(${p.id})">✏️</button>
-                    </div>
-                  </div>
-                  <div class="chat-card-preview">${escapeHtml(stripMarkdownPreview(p.description_preview || 'Нет описания'))}</div>
-                  <div class="chat-card-meta">📄 Файл: ${escapeHtml(p.file_path)}</div>
-                </div>
-              </div>
-            `;
-          })
-          .join('');
-      }
-    }
-  }
-
-  function openCharacterEditor(charId) {
-    const char = state.characters.find(c => c.id === charId) || null;
-    document.getElementById('charEditId').value = char ? String(char.id) : '';
-    document.getElementById('charModalTitle').textContent = char ? `Персонаж: ${char.name}` : 'Новый персонаж';
-    document.getElementById('charNameInput').value = char ? char.name : '';
-    document.getElementById('charFilePathInput').value = char ? char.file_path : '';
-    document.getElementById('charAvatarUrlInput').value = char ? (char.avatar_url || '') : '';
-    document.getElementById('charAvatarPreview').src = resolveAvatarUrl(char ? char.avatar_url : '');
-    document.getElementById('charFirstMessageInput').value = char ? (char.first_message || '') : '';
-    document.getElementById('charFileContentInput').value = char
-      ? (char.fileContent || char.description_preview || '')
-      : '';
-    document.getElementById('charDeleteBtn').classList.toggle('hidden', !char);
-    document.getElementById('characterModal').classList.remove('hidden');
-  }
-
-  function editCurrentChatCharacter() {
-    if (state.currentChatData && state.currentChatData.character && state.currentChatData.character.id) {
-      openCharacterEditor(state.currentChatData.character.id);
-    }
-  }
-
-  async function handleAvatarUpload(event, targetType) {
-    const file = event.target.files && event.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async function (e) {
-      const base64Data = e.target.result;
-      try {
-        const res = await apiFetch('/api/upload-avatar', {
-          method: 'POST',
-          body: JSON.stringify({ base64Data, filename: file.name }),
-        });
-        if (targetType === 'character') {
-          document.getElementById('charAvatarUrlInput').value = res.avatarUrl;
-          document.getElementById('charAvatarPreview').src = resolveAvatarUrl(res.avatarUrl);
-        } else {
-          document.getElementById('personaAvatarUrlInput').value = res.avatarUrl;
-          document.getElementById('personaAvatarPreview').src = resolveAvatarUrl(res.avatarUrl);
-        }
-        showToast('Изображение загружено!');
-      } catch (err) {
-        showToast('Ошибка загрузки фото: ' + err.message);
-      }
-    };
-    reader.readAsDataURL(file);
-  }
-
-  function updateAvatarPreview(targetType) {
-    if (targetType === 'character') {
-      const url = document.getElementById('charAvatarUrlInput').value.trim();
-      document.getElementById('charAvatarPreview').src = resolveAvatarUrl(url);
-    } else {
-      const url = document.getElementById('personaAvatarUrlInput').value.trim();
-      document.getElementById('personaAvatarPreview').src = resolveAvatarUrl(url);
-    }
-  }
-
-  async function saveCharacterFromModal() {
-    const editId = document.getElementById('charEditId').value;
-    const name = document.getElementById('charNameInput').value.trim();
-    const filePath = document.getElementById('charFilePathInput').value.trim();
-    const avatarUrl = document.getElementById('charAvatarUrlInput').value.trim();
-    const firstMessage = document.getElementById('charFirstMessageInput').value;
-    const rawFileContent = document.getElementById('charFileContentInput').value;
-
-    if (!name) {
-      return showToast('Введите имя персонажа');
-    }
-
-    try {
-      const payload = {
-        name,
-        filePath,
-        avatarUrl,
-        firstMessage,
-        description: rawFileContent,
-        rawFileContent: rawFileContent.includes('#') ? rawFileContent : undefined,
-      };
-      if (editId) {
-        await apiFetch(`/api/characters/${editId}`, { method: 'PUT', body: JSON.stringify(payload) });
-      } else {
-        await apiFetch('/api/characters', { method: 'POST', body: JSON.stringify(payload) });
-      }
-      closeModal('characterModal');
-      await reloadCharactersAndPersonas();
-      loadFiles(state.currentFilesPath);
-      if (state.currentChatId) openChatRoom(state.currentChatId);
-      showToast('Персонаж и его файл сохранены!');
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function deleteCharacterFromModal() {
-    const editId = document.getElementById('charEditId').value;
-    if (!editId) return;
-    try {
-      await apiFetch(`/api/characters/${editId}?deleteFile=1`, { method: 'DELETE' });
-      closeModal('characterModal');
-      await reloadCharactersAndPersonas();
-      loadFiles(state.currentFilesPath);
-      showToast('Персонаж удалён');
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  function openPersonaEditor(personaId) {
-    const p = state.personas.find(x => x.id === personaId) || null;
-    document.getElementById('personaEditId').value = p ? String(p.id) : '';
-    document.getElementById('personaModalTitle').textContent = p ? `Персона: ${p.name}` : 'Новая Персона игрока';
-    document.getElementById('personaNameInput').value = p ? p.name : '';
-    document.getElementById('personaFilePathInput').value = p ? p.file_path : '';
-    document.getElementById('personaAvatarUrlInput').value = p ? (p.avatar_url || '') : '';
-    document.getElementById('personaAvatarPreview').src = resolveAvatarUrl(p ? p.avatar_url : '');
-    document.getElementById('personaFileContentInput').value = p ? (p.fileContent || p.description_preview || '') : '';
-    document.getElementById('personaDeleteBtn').classList.toggle('hidden', !p);
-    document.getElementById('personaModal').classList.remove('hidden');
-  }
-
-  async function savePersonaFromModal() {
-    const editId = document.getElementById('personaEditId').value;
-    const name = document.getElementById('personaNameInput').value.trim();
-    const filePath = document.getElementById('personaFilePathInput').value.trim();
-    const avatarUrl = document.getElementById('personaAvatarUrlInput').value.trim();
-    const content = document.getElementById('personaFileContentInput').value;
-
-    if (!name) return showToast('Введите имя вашей персоны');
-
-    try {
-      const payload = {
-        name,
-        filePath,
-        avatarUrl,
-        description: content,
-        rawFileContent: content.includes('#') ? content : undefined,
-      };
-      if (editId) {
-        await apiFetch(`/api/personas/${editId}`, { method: 'PUT', body: JSON.stringify(payload) });
-      } else {
-        await apiFetch('/api/personas', { method: 'POST', body: JSON.stringify(payload) });
-      }
-      closeModal('personaModal');
-      await reloadCharactersAndPersonas();
-      loadFiles(state.currentFilesPath);
-      showToast('Персона сохранена!');
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function deletePersonaFromModal() {
-    const editId = document.getElementById('personaEditId').value;
-    if (!editId) return;
-    try {
-      await apiFetch(`/api/personas/${editId}`, { method: 'DELETE' });
-      closeModal('personaModal');
-      await reloadCharactersAndPersonas();
-      loadFiles(state.currentFilesPath);
-      showToast('Персона удалена');
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function activatePersona(personaId) {
-    try {
-      await apiFetch(`/api/personas/${personaId}/activate`, { method: 'POST' });
-      state.activePersonaId = personaId;
-      if (state.currentChatId) {
-        const res = await apiFetch(`/api/chats/${state.currentChatId}`, {
-          method: 'PATCH',
-          body: JSON.stringify({ personaId }),
-        });
-        if (state.currentChatData) {
-          state.currentChatData.chat = res.chat;
-          state.currentChatData.persona = res.persona;
-          renderActiveChatRoom();
-        }
-      }
-      renderCharactersAndPersonas();
-      updateHeaderIndicators(true);
-      showToast('Активная персона изменена!');
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  function openPersonaQuickModal() {
-    openTab('characters');
-    switchCharSubtab('personas');
-  }
-
-  // ==========================================================================
-  // FILES & FOLDERS MANAGER
-  // ==========================================================================
-  async function loadFiles(relPath = '') {
-    try {
-      state.currentFilesPath = relPath;
-      const data = await apiFetch(`/api/files?path=${encodeURIComponent(relPath)}`);
-      document.getElementById('filesBreadcrumb').textContent = `workspace / ${data.currentPath || ''}`;
-
-      const list = document.getElementById('filesListContainer');
-      const items = data.items || [];
-      let html = '';
-
-      if (relPath) {
-        const parentPath = relPath.includes('/') ? relPath.slice(0, relPath.lastIndexOf('/')) : '';
-        html += `
-          <div class="file-item" onclick="window.appUI.loadFiles('${escapeHtml(parentPath)}')">
-            <div class="file-item-left">
-              <span class="file-icon">↩️</span>
-              <div>
-                <div class="file-name">.. (На уровень выше)</div>
-              </div>
-            </div>
-          </div>
-        `;
-      }
-
-      html += items
-        .map(item => {
-          if (item.isDirectory) {
-            return `
-              <div class="file-item" onclick="window.appUI.loadFiles('${escapeHtml(item.path)}')">
-                <div class="file-item-left">
-                  <span class="file-icon">📁</span>
-                  <div>
-                    <div class="file-name">${escapeHtml(item.name)}/</div>
-                    <div class="file-sub">Папка • ${escapeHtml(item.path)}</div>
-                  </div>
-                </div>
-                <button class="toolbar-btn" onclick="event.stopPropagation(); window.appUI.deleteWorkspaceItem('${escapeHtml(item.path)}')">🗑</button>
-              </div>
-            `;
-          }
-          return `
-            <div class="file-item" onclick="window.appUI.openFileEditor('${escapeHtml(item.path)}')">
-              <div class="file-item-left">
-                <span class="file-icon">📄</span>
-                <div>
-                  <div class="file-name">${escapeHtml(item.name)}</div>
-                  <div class="file-sub">${item.size} байт • ${escapeHtml(item.path)}</div>
-                </div>
-              </div>
-              <span style="color:var(--primary-light);font-size:12px;">Открыть ✏️</span>
-            </div>
-          `;
-        })
-        .join('');
-
-      list.innerHTML = html || '<div class="card-hint">Папка пуста. Создайте файл или подпапку.</div>';
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function promptCreateFolder() {
-    const base = state.currentFilesPath ? state.currentFilesPath + '/' : '';
-    const folderName = window.prompt('Введите путь или имя новой папки в workspace:', base + 'new_folder');
-    if (!folderName || !folderName.trim()) return;
-    try {
-      await apiFetch('/api/files/folder', {
-        method: 'POST',
-        body: JSON.stringify({ folderPath: folderName.trim() }),
-      });
-      loadFiles(state.currentFilesPath);
-      showToast('Папка создана!');
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  function promptCreateFile() {
-    const base = state.currentFilesPath ? state.currentFilesPath + '/' : 'characters/';
-    document.getElementById('fileEditorTitle').textContent = 'Создание нового файла';
-    document.getElementById('fileEditorPathInput').value = base + 'new_file.md';
-    document.getElementById('fileEditorContentInput').value = '# Заголовок\n\nТекст файла...';
-    document.getElementById('fileEditorDeleteBtn').classList.add('hidden');
-    document.getElementById('fileEditorModal').classList.remove('hidden');
-  }
-
-  async function openFileEditor(relPath) {
-    try {
-      const data = await apiFetch(`/api/files/content?path=${encodeURIComponent(relPath)}`);
-      document.getElementById('fileEditorTitle').textContent = `Файл: ${data.name}`;
-      document.getElementById('fileEditorPathInput').value = data.path;
-      document.getElementById('fileEditorContentInput').value = data.content;
-      document.getElementById('fileEditorDeleteBtn').classList.remove('hidden');
-      document.getElementById('fileEditorModal').classList.remove('hidden');
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  function openChatMemoryFile() {
-    if (!state.currentChatData || !state.currentChatData.chat) return;
-    const memPath = state.currentChatData.chat.memory_file_path || `memories/chat_${state.currentChatData.chat.id}.md`;
-    openFileEditor(memPath);
-  }
-
-  async function saveFileFromModal() {
-    const filePath = document.getElementById('fileEditorPathInput').value.trim();
-    const content = document.getElementById('fileEditorContentInput').value;
-    if (!filePath) return showToast('Укажите путь к файлу');
-    try {
-      await apiFetch('/api/files/file', {
-        method: 'POST',
-        body: JSON.stringify({ filePath, content }),
-      });
-      closeModal('fileEditorModal');
-      loadFiles(state.currentFilesPath);
-      await reloadCharactersAndPersonas();
-      showToast('Файл сохранён и синхронизирован!');
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function deleteFileFromModal() {
-    const filePath = document.getElementById('fileEditorPathInput').value.trim();
-    if (!filePath) return;
-    await deleteWorkspaceItem(filePath);
-    closeModal('fileEditorModal');
-  }
-
-  async function deleteWorkspaceItem(relPath) {
-    try {
-      await apiFetch(`/api/files?path=${encodeURIComponent(relPath)}`, { method: 'DELETE' });
-      loadFiles(state.currentFilesPath);
-      await reloadCharactersAndPersonas();
-      showToast('Удалено: ' + relPath);
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  // ==========================================================================
-  // PROJECT ID, MODELS & EFFORT SELECTION
-  // ==========================================================================
-  function renderModelsLists() {
-    const activeModel = state.currentChatData && state.currentChatData.chat
-      ? state.currentChatData.chat.model_id
-      : state.selectedModel;
-
-    const html = state.models
-      .map(m => {
-        const isSel = m.id === activeModel;
-        return `
-          <div class="model-item ${isSel ? 'selected' : ''}" onclick="window.appUI.selectModel('${escapeHtml(m.id)}')">
-            <div>
-              <div style="font-weight:700;font-size:13.5px;">${escapeHtml(m.name)}</div>
-              <div style="font-size:11px;color:var(--text-secondary);">ID: ${escapeHtml(m.id)}</div>
-            </div>
-            <div class="row-gap-sm">
-              ${m.badge ? `<span class="model-badge">${escapeHtml(m.badge)}</span>` : ''}
-              ${isSel ? '<span>✅</span>' : ''}
-            </div>
-          </div>
-        `;
-      })
-      .join('');
-
-    const settingsList = document.getElementById('settingsModelsList');
-    if (settingsList) settingsList.innerHTML = html;
-
-    const modalList = document.getElementById('modalModelsList');
-    if (modalList) modalList.innerHTML = html;
-  }
-
-  function updateEffortButtons() {
-    const activeEffort = state.currentChatData && state.currentChatData.chat
-      ? state.currentChatData.chat.effort
-      : state.selectedEffort;
-
-    document.querySelectorAll('.effort-btn').forEach(btn => {
-      btn.classList.toggle('active', btn.getAttribute('data-effort') === activeEffort);
-    });
-  }
-
-  async function selectModel(modelId) {
-    try {
-      state.selectedModel = modelId;
-      if (Array.isArray(state.chats)) {
-        state.chats.forEach(c => {
-          c.model_id = modelId;
-        });
-      }
-      if (state.currentChatData && state.currentChatData.chat) {
-        state.currentChatData.chat.model_id = modelId;
-      }
-
-      await apiFetch('/api/settings', {
-        method: 'POST',
-        body: JSON.stringify({ selectedModel: modelId }),
-      });
-
-      if (state.currentChatId) {
-        const res = await apiFetch(`/api/chats/${state.currentChatId}`, {
-          method: 'PATCH',
-          body: JSON.stringify({ modelId }),
-        });
-        if (state.currentChatData) {
-          state.currentChatData.chat = res.chat;
-          renderActiveChatRoom();
-        }
-      }
-
-      renderModelsLists();
-      renderChatsList();
-      updateHeaderIndicators(true);
-      closeModal('modelPickerModal');
-      showToast(`Фиксирована модель: ${getShortModelName(modelId)}`);
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function setEffort(effort) {
-    try {
-      state.selectedEffort = effort;
-      if (Array.isArray(state.chats)) {
-        state.chats.forEach(c => {
-          c.effort = effort;
-        });
-      }
-      if (state.currentChatData && state.currentChatData.chat) {
-        state.currentChatData.chat.effort = effort;
-      }
-
-      await apiFetch('/api/settings', {
-        method: 'POST',
-        body: JSON.stringify({ selectedEffort: effort }),
-      });
-
-      if (state.currentChatId) {
-        const res = await apiFetch(`/api/chats/${state.currentChatId}`, {
-          method: 'PATCH',
-          body: JSON.stringify({ effort }),
-        });
-        if (state.currentChatData) {
-          state.currentChatData.chat = res.chat;
-          renderActiveChatRoom();
-        }
-      }
-
-      updateEffortButtons();
-      renderChatsList();
-      updateHeaderIndicators(true);
-      showToast(`Уровень рассуждений (Effort): ${effort.toUpperCase()}`);
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function refreshModels() {
-    try {
-      showToast('Запрос моделей из agy models...');
-      const data = await apiFetch('/api/models?refresh=1');
-      state.models = data.models || [];
-      renderModelsLists();
-      showToast(`Загружено моделей: ${state.models.length}`);
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function startAgyOAuth() {
-    try {
-      showToast('🔑 Запуск авторизации Google Antigravity...');
-      const res = await apiFetch('/api/agy/auth/start', { method: 'POST' });
-      if (res.authUrl && typeof window.AndroidServer === 'undefined') {
-        window.open(res.authUrl, '_blank');
-      }
-      // Poll status briefly while user completes sign-in in browser
-      let checks = 0;
-      const authPoll = setInterval(async () => {
-        checks++;
-        if (checks > 90 || state.agyAuthenticated) {
-          clearInterval(authPoll);
-          return;
-        }
-        await checkAgyAuthStatus();
-      }, 2000);
-    } catch (err) {
-      showToast('Ошибка запуска авторизации: ' + err.message);
-    }
-  }
-
-  async function exchangeAgyOAuthCode() {
-    const inputEl = document.getElementById('inputOAuthCode');
-    const codeOrUrl = inputEl ? inputEl.value.trim() : '';
-    if (!codeOrUrl) {
-      return showToast('Вставьте ссылку редиректа или код авторизации');
-    }
-    try {
-      showToast('⏳ Проверка кода авторизации...');
-      const res = await apiFetch('/api/agy/auth/exchange', {
-        method: 'POST',
-        body: JSON.stringify({ codeOrUrl }),
-      });
-      state.agyAuthenticated = Boolean(res.authenticated);
-      state.agyEmail = res.email || '';
-      if (res.projectId) {
-        state.projectId = res.projectId;
-        const projInput = document.getElementById('inputProjectId');
-        if (projInput) projInput.value = state.projectId;
-      }
-      if (inputEl) inputEl.value = '';
-      renderAgyAuthStatus();
-      updateHeaderIndicators(true);
-      showToast(`✅ Авторизация успешна${state.agyEmail ? ' (' + state.agyEmail + ')' : ''}!`);
-    } catch (err) {
-      showToast('Ошибка авторизации: ' + err.message);
-    }
-  }
-
-  async function logoutAgyOAuth() {
-    try {
-      await apiFetch('/api/agy/auth/logout', { method: 'POST' });
-      state.agyAuthenticated = false;
-      state.agyEmail = '';
-      renderAgyAuthStatus();
-      updateHeaderIndicators(true);
-      showToast('Вы вышли из аккаунта Google Antigravity');
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  // ==========================================================================
-  // CLAUDE CODE CLI (on-device) — runtime install + subscription auth
-  // ==========================================================================
   function isClaudeCliModel(modelId) {
     return typeof modelId === 'string' && modelId.indexOf('claude-code-') === 0;
   }
 
-  function renderClaudeStatus() {
-    const badge = document.getElementById('claudeStatusBadge');
-    const loginBtn = document.getElementById('claudeAuthLoginBtn');
-    const logoutBtn = document.getElementById('claudeAuthLogoutBtn');
-    const installBtn = document.getElementById('claudeInstallBtn');
-
-    if (badge) {
-      if (!state.claudeRuntimeReady) {
-        badge.textContent = '⚠️ Среда Claude Code не установлена. Нажмите «Скачать среду» (≈300 МБ, один раз).';
-        badge.style.color = 'var(--warning)';
-      } else if (!state.claudeAuthenticated) {
-        badge.textContent = '✅ Среда готова. ⚠️ Войдите в Claude по подписке, чтобы запускать модели Claude Code.';
-        badge.style.color = 'var(--warning)';
-      } else {
-        badge.textContent = '✅ Среда Claude Code установлена и авторизована. Модели «Claude … (Code CLI)» готовы к работе.';
-        badge.style.color = 'var(--success)';
-      }
-    }
-    if (installBtn) {
-      installBtn.textContent = state.claudeRuntimeReady ? '🔄 Переустановить среду Claude' : '⬇️ Скачать среду Claude (≈300 МБ)';
-    }
-    if (loginBtn) {
-      loginBtn.disabled = !state.claudeRuntimeReady;
-      loginBtn.textContent = state.claudeAuthenticated ? '🔄 Перевойти в Claude' : '🔑 Войти в Claude (подписка)';
-    }
-    if (logoutBtn) {
-      logoutBtn.classList.toggle('hidden', !state.claudeAuthenticated);
-    }
-  }
-
-  async function checkClaudeStatus() {
-    try {
-      const data = await apiFetch('/api/claude/status');
-      state.claudeRuntimeReady = Boolean(data.runtimeReady);
-      state.claudeAuthenticated = Boolean(data.authenticated);
-      if (data.projectPath !== undefined) state.claudeProjectPath = data.projectPath;
-      renderClaudeStatus();
-    } catch (e) {}
-  }
-
-  async function installClaudeRuntime() {
-    if (!confirm('Скачать среду выполнения Claude Code на устройство? Это разовая загрузка около 300 МБ (нужен Wi-Fi и свободное место).')) {
-      return;
-    }
-    const installBtn = document.getElementById('claudeInstallBtn');
-    if (installBtn) { installBtn.disabled = true; }
-    const badge = document.getElementById('claudeStatusBadge');
-    if (badge) {
-      badge.textContent = '⏳ Скачивание и распаковка среды Claude... Не закрывайте приложение. Это может занять несколько минут.';
-      badge.style.color = 'var(--text-secondary)';
-    }
-    showToast('⏳ Устанавливаю среду Claude Code...');
-    try {
-      const res = await apiFetch('/api/claude/runtime/install', { method: 'POST' });
-      state.claudeRuntimeReady = Boolean(res.runtimeReady);
-      state.claudeAuthenticated = Boolean(res.authenticated);
-      renderClaudeStatus();
-      showToast(state.claudeRuntimeReady ? '✅ Среда Claude Code установлена!' : '⚠️ Установка не завершилась.');
-    } catch (err) {
-      renderClaudeStatus();
-      showToast('Ошибка установки: ' + err.message);
-    } finally {
-      if (installBtn) { installBtn.disabled = false; }
-    }
-  }
-
-  async function startClaudeAuth() {
-    if (!state.claudeRuntimeReady) return showToast('Сначала скачайте среду Claude.');
-    try {
-      showToast('🔑 Запуск входа в Claude...');
-      const res = await apiFetch('/api/claude/auth/start', { method: 'POST' });
-      if (res.authUrl && typeof window.AndroidServer === 'undefined') {
-        window.open(res.authUrl, '_blank');
-      }
-      if (!res.authUrl && res.note) {
-        showToast('Если браузер не открылся, повторите вход.');
-      } else {
-        showToast('Войдите в браузере и вставьте код ниже.');
-      }
-    } catch (err) {
-      showToast('Ошибка запуска входа: ' + err.message);
-    }
-  }
-
-  async function exchangeClaudeAuthCode() {
-    const inputEl = document.getElementById('inputClaudeAuthCode');
-    const code = inputEl ? inputEl.value.trim() : '';
-    if (!code) return showToast('Вставьте код авторизации из браузера');
-    try {
-      showToast('⏳ Проверка кода авторизации Claude...');
-      const res = await apiFetch('/api/claude/auth/exchange', {
-        method: 'POST',
-        body: JSON.stringify({ code }),
-      });
-      state.claudeAuthenticated = Boolean(res.authenticated);
-      if (inputEl) inputEl.value = '';
-      renderClaudeStatus();
-      showToast(res.authenticated ? '✅ Авторизация Claude успешна!' : ('Не удалось: ' + (res.error || 'повторите вход')));
-    } catch (err) {
-      showToast('Ошибка авторизации: ' + err.message);
-    }
-  }
-
-  async function logoutClaudeAuth() {
-    try {
-      await apiFetch('/api/claude/auth/logout', { method: 'POST' });
-      state.claudeAuthenticated = false;
-      renderClaudeStatus();
-      showToast('Вы вышли из Claude.');
-    } catch (err) {
-      showToast(err.message);
-    }
+  /** 'cli' (on-device Claude Code), 'vertex-claude' (Anthropic via Vertex) or 'gemini'. */
+  function providerOf(modelId) {
+    const id = String(modelId || '');
+    if (isClaudeCliModel(id)) return 'cli';
+    if (id.indexOf('claude-') === 0) return 'vertex-claude';
+    return 'gemini';
   }
 
   /**
-   * Walks the workspace (breadth-first, shallow) collecting all .md files so the
-   * new-chat modal can offer them as system-prompt / first-message choices.
+   * Reasoning levels each provider really honours: Gemini maps MAX to HIGH,
+   * Claude-on-Vertex ignores effort, the Claude CLI accepts up to xhigh/max.
    */
-  async function collectWorkspaceMdFiles() {
-    const found = [];
-    const queue = [''];
-    let visited = 0;
-    while (queue.length && visited < 60) {
-      const dir = queue.shift();
-      visited++;
-      let data;
+  function effortOptionsFor(modelId) {
+    const p = providerOf(modelId);
+    if (p === 'cli') return ['low', 'medium', 'high', 'xhigh', 'max'];
+    if (p === 'vertex-claude') return [];
+    return ['low', 'medium', 'high'];
+  }
+
+  function effectiveEffort(modelId, effort) {
+    const opts = effortOptionsFor(modelId);
+    if (!opts.length) return '';
+    const e = String(effort || 'high').toLowerCase();
+    return opts.includes(e) ? e : 'high';
+  }
+
+  function chatActivityTime(chat) {
+    return parseServerTime(chat && (chat.last_activity || chat.created_at));
+  }
+
+  /** Most recent activity first; chats without timestamps fall back to id order. */
+  function sortChats(chats) {
+    return (chats || []).slice().sort((a, b) => {
+      const ta = chatActivityTime(a);
+      const tb = chatActivityTime(b);
+      if (ta && tb && tb.getTime() !== ta.getTime()) return tb - ta;
+      if (ta && !tb) return -1;
+      if (tb && !ta) return 1;
+      return (Number(b.id) || 0) - (Number(a.id) || 0);
+    });
+  }
+
+  function filterChats(chats, opts) {
+    const query = String((opts && opts.query) || '').trim().toLowerCase();
+    const characterId = Number((opts && opts.characterId) || 0);
+    return (chats || []).filter(c => {
+      if (characterId && Number(c.character_id) !== characterId) return false;
+      if (!query) return true;
+      return [c.character_name, c.persona_name, c.title, stripMarkdownPreview(c.last_message)]
+        .some(v => String(v || '').toLowerCase().includes(query));
+    });
+  }
+
+  function isDefaultChatTitle(title, characterName) {
+    const t = String(title || '').trim();
+    return !t || t === 'Чат: ' + String(characterName || '').trim();
+  }
+
+  // ==========================================================================
+  // STATE, PREFERENCES, FEATURES
+  // ==========================================================================
+  const state = {
+    serverUrl: getServerBaseUrl(),
+    engineBuild: 17,
+    webVersion: '',
+    settings: {
+      projectId: '',
+      selectedModel: 'gemini-4-argon',
+      selectedEffort: 'high',
+      safetyThreshold: 'OFF',
+      activePersonaId: 0,
+      agyAuthenticated: false,
+      agyEmail: '',
+      claudeRuntimeReady: false,
+      claudeAuthenticated: false,
+      claudeProjectPath: '',
+      claudeRuntimeUrlConfigured: null,
+    },
+    models: [],
+    characters: [],
+    personas: [],
+    chats: [],
+    loaded: false,
+    loadError: '',
+    tab: 'chats',
+    chatsQuery: '',
+    chatsSearchOpen: false,
+    chatsFilter: 0,
+    charsQuery: '',
+    charsSearchOpen: false,
+    charsSort: 'name',
+    room: null,
+    generations: {},
+    drafts: {},
+    updateInfo: null,
+    updateToastShown: false,
+    systemPromptText: null,
+    lastGeneration: {},
+  };
+
+  const PREFS_KEY = 'agy_ui_prefs_v1';
+  const DEFAULT_PREFS = {
+    theme: 'dark',
+    accent: 231,
+    fontSize: 16,
+    lineHeight: 1.6,
+    serif: false,
+    dialogue: true,
+    thoughtsOpen: false,
+    enterSends: false,
+  };
+
+  function loadPrefs() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(PREFS_KEY);
+      return Object.assign({}, DEFAULT_PREFS, raw ? JSON.parse(raw) : {});
+    } catch (e) {
+      return Object.assign({}, DEFAULT_PREFS);
+    }
+  }
+
+  const prefs = loadPrefs();
+
+  function savePrefs() {
+    try {
+      window.localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    } catch (e) {
+      // storage may be unavailable; preferences then last for the session
+    }
+  }
+
+  // Native engine capabilities (APK build 18 added these endpoints/bridges).
+  const can = {
+    cancel: () => state.engineBuild >= 18,
+    promptPreview: () => state.engineBuild >= 18,
+    rename: () => state.engineBuild >= 18,
+    jsonPicker: () => !hasBridge || state.engineBuild >= 18,
+    perChatModel: () => state.engineBuild >= 18,
+    systemBars: () => !hasBridge || typeof window.AndroidServer.setSystemBars === 'function',
+  };
+
+  const THEMES = {
+    dark: { label: 'Тёмная', bg: '#0f1115', nav: '#13161c', light: false, swatch: ['#0f1115', '#1c2029', '#a4abbb'] },
+    amoled: { label: 'AMOLED', bg: '#000000', nav: '#000000', light: false, swatch: ['#000000', '#121419', '#a4abbb'] },
+    light: { label: 'Светлая', bg: '#f4f5f8', nav: '#ffffff', light: true, swatch: ['#f4f5f8', '#ffffff', '#4f5768'] },
+  };
+  const ACCENTS = [
+    { hue: 231, label: 'Индиго' },
+    { hue: 265, label: 'Фиолетовый' },
+    { hue: 172, label: 'Бирюзовый' },
+    { hue: 32, label: 'Янтарный' },
+    { hue: 340, label: 'Розовый' },
+  ];
+
+  function applyTheme() {
+    const root = document.documentElement;
+    const theme = THEMES[prefs.theme] ? prefs.theme : 'dark';
+    if (root.dataset) root.dataset.theme = theme;
+    root.style.setProperty('--accent-h', String(prefs.accent));
+    root.style.setProperty('--reading-size', prefs.fontSize + 'px');
+    root.style.setProperty('--reading-lh', String(prefs.lineHeight));
+    root.style.setProperty('--reading-font', prefs.serif ? 'var(--font-serif)' : 'var(--font-ui)');
+    const t = THEMES[theme];
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', t.bg);
+    if (hasBridge && typeof window.AndroidServer.setSystemBars === 'function') {
       try {
-        data = await apiFetch(`/api/files?path=${encodeURIComponent(dir)}`);
+        window.AndroidServer.setSystemBars(t.bg, t.nav, t.light);
       } catch (e) {
-        continue;
-      }
-      for (const item of (data.items || [])) {
-        if (item.isDirectory) {
-          queue.push(item.path);
-        } else if (/\.md$/i.test(item.name)) {
-          found.push(item.path);
-        }
+        // older bridge signature — ignore
       }
     }
-    found.sort((a, b) => a.localeCompare(b, 'ru'));
-    return found;
   }
 
-  function fillMdSelect(selectEl, files, placeholder) {
-    if (!selectEl) return;
-    const opts = [`<option value="">${escapeHtml(placeholder)}</option>`]
-      .concat(files.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`));
-    selectEl.innerHTML = opts.join('');
+  // ==========================================================================
+  // DOM HELPERS
+  // ==========================================================================
+  const $ = (sel, root) => (root || document).querySelector(sel);
+  const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+  const ic = (name, cls) => `<svg class="ic${cls ? ' ' + cls : ''}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+
+  function htmlToElement(html) {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = html.trim();
+    return tpl.content.firstElementChild;
   }
 
-  async function onNewChatModelChange() {
-    const modelSel = document.getElementById('newChatModelSelect');
-    const block = document.getElementById('newChatClaudeBlock');
-    if (!modelSel || !block) return;
-    const isClaude = isClaudeCliModel(modelSel.value);
-    block.classList.toggle('hidden', !isClaude);
-    if (!isClaude) return;
+  function autoGrow(el, maxPx) {
+    if (!el) return;
+    el.style.height = 'auto';
+    const max = maxPx || 10000;
+    el.style.height = Math.min(el.scrollHeight + 2, max) + 'px';
+    el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
+  }
 
-    const sysSel = document.getElementById('newChatSysPromptSelect');
-    const firstSel = document.getElementById('newChatFirstMsgSelect');
-    const projInput = document.getElementById('newChatProjectPath');
-    if (projInput && !projInput.value) projInput.value = state.claudeProjectPath || '';
-    // Populate the .md pickers lazily on first open.
-    if (sysSel && sysSel.dataset.loaded !== '1') {
-      fillMdSelect(sysSel, [], 'Загрузка .md...');
-      fillMdSelect(firstSel, [], 'Загрузка .md...');
-      const files = await collectWorkspaceMdFiles();
-      fillMdSelect(sysSel, files, '— Системный промпт (.md) —');
-      fillMdSelect(firstSel, files, '— Без файла (приветствие из карточки) —');
-      sysSel.dataset.loaded = '1';
+  function findChar(id) {
+    return state.characters.find(c => c.id === Number(id)) || null;
+  }
+
+  function findPersona(id) {
+    return state.personas.find(p => p.id === Number(id)) || null;
+  }
+
+  function modelName(modelId) {
+    const m = state.models.find(x => x.id === modelId);
+    return m ? m.name : (modelId || '—');
+  }
+
+  const PROVIDERS = {
+    gemini: { label: 'Google Vertex · Gemini', short: 'Gemini', icon: 'cloud' },
+    'vertex-claude': { label: 'Google Vertex · Claude', short: 'Claude', icon: 'cloud' },
+    cli: { label: 'Claude Code · на устройстве', short: 'Claude CLI', icon: 'terminal' },
+  };
+  const EFFORT_LABELS = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh', max: 'Max' };
+
+  function modelSummary(modelId, effort) {
+    const e = effectiveEffort(modelId, effort);
+    return modelName(modelId) + (e ? ' · ' + EFFORT_LABELS[e] : '');
+  }
+
+  function providerStatus(provider) {
+    const s = state.settings;
+    if (provider === 'cli') {
+      if (!s.claudeRuntimeReady) return { ok: false, text: 'Среда не установлена' };
+      if (!s.claudeAuthenticated) return { ok: false, text: 'Нужен вход в Claude' };
+      return { ok: true, text: 'Готово' };
     }
-    if (!state.claudeRuntimeReady || !state.claudeAuthenticated) {
-      showToast('Claude Code: откройте Настройки и установите среду + войдите по подписке.');
+    if (!s.agyAuthenticated) return { ok: false, text: 'Нужен вход в Google' };
+    return { ok: true, text: 'Подключено' };
+  }
+
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        toast('Скопировано', { type: 'success' });
+        return true;
+      }
+    } catch (e) {
+      // fall through to the textarea fallback
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+      toast('Скопировано', { type: 'success' });
+      return true;
+    } catch (e) {
+      toast('Не удалось скопировать', { type: 'error' });
+      return false;
     }
   }
 
-  async function saveSettings() {
-    const projectId = document.getElementById('inputProjectId').value.trim();
-    const safetySelect = document.getElementById('inputSafetyThreshold');
-    const safetyThreshold = safetySelect ? safetySelect.value : (state.safetyThreshold || 'OFF');
-    const claudeProjInput = document.getElementById('inputClaudeProjectPath');
-    if (!projectId) return showToast('Введите Project ID');
+  function openExternal(url) {
+    if (hasBridge && typeof window.AndroidServer.openExternalUrl === 'function') {
+      window.AndroidServer.openExternalUrl(url);
+    } else {
+      window.open(url, '_blank');
+    }
+  }
 
-    const payload = {
-      projectId,
-      safetyThreshold,
+  function reloadApp() {
+    if (hasBridge && typeof window.AndroidServer.reloadWebView === 'function') {
+      window.AndroidServer.reloadWebView();
+    } else {
+      window.location.reload();
+    }
+  }
+
+  function saveFile(filename, text, mime) {
+    if (hasBridge && typeof window.AndroidServer.saveExportFile === 'function') {
+      window.AndroidServer.saveExportFile(filename, text, mime);
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([text], { type: mime + ';charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      a.remove();
+      URL.revokeObjectURL(url);
+    }, 300);
+  }
+
+  // ==========================================================================
+  // UI KIT: toasts
+  // ==========================================================================
+  const toastQueue = [];
+  let toastCurrent = null;
+
+  function toast(message, opts) {
+    const o = opts || {};
+    toastQueue.push({
+      message: String(message || ''),
+      type: o.type || 'info',
+      action: o.action || null,
+      duration: o.duration || (o.action ? 6500 : 3000),
+    });
+    if (toastQueue.length > 2) toastQueue.splice(0, toastQueue.length - 2);
+    if (toastCurrent) {
+      toastCurrent.dismissSoon();
+    } else {
+      showNextToast();
+    }
+  }
+
+  function showNextToast() {
+    const host = $('#toastHost');
+    const item = toastQueue.shift();
+    if (!host || !item) {
+      toastCurrent = null;
+      return;
+    }
+    const iconName = item.type === 'error' ? 'alert' : (item.type === 'success' ? 'check-circle' : '');
+    const el = htmlToElement(`<div class="toast ${item.type}" role="status">${iconName ? ic(iconName) : ''}<div class="toast-text">${escapeHtml(item.message)}</div>${item.action ? `<button class="toast-action">${escapeHtml(item.action.label)}</button>` : ''}</div>`);
+    host.appendChild(el);
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      el.classList.add('leaving');
+      setTimeout(() => {
+        el.remove();
+        toastCurrent = null;
+        showNextToast();
+      }, 180);
     };
-    if (claudeProjInput) {
-      payload.claudeProjectPath = claudeProjInput.value.trim();
-      state.claudeProjectPath = payload.claudeProjectPath;
-    }
-
-    try {
-      const res = await apiFetch('/api/settings', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-      state.projectId = res.projectId;
-      state.safetyThreshold = res.safetyThreshold || safetyThreshold;
-      renderAgyAuthStatus();
-      updateHeaderIndicators(true);
-      showToast(`✅ Настройки сохранены! Safety: ${state.safetyThreshold}`);
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  function applyServerUrl() {
-    const raw = document.getElementById('inputServerUrl').value.trim().replace(/\/+$/, '');
-    if (!raw) return;
-    localStorage.setItem('agy_server_url', raw);
-    state.serverUrl = raw;
-    showToast('Подключение к ' + raw + '...');
-    initApp();
-  }
-
-  function openModelModal() {
-    renderModelsLists();
-    updateEffortButtons();
-    document.getElementById('modelPickerModal').classList.remove('hidden');
-  }
-
-  function openModal(id) {
-    const el = document.getElementById(id);
-    if (el) el.classList.remove('hidden');
-  }
-
-  function closeModal(id) {
-    const el = document.getElementById(id);
-    if (el) el.classList.add('hidden');
-  }
-
-  function openTab(tabName) {
-    setBottomNavHidden(false);
-    document.querySelectorAll('.tab-pane').forEach(pane => {
-      pane.classList.toggle('active', pane.id === `tab-${tabName}`);
+    const timer = setTimeout(finish, item.duration);
+    toastCurrent = {
+      dismissSoon() {
+        clearTimeout(timer);
+        setTimeout(finish, 350);
+      },
+    };
+    el.addEventListener('click', (e) => {
+      if (item.action && e.target.closest('.toast-action')) {
+        try {
+          item.action.fn();
+        } catch (err) {
+          console.error(err);
+        }
+      }
+      finish();
     });
-    document.querySelectorAll('.nav-item').forEach(btn => {
-      btn.classList.toggle('active', btn.getAttribute('data-tab') === tabName);
-    });
-    if (tabName === 'updates') {
-      checkForUpdates(false);
-    } else if (tabName === 'settings') {
-      checkAgyAuthStatus();
-      checkClaudeStatus();
-    }
   }
 
   // ==========================================================================
-  // GIT AUTO-UPDATE & VERSION MANAGER (OTA + APK + COMMIT HISTORY)
+  // UI KIT: layers (pages, sheets, dialogs, viewer)
+  // Every layer is a .modal-overlay appended to #layers in opening order, so
+  // the legacy native back handler ("hide the last visible .modal-overlay")
+  // keeps working on older APK engines.
   // ==========================================================================
-  let updateBannerDismissed = false;
+  const layerStack = [];
 
-  async function checkForUpdates(manualTrigger = false) {
-    const checkBtn = document.getElementById('checkUpdatesBtn');
-    if (checkBtn && manualTrigger) {
-      checkBtn.textContent = '⏳ Проверка...';
-      checkBtn.disabled = true;
-    }
-
-    try {
-      const data = await apiFetch('/api/updates/check');
-      state.updateInfo = data;
-      renderUpdatesTab(data);
-
-      // Update top notification banner & bottom nav badge
-      const banner = document.getElementById('updateBanner');
-      const navBadge = document.getElementById('navUpdateBadge');
-      const bannerBtn = document.getElementById('updateBannerApplyBtn');
-      const nativeUpdateRequired = Boolean(
-        data.nativeUpdateRequired ||
-          (data.remoteReachable && Number(data.latestBuild || 0) > Number(data.bundledBuild || 0))
-      );
-
-      if (data.updateAvailable || nativeUpdateRequired) {
-        if (navBadge) navBadge.classList.remove('hidden');
-        if (banner && !updateBannerDismissed) {
-          const titleEl = document.getElementById('updateBannerTitle');
-          const subEl = document.getElementById('updateBannerSub');
-          const onlyApkOutdated =
-            nativeUpdateRequired &&
-            data.otaActive &&
-            Number(data.currentBuild || 0) >= Number(data.latestBuild || 0);
-
-          if (onlyApkOutdated) {
-            if (titleEl) {
-              titleEl.textContent = `📦 Требуется обновление APK-движка до v${data.latestVersion} (Build #${data.latestBuild})`;
-            }
-            if (subEl) {
-              subEl.textContent = `Веб-UI обновлён (OTA), но Java-движок APK устарел (Build #${data.bundledBuild || '?'}). Скачайте свежий APK.`;
-            }
-            if (bannerBtn) {
-              bannerBtn.textContent = '📦 Скачать APK';
-              bannerBtn.onclick = () => downloadLatestApkFromGit();
-            }
-          } else {
-            if (titleEl) {
-              titleEl.textContent = `🚀 Доступна новая версия в Git: v${data.latestVersion}${data.latestCommit ? ' (' + data.latestCommit + ')' : ''}`;
-            }
-            if (subEl) {
-              subEl.textContent = data.latestReleaseTitle || data.latestCommitMessage || `Текущая: v${data.currentVersion} → Новая: v${data.latestVersion}`;
-            }
-            if (bannerBtn) {
-              bannerBtn.textContent = '⚡ Обновить';
-              bannerBtn.onclick = () => applyGitUpdate();
-            }
-          }
-          banner.classList.remove('hidden');
-        }
-        if (manualTrigger) {
-          showToast(
-            nativeUpdateRequired
-              ? `📦 Доступен новый APK-движок v${data.latestVersion} (Build #${data.latestBuild})!`
-              : `🚀 Найдено обновление в Git: v${data.latestVersion}!`
-          );
-        }
-      } else {
-        if (navBadge) navBadge.classList.add('hidden');
-        if (banner) banner.classList.add('hidden');
-        if (manualTrigger) {
-          showToast(
-            data.remoteReachable
-              ? `✅ У вас установлена актуальная версия v${data.currentVersion}`
-              : `ℹ️ Локальная версия v${data.currentVersion} (${data.remoteError || 'Git недоступен'})`
-          );
-        }
-      }
-    } catch (err) {
-      if (manualTrigger) {
-        showToast('Ошибка проверки обновлений: ' + err.message);
-      }
-    } finally {
-      if (checkBtn && manualTrigger) {
-        checkBtn.textContent = '🔍 Проверить';
-        checkBtn.disabled = false;
-      }
-    }
+  function syncBodyFlags() {
+    document.body.classList.toggle('layer-open', layerStack.length > 0);
+    document.body.classList.toggle('room-open', Boolean(state.room));
   }
 
-  function renderUpdatesTab(data) {
-    if (!data) return;
+  function openLayer(opts) {
+    const host = $('#layers');
+    const el = document.createElement('div');
+    el.className = `modal-overlay layer-${opts.kind}${opts.className ? ' ' + opts.className : ''}`;
+    const backdrop = (opts.kind === 'sheet' || opts.kind === 'dialog')
+      ? '<div class="layer-backdrop" data-action="layer-dismiss"></div>'
+      : '';
+    el.innerHTML = backdrop + opts.html;
+    const layer = {
+      el,
+      kind: opts.kind,
+      onClose: opts.onClose || null,
+      onBack: opts.onBack || null,
+      dismissible: opts.dismissible !== false,
+      closed: false,
+      refresh: null,
+    };
+    layer.close = (o) => closeLayer(layer, o);
+    el._layer = layer;
+    host.appendChild(el);
+    layerStack.push(layer);
+    syncBodyFlags();
+    if (opts.kind === 'sheet') attachSheetDrag(layer);
+    return layer;
+  }
 
-    const repoInput = document.getElementById('inputGitRepo');
-    const branchInput = document.getElementById('inputGitBranch');
-    if (repoInput && data.gitRepo) repoInput.value = data.gitRepo;
-    if (branchInput && data.gitBranch) branchInput.value = data.gitBranch;
-
-    const curVerEl = document.getElementById('updCurrentVersion');
-    const curMetaEl = document.getElementById('updCurrentMeta');
-    const latVerEl = document.getElementById('updLatestVersion');
-    const latMetaEl = document.getElementById('updLatestMeta');
-    const statusBadge = document.getElementById('updStatusBadge');
-    const resetBtn = document.getElementById('resetOtaBtn');
-    const applyBtn = document.getElementById('applyOtaUpdateBtn');
-
-    const nativeUpdateRequired = Boolean(
-      data.nativeUpdateRequired ||
-        (data.remoteReachable && Number(data.latestBuild || 0) > Number(data.bundledBuild || 0))
-    );
-
-    if (curVerEl) curVerEl.textContent = `v${data.currentVersion || '1.2.0'}`;
-    if (curMetaEl) {
-      const modeStr = data.otaActive
-        ? `⚡ OTA (APK движок: Build #${data.bundledBuild || '?'})`
-        : '📦 Базовая APK';
-      const commitPart = data.installedCommit ? ` • ${data.installedCommit}` : '';
-      curMetaEl.textContent = `Build #${data.currentBuild || 3} • ${modeStr}${commitPart}`;
+  function closeLayer(layer, opts) {
+    if (!layer || layer.closed) return;
+    layer.closed = true;
+    const idx = layerStack.indexOf(layer);
+    if (idx >= 0) layerStack.splice(idx, 1);
+    syncBodyFlags();
+    try {
+      if (layer.onClose) layer.onClose();
+    } catch (e) {
+      console.error(e);
     }
-
-    if (latVerEl) latVerEl.textContent = `v${data.latestVersion || data.currentVersion || '1.2.0'}`;
-    if (latMetaEl) {
-      latMetaEl.textContent = data.remoteReachable
-        ? `Build #${data.latestBuild || 3}${data.latestCommit ? ' • Коммит ' + data.latestCommit : ''} (${data.gitBranch})`
-        : `Репозиторий: ${data.gitRepo}`;
+    const el = layer.el;
+    if ((opts && opts.immediate) || el.classList.contains('hidden')) {
+      el.remove();
+      return;
     }
+    el.classList.add('closing');
+    setTimeout(() => el.remove(), 220);
+  }
 
-    if (resetBtn) {
-      resetBtn.classList.toggle('hidden', !data.otaActive);
-    }
+  function requestCloseLayer(layer) {
+    if (!layer) return;
+    if (layer.onBack && layer.onBack() === false) return;
+    closeLayer(layer);
+  }
 
-    if (statusBadge) {
-      if (!data.remoteReachable) {
-        statusBadge.textContent = `⚠️ Git (${data.gitRepo}): ${data.remoteError || 'ожидание публикации репозитория'}`;
-        statusBadge.style.color = '#fbbf24';
-      } else if (nativeUpdateRequired && data.otaActive && Number(data.currentBuild || 0) >= Number(data.latestBuild || 0)) {
-        statusBadge.textContent = `⚠️ Внимание: Веб-интерфейс обновлён через OTA, но Java-движок APK устарел (Build #${data.bundledBuild} < Build #${data.latestBuild}). Нажмите «📦 Скачать и установить свежий APK» ниже!`;
-        statusBadge.style.color = '#fbbf24';
-      } else if (data.updateAvailable) {
-        statusBadge.textContent = `🚀 В Git доступна новая версия v${data.latestVersion}${data.latestCommit ? ' (' + data.latestCommit + ')' : ''}! Нажмите кнопку ниже для обновления.`;
-        statusBadge.style.color = '#34d399';
-      } else {
-        statusBadge.textContent = `✅ Приложение и APK-движок обновлены до последней версии из Git (${data.gitRepo}@${data.gitBranch})`;
-        statusBadge.style.color = '#34d399';
+  function topLayer() {
+    return layerStack[layerStack.length - 1] || null;
+  }
+
+  function layerOf(el) {
+    const host = el && el.closest('.modal-overlay');
+    return host ? host._layer || null : null;
+  }
+
+  function refreshLayers() {
+    layerStack.forEach(l => {
+      if (l.refresh) {
+        try {
+          l.refresh();
+        } catch (e) {
+          console.error(e);
+        }
       }
-    }
+    });
+  }
 
-    if (applyBtn) {
-      applyBtn.textContent = data.updateAvailable
-        ? `⚡ Обновить сейчас до v${data.latestVersion}${data.latestCommit ? ' (' + data.latestCommit + ')' : ''}`
-        : `🔄 Переустановить / синхронизировать с Git (${data.gitBranch})`;
-    }
+  /** Delegated click handling for [data-act] elements inside one layer. */
+  function bindActs(layer, handlers) {
+    layer.el.addEventListener('click', (e) => {
+      const t = e.target.closest('[data-act]');
+      if (!t || !layer.el.contains(t)) return;
+      const fn = handlers[t.dataset.act];
+      if (fn) fn(t, e);
+    });
+  }
 
-    // Render Releases List
-    const releasesContainer = document.getElementById('updatesReleasesList');
-    if (releasesContainer) {
-      const releases = data.releases || [];
-      if (!releases.length) {
-        releasesContainer.innerHTML = '<div class="card-hint">Список версий пуст.</div>';
+  function attachSheetDrag(layer) {
+    const sheet = $('.sheet', layer.el);
+    if (!sheet) return;
+    let startY = null;
+    let dy = 0;
+    const onStart = (e) => {
+      if (!layer.dismissible || !e.touches || e.touches.length !== 1) return;
+      startY = e.touches[0].clientY;
+      dy = 0;
+      sheet.style.transition = 'none';
+    };
+    const onMove = (e) => {
+      if (startY === null) return;
+      dy = Math.max(0, e.touches[0].clientY - startY);
+      sheet.style.transform = `translateY(${dy}px)`;
+    };
+    const onEnd = () => {
+      if (startY === null) return;
+      startY = null;
+      sheet.style.transition = 'transform 180ms ease';
+      if (dy > 90) {
+        requestCloseLayer(layer);
+        if (!layer.closed) sheet.style.transform = '';
       } else {
-        releasesContainer.innerHTML = releases
-          .map(rel => {
-            const isCurrent = rel.version === data.currentVersion;
-            const changelogItems = (rel.changelog || [])
-              .map(line => `<li>${escapeHtml(line)}</li>`)
-              .join('');
-            const targetRef = rel.ref || data.gitBranch || 'main';
-            return `
-              <div class="release-item ${isCurrent ? 'current' : ''}">
-                <div class="release-header">
-                  <div>
-                    <span class="release-ver-tag">v${escapeHtml(rel.version)}</span>
-                    ${isCurrent ? '<span class="model-badge" style="margin-left:6px;background:rgba(16,185,129,0.2);color:#34d399;">Установлена</span>' : ''}
-                  </div>
-                  <span class="release-date">${escapeHtml(rel.date || '')} • Build #${rel.build || 1}</span>
-                </div>
-                <div class="release-title">${escapeHtml(rel.title || '')}</div>
-                <ul class="release-changelog">${changelogItems}</ul>
-                <div class="row-between">
-                  <span style="font-size:11px;color:var(--text-secondary);">Ветка/тег: <code>${escapeHtml(targetRef)}</code></span>
-                  <button class="btn-secondary btn-sm" onclick="window.appUI.applyGitUpdate('${escapeHtml(targetRef)}', '${escapeHtml(rel.version)}', '')">
-                    ${isCurrent ? '🔄 Обновить файлы этой версии' : `⚡ Переключиться на v${escapeHtml(rel.version)}`}
-                  </button>
-                </div>
-              </div>
-            `;
-          })
-          .join('');
+        sheet.style.transform = '';
       }
-    }
+    };
+    $$('.sheet-handle, .sheet-head', layer.el).forEach(h => {
+      h.addEventListener('touchstart', onStart, { passive: true });
+      h.addEventListener('touchmove', onMove, { passive: true });
+      h.addEventListener('touchend', onEnd);
+      h.addEventListener('touchcancel', onEnd);
+    });
+  }
 
-    // Render Live Git Commits List
-    const commitsContainer = document.getElementById('updatesCommitsList');
-    if (commitsContainer) {
-      const commits = data.commits || [];
-      if (!commits.length) {
-        commitsContainer.innerHTML = `
-          <div class="card-hint">
-            Коммиты из <code>${escapeHtml(data.gitRepo)}</code> пока не загружены или репозиторий пуст.
+  function sheetHtml(o) {
+    return `<div class="sheet${o.full ? ' full' : ''}" role="dialog" aria-label="${escapeHtml(o.title || '')}">
+      <div class="sheet-handle"></div>
+      ${o.title !== undefined ? `<div class="sheet-head"><div class="sheet-title">${escapeHtml(o.title)}</div>${o.headActions || ''}<button class="icon-btn sm" data-action="layer-close" aria-label="Закрыть">${ic('x', 'ic-sm')}</button></div>` : ''}
+      <div class="sheet-body"${o.bodyStyle ? ` style="${o.bodyStyle}"` : ''}>${o.body || ''}</div>
+      ${o.footer ? `<div class="sheet-footer">${o.footer}</div>` : ''}
+    </div>`;
+  }
+
+  function openSheet(o) {
+    const layer = openLayer({ kind: 'sheet', html: sheetHtml(o), onClose: o.onClose, onBack: o.onBack, dismissible: o.dismissible });
+    layer.setBody = (html) => {
+      const b = $('.sheet-body', layer.el);
+      if (b) b.innerHTML = html;
+    };
+    return layer;
+  }
+
+  function pageHtml(o) {
+    return `<header class="page-bar">
+        <button class="icon-btn" data-action="layer-close" aria-label="Назад">${ic(o.backIcon || 'back')}</button>
+        <div class="page-bar-title">${escapeHtml(o.title || '')}</div>
+        ${o.actions || ''}
+      </header>
+      <div class="page-body"><div class="tab-inner">${o.body || ''}</div></div>
+      ${o.footer ? `<div class="page-footer">${o.footer}</div>` : ''}`;
+  }
+
+  function openPage(o) {
+    const layer = openLayer({ kind: 'page', html: pageHtml(o), onClose: o.onClose, onBack: o.onBack });
+    const body = $('.page-body', layer.el);
+    const bar = $('.page-bar', layer.el);
+    body.addEventListener('scroll', () => bar.classList.toggle('scrolled', body.scrollTop > 4), { passive: true });
+    layer.setBody = (html) => {
+      $('.page-body > .tab-inner', layer.el).innerHTML = html;
+    };
+    layer.setTitle = (title) => {
+      $('.page-bar-title', layer.el).innerHTML = title;
+    };
+    return layer;
+  }
+
+  function confirmDialog(o) {
+    return new Promise((resolve) => {
+      let result = false;
+      const layer = openLayer({
+        kind: 'dialog',
+        html: `<div class="dialog" role="alertdialog">
+          ${o.title ? `<h2 class="dialog-title">${escapeHtml(o.title)}</h2>` : ''}
+          ${o.message ? `<p class="dialog-text">${escapeHtml(o.message)}</p>` : ''}
+          <div class="dialog-actions">
+            <button class="btn btn-ghost" data-act="cancel">${escapeHtml(o.cancelText || 'Отмена')}</button>
+            <button class="btn ${o.danger ? 'btn-danger' : 'btn-primary'}" data-act="ok">${escapeHtml(o.confirmText || 'OK')}</button>
           </div>
-        `;
-      } else {
-        commitsContainer.innerHTML = commits
-          .map(c => {
-            const isInstalledCommit = data.installedCommit && c.shortSha === data.installedCommit;
-            const dateFormatted = c.date ? c.date.replace('T', ' ').replace('Z', '').slice(0, 16) : '';
-            return `
-              <div class="commit-item">
-                <div class="commit-top">
-                  <span class="commit-sha">${escapeHtml(c.shortSha)}</span>
-                  <span class="release-date">${escapeHtml(dateFormatted)}</span>
-                </div>
-                <div class="commit-msg">${escapeHtml(c.message)}</div>
-                <div class="commit-meta">
-                  <span>👤 ${escapeHtml(c.author || 'Git')}</span>
-                  <button class="btn-secondary btn-sm" onclick="window.appUI.applyGitUpdate('${escapeHtml(c.sha)}', '', '${escapeHtml(c.shortSha)}')">
-                    ${isInstalledCommit ? '✅ Активный коммит' : '⚡ Установить этот коммит'}
-                  </button>
-                </div>
-              </div>
-            `;
-          })
-          .join('');
-      }
-    }
-  }
-
-  // Note: the 2nd positional arg (version) is intentionally ignored — the installed
-  // version is taken from the cryptographically signed remote manifest, never the client.
-  async function applyGitUpdate(targetRef = '', _ignoredVersion = '', commitSha = '') {
-    const applyBtn = document.getElementById('applyOtaUpdateBtn');
-    const bannerBtn = document.getElementById('updateBannerApplyBtn');
-    if (applyBtn) {
-      applyBtn.disabled = true;
-      applyBtn.textContent = '⏳ Загрузка файлов новой версии из Git...';
-    }
-    if (bannerBtn) {
-      bannerBtn.disabled = true;
-      bannerBtn.textContent = '⏳...';
-    }
-
-    showToast('⏳ Скачивание обновления из Git...');
-    try {
-      // Repository is pinned server-side; the applied version comes from the signed
-      // manifest, so neither is sent from here.
-      const gitBranch = (document.getElementById('inputGitBranch')?.value || state.updateInfo?.gitBranch || 'main').trim();
-
-      const res = await apiFetch('/api/updates/apply', {
-        method: 'POST',
-        body: JSON.stringify({
-          gitBranch,
-          ref: targetRef || gitBranch,
-          commitSha: commitSha || '',
-        }),
+        </div>`,
+        onClose: () => resolve(result),
       });
-
-      showToast(`✅ ${res.message || 'Обновление установлено!'} Перезапуск...`);
-      setTimeout(() => {
-        if (typeof window.AndroidServer !== 'undefined' && typeof window.AndroidServer.reloadWebView === 'function') {
-          window.AndroidServer.reloadWebView();
-        } else {
-          window.location.reload();
-        }
-      }, 650);
-    } catch (err) {
-      showToast('❌ Ошибка обновления из Git: ' + err.message);
-      if (applyBtn) {
-        applyBtn.disabled = false;
-        applyBtn.textContent = '⚡ Обновить приложение из Git (OTA в 1 клик)';
-      }
-      if (bannerBtn) {
-        bannerBtn.disabled = false;
-        bannerBtn.textContent = '⚡ Обновить';
-      }
-    }
-  }
-
-  function downloadLatestApkFromGit() {
-    const apkUrl =
-      (state.updateInfo && state.updateInfo.apkDownloadUrl) ||
-      'https://raw.githubusercontent.com/Kuka001/111/main/agy-roleplay-android16.apk';
-    showToast('📦 Открытие скачивания свежего APK из Git...');
-    if (typeof window.AndroidServer !== 'undefined' && typeof window.AndroidServer.openExternalUrl === 'function') {
-      window.AndroidServer.openExternalUrl(apkUrl);
-    } else {
-      window.open(apkUrl, '_blank');
-    }
-  }
-
-  async function resetOtaUpdate() {
-    try {
-      await apiFetch('/api/updates/reset', { method: 'POST' });
-      showToast('↩ Возврат к заводской версии APK...');
-      setTimeout(() => {
-        if (typeof window.AndroidServer !== 'undefined' && typeof window.AndroidServer.reloadWebView === 'function') {
-          window.AndroidServer.reloadWebView();
-        } else {
-          window.location.reload();
-        }
-      }, 500);
-    } catch (err) {
-      showToast(err.message);
-    }
-  }
-
-  async function saveGitRepoConfig() {
-    // The repository itself is pinned inside the signed APK; only the branch is sent.
-    const gitBranch = (document.getElementById('inputGitBranch')?.value || 'main').trim();
-    try {
-      await apiFetch('/api/updates/config', {
-        method: 'POST',
-        body: JSON.stringify({ gitBranch }),
+      bindActs(layer, {
+        cancel: () => layer.close(),
+        ok: () => {
+          result = true;
+          layer.close();
+        },
       });
-      updateBannerDismissed = false;
-      showToast('💾 Ветка сохранена! Проверяем обновления...');
-      await checkForUpdates(true);
-    } catch (err) {
-      showToast(err.message);
+    });
+  }
+
+  function promptDialog(o) {
+    return new Promise((resolve) => {
+      let result = null;
+      const layer = openLayer({
+        kind: 'dialog',
+        html: `<div class="dialog" role="dialog">
+          ${o.title ? `<h2 class="dialog-title">${escapeHtml(o.title)}</h2>` : ''}
+          ${o.message ? `<p class="dialog-text">${escapeHtml(o.message)}</p>` : ''}
+          <input class="input" data-role="value" value="${escapeHtml(o.value || '')}" placeholder="${escapeHtml(o.placeholder || '')}" autocomplete="off" />
+          <div class="dialog-actions">
+            <button class="btn btn-ghost" data-act="cancel">Отмена</button>
+            <button class="btn btn-primary" data-act="ok">${escapeHtml(o.confirmText || 'OK')}</button>
+          </div>
+        </div>`,
+        onClose: () => resolve(result),
+      });
+      const input = $('[data-role="value"]', layer.el);
+      const submit = () => {
+        const v = input.value.trim();
+        if (!v) {
+          input.focus();
+          return;
+        }
+        result = v;
+        layer.close();
+      };
+      bindActs(layer, { cancel: () => layer.close(), ok: submit });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submit();
+      });
+      setTimeout(() => {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }, 60);
+    });
+  }
+
+  /** items: [{ icon, label, danger, hidden, onSelect }] */
+  function actionSheet(o) {
+    const items = o.items.filter(i => !i.hidden);
+    const layer = openSheet({
+      title: o.title,
+      bodyStyle: 'padding:0',
+      body: `<div class="action-list">${items.map((it, i) => `<button class="action-item${it.danger ? ' danger' : ''}" data-act="pick" data-idx="${i}">${ic(it.icon)}<span>${escapeHtml(it.label)}</span></button>`).join('')}</div>`,
+    });
+    bindActs(layer, {
+      pick: (el) => {
+        const it = items[Number(el.dataset.idx)];
+        layer.close();
+        if (it && it.onSelect) setTimeout(() => it.onSelect(), 0);
+      },
+    });
+    return layer;
+  }
+
+  function openTextSheet(title, text, opts) {
+    const o = opts || {};
+    const layer = openSheet({
+      title,
+      full: true,
+      body: o.selectable
+        ? `<textarea class="textarea tall" readonly>${escapeHtml(text)}</textarea><p class="section-hint">Выделите нужный фрагмент и скопируйте.</p>`
+        : `<div class="prose">${escapeHtml(text)}</div>`,
+      footer: `<button class="btn btn-secondary btn-block" data-act="copy">${ic('copy')}Скопировать всё</button>`,
+    });
+    bindActs(layer, { copy: () => copyText(text) });
+    return layer;
+  }
+
+  function emptyHtml(icon, title, text, action) {
+    return `<div class="empty">
+      <div class="empty-icon">${ic(icon)}</div>
+      <div class="empty-title">${escapeHtml(title)}</div>
+      ${text ? `<div class="empty-text">${text}</div>` : ''}
+      ${action || ''}
+    </div>`;
+  }
+
+  // ==========================================================================
+  // DATA LOADING
+  // ==========================================================================
+  function applySettings(s) {
+    if (!s) return;
+    state.engineBuild = Number(s.engineBuild) || 17;
+    Object.assign(state.settings, {
+      projectId: s.projectId || '',
+      selectedModel: s.selectedModel || 'gemini-4-argon',
+      selectedEffort: s.selectedEffort || 'high',
+      safetyThreshold: s.safetyThreshold || 'OFF',
+      activePersonaId: Number(s.activePersonaId) || 0,
+      agyAuthenticated: Boolean(s.agyAuthenticated),
+      agyEmail: s.agyUserEmail || s.agyEmail || '',
+      claudeRuntimeReady: Boolean(s.claudeRuntimeReady),
+      claudeAuthenticated: Boolean(s.claudeAuthenticated),
+      claudeProjectPath: s.claudeProjectPath || '',
+    });
+  }
+
+  async function loadAll() {
+    const [settings, models, chars, personas, chats] = await Promise.all([
+      api('/api/settings'),
+      api('/api/models'),
+      api('/api/characters'),
+      api('/api/personas'),
+      api('/api/chats'),
+    ]);
+    applySettings(settings);
+    state.models = models.models || [];
+    state.characters = chars.characters || [];
+    state.personas = personas.personas || [];
+    if (personas.activePersonaId) state.settings.activePersonaId = Number(personas.activePersonaId);
+    state.chats = chats.chats || [];
+    state.loaded = true;
+    state.loadError = '';
+    renderAllTabs();
+  }
+
+  async function loadChats() {
+    try {
+      const data = await api('/api/chats');
+      state.chats = data.chats || [];
+      if (state.tab === 'chats') renderChatsList();
+      if (state.tab === 'characters') renderCharactersList();
+      refreshLayers();
+    } catch (e) {
+      // list refresh is best-effort
     }
   }
 
-  function openGitRepoExternal() {
-    const repoUrl =
-      (state.updateInfo && state.updateInfo.repoWebUrl) ||
-      'https://github.com/' + ((document.getElementById('inputGitRepo')?.value || 'Kuka001/111').trim());
-    if (typeof window.AndroidServer !== 'undefined' && typeof window.AndroidServer.openExternalUrl === 'function') {
-      window.AndroidServer.openExternalUrl(repoUrl);
-    } else {
-      window.open(repoUrl, '_blank');
+  async function loadCards() {
+    const [chars, personas] = await Promise.all([api('/api/characters'), api('/api/personas')]);
+    state.characters = chars.characters || [];
+    state.personas = personas.personas || [];
+    if (personas.activePersonaId) state.settings.activePersonaId = Number(personas.activePersonaId);
+    renderAllTabs();
+    refreshLayers();
+  }
+
+  async function refreshSettings() {
+    try {
+      applySettings(await api('/api/settings'));
+      renderRoomHeader();
+      if (state.tab === 'settings') renderSettingsTab();
+      refreshLayers();
+    } catch (e) {
+      // keep the last known state
     }
   }
 
-  function dismissUpdateBanner() {
-    updateBannerDismissed = true;
-    const banner = document.getElementById('updateBanner');
-    if (banner) banner.classList.add('hidden');
+  async function refreshClaudeStatus() {
+    try {
+      const data = await api('/api/claude/status');
+      state.settings.claudeRuntimeReady = Boolean(data.runtimeReady);
+      state.settings.claudeAuthenticated = Boolean(data.authenticated);
+      state.settings.claudeRuntimeUrlConfigured = data.runtimeUrlConfigured !== undefined ? Boolean(data.runtimeUrlConfigured) : null;
+      if (data.projectPath !== undefined) state.settings.claudeProjectPath = data.projectPath;
+      if (state.tab === 'settings') renderSettingsTab();
+      refreshLayers();
+    } catch (e) {
+      // ignore
+    }
   }
 
-  // ==================== CHAT EXPORT (MARKDOWN & JSON) ====================
-  const exportChatState = {
-    chatId: null,
-    format: 'markdown',
-    chatData: null,
-    geminiMd: '',
-    characterMd: '',
-    personaMd: '',
-    memoryMd: '',
-    lastGeneration: null,
-    filename: 'chat_export.md',
+  async function refreshAgyStatus() {
+    try {
+      const data = await api('/api/agy/auth/status');
+      state.settings.agyAuthenticated = Boolean(data.authenticated);
+      state.settings.agyEmail = data.email || state.settings.agyEmail;
+      if (data.projectId) state.settings.projectId = data.projectId;
+      renderRoomHeader();
+      if (state.tab === 'settings') renderSettingsTab();
+      refreshLayers();
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  window.__onAgyOAuthSuccess = function () {
+    // Native engines call this without arguments once the loopback OAuth completes.
+    refreshAgyStatus().then(() => {
+      if (state.settings.agyAuthenticated) toast('Вход в Google выполнен', { type: 'success' });
+    });
   };
 
   window.__onNativeFileSaved = function (success) {
-    if (success) {
-      showToast('✅ Файл экспорта успешно сохранён на устройство!');
-    }
+    if (success) toast('Файл сохранён', { type: 'success' });
   };
 
-  function sanitizeFilenamePart(str) {
-    return String(str || 'chat')
-      .trim()
-      .replace(/[^\w\u0400-\u04FF-]+/g, '_')
-      .replace(/^_+|_+$/g, '')
-      .slice(0, 32) || 'chat';
+  // ==========================================================================
+  // TABS & ROUTING
+  // ==========================================================================
+  const TABS = ['chats', 'characters', 'personas', 'settings'];
+
+  function openTab(tab) {
+    const name = TABS.includes(tab) ? tab : (tab === 'updates' ? 'settings' : 'chats');
+    state.tab = name;
+    $$('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
+    $$('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+    renderTab(name);
+    const fab = $('#newChatFab');
+    if (fab) fab.classList.toggle('hidden', name !== 'chats' || !state.characters.length);
+    if (name === 'settings') {
+      refreshAgyStatus();
+      refreshClaudeStatus();
+    }
   }
 
-  async function fetchFileContentSafe(relPath) {
-    if (!relPath) return '';
-    try {
-      const res = await apiFetch(`/api/files/content?path=${encodeURIComponent(relPath)}`);
-      if (res && typeof res.content === 'string') return res.content;
-    } catch {
-      // Fallback below
+  function renderTab(name) {
+    if (name === 'chats') renderChatsTab();
+    else if (name === 'characters') renderCharactersTab();
+    else if (name === 'personas') renderPersonasTab();
+    else if (name === 'settings') renderSettingsTab();
+  }
+
+  function renderAllTabs() {
+    renderTab(state.tab);
+    const fab = $('#newChatFab');
+    if (fab) fab.classList.toggle('hidden', state.tab !== 'chats' || !state.characters.length);
+    renderRoomHeader();
+  }
+
+  /**
+   * Back navigation: closes the top-most layer, then the chat room, then search,
+   * then returns to the Chats tab, and finally lets the app exit.
+   * Called by MainActivity.onBackPressed on native engine 18+.
+   */
+  function handleBack() {
+    const top = topLayer();
+    if (top) {
+      requestCloseLayer(top);
+      return 'handled';
+    }
+    if (state.room) {
+      closeChatRoom();
+      return 'handled';
+    }
+    if (state.tab === 'chats' && (state.chatsSearchOpen || state.chatsFilter)) {
+      state.chatsSearchOpen = false;
+      state.chatsQuery = '';
+      state.chatsFilter = 0;
+      renderChatsTab();
+      return 'handled';
+    }
+    if (state.tab === 'characters' && state.charsSearchOpen) {
+      state.charsSearchOpen = false;
+      state.charsQuery = '';
+      renderCharactersTab();
+      return 'handled';
+    }
+    if (state.tab !== 'chats') {
+      openTab('chats');
+      return 'handled';
+    }
+    return 'exit';
+  }
+
+  function skeletonList(n) {
+    return Array.from({ length: n }, () => '<div style="display:flex;gap:14px;align-items:center;padding:12px 0"><div class="skeleton" style="width:52px;height:52px;border-radius:50%"></div><div style="flex:1"><div class="skeleton" style="height:14px;width:45%"></div><div class="skeleton" style="height:12px;width:80%;margin-top:8px"></div></div></div>').join('');
+  }
+
+  function loadErrorHtml() {
+    return emptyHtml('alert', 'Не удалось загрузить данные', escapeHtml(state.loadError),
+      `<button class="btn btn-primary" data-action="reload-data">${ic('reroll')}Повторить</button>`);
+  }
+
+  // ==========================================================================
+  // CHATS TAB
+  // ==========================================================================
+  function renderChatsTab() {
+    const pane = $('#tab-chats');
+    if (!pane) return;
+    const header = state.chatsSearchOpen
+      ? `<div class="appbar"><label class="search-field">${ic('search', 'ic-sm')}<input id="chatsSearchInput" type="search" placeholder="Поиск по чатам" value="${escapeHtml(state.chatsQuery)}" autocomplete="off" enterkeyhint="search" /><button class="icon-btn sm" data-action="chats-search-close" aria-label="Закрыть поиск">${ic('x', 'ic-sm')}</button></label></div>`
+      : `<div class="appbar"><h1 class="appbar-title">Чаты</h1><div class="appbar-actions">${state.chats.length ? `<button class="icon-btn" data-action="chats-search-open" aria-label="Поиск">${ic('search')}</button>` : ''}</div></div>`;
+    pane.innerHTML = `<div class="tab-inner">${header}<div id="chatsFilters" class="chat-filters"></div><div id="chatsList" class="chat-list"></div><div style="height:88px"></div></div>`;
+    renderChatsList();
+    if (state.chatsSearchOpen) {
+      const input = $('#chatsSearchInput');
+      if (input && document.activeElement !== input) setTimeout(() => input.focus(), 30);
+    }
+  }
+
+  function renderChatsList() {
+    const listHost = $('#chatsList');
+    const filtersHost = $('#chatsFilters');
+    if (!listHost || !filtersHost) return;
+
+    if (!state.loaded) {
+      filtersHost.innerHTML = '';
+      listHost.innerHTML = state.loadError ? loadErrorHtml() : `<div style="padding:0 16px">${skeletonList(5)}</div>`;
+      return;
+    }
+
+    if (!state.chats.length) {
+      filtersHost.innerHTML = '';
+      listHost.innerHTML = state.characters.length
+        ? emptyHtml('chat', 'Начните первую историю', 'Выберите персонажа, свою персону и модель — и сделайте первый ход.',
+          `<button class="btn btn-primary" data-action="new-chat">${ic('chat-plus')}Новый чат</button>`)
+        : emptyHtml('mask', 'Создайте первого персонажа', 'Чтобы начать ролевую игру, нужен хотя бы один персонаж: имя, описание и приветствие.',
+          `<button class="btn btn-primary" data-action="new-character">${ic('plus')}Создать персонажа</button>`);
+      return;
+    }
+
+    // Character filter chips (only when chats span several characters)
+    const seen = new Map();
+    sortChats(state.chats).forEach(c => {
+      const id = Number(c.character_id) || 0;
+      if (id && !seen.has(id)) seen.set(id, { id, name: c.character_name, avatar: c.character_avatar });
+    });
+    if (state.chatsFilter && !seen.has(state.chatsFilter)) state.chatsFilter = 0;
+    filtersHost.innerHTML = seen.size > 1
+      ? `<div class="chips"><button class="chip${!state.chatsFilter ? ' active' : ''}" data-action="chats-filter" data-id="0">Все</button>${Array.from(seen.values()).map(ch =>
+        `<button class="chip${state.chatsFilter === ch.id ? ' active' : ''}" data-action="chats-filter" data-id="${ch.id}"><img class="avatar avatar-24" src="${escapeHtml(resolveAvatarUrl(ch.avatar, ch.name))}" alt="" />${escapeHtml(ch.name)}</button>`).join('')}</div>`
+      : '';
+
+    const list = filterChats(sortChats(state.chats), { query: state.chatsQuery, characterId: state.chatsFilter });
+    listHost.innerHTML = list.length
+      ? list.map(chatRowHtml).join('')
+      : emptyHtml('search', 'Ничего не найдено', 'Попробуйте другой запрос или сбросьте фильтр.');
+  }
+
+  function chatRowHtml(c) {
+    const time = formatRelativeTime(chatActivityTime(c));
+    const P = PROVIDERS[providerOf(c.model_id)];
+    const custom = !isDefaultChatTitle(c.title, c.character_name);
+    const meta = [custom ? c.title : '', c.persona_name || 'Игрок'].filter(Boolean).map(escapeHtml).join(' · ');
+    const preview = stripMarkdownPreview(c.last_message);
+    const gen = state.generations[c.id];
+    return `<div class="chat-row" data-chat-id="${c.id}">
+      <div class="chat-row-actions">
+        <button class="act-export" data-action="chat-export" data-id="${c.id}">${ic('share', 'ic-sm')}Экспорт</button>
+        <button class="act-delete" data-action="chat-delete" data-id="${c.id}">${ic('trash', 'ic-sm')}Удалить</button>
+      </div>
+      <div class="chat-row-main" role="button" tabindex="0" data-action="open-chat" data-id="${c.id}">
+        <img class="avatar avatar-52" src="${escapeHtml(resolveAvatarUrl(c.character_avatar, c.character_name))}" alt="" />
+        <div class="chat-row-body">
+          <div class="chat-row-top"><span class="chat-row-name">${escapeHtml(c.character_name || 'Персонаж')}</span><span class="chat-row-time">${escapeHtml(time)}</span></div>
+          <div class="chat-row-meta"><span>${meta}</span><span class="provider-tag">${ic(P.icon)}${escapeHtml(P.short)}</span></div>
+          <div class="chat-row-preview">${gen ? '<span style="color:var(--accent)">Генерирует ответ…</span>' : escapeHtml(preview || 'Пока без сообщений')}</div>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function closeOpenChatRows(except) {
+    $$('.chat-row.open').forEach(row => {
+      if (row === except) return;
+      row.classList.remove('open');
+      const main = $('.chat-row-main', row);
+      if (main) main.style.transform = '';
+    });
+  }
+
+  function openChatActions(chatId) {
+    const c = state.chats.find(x => x.id === chatId);
+    if (!c) return;
+    actionSheet({
+      title: c.character_name || 'Чат',
+      items: [
+        { icon: 'chat', label: 'Открыть', onSelect: () => openChatRoom(chatId) },
+        { icon: 'share', label: 'Экспорт', onSelect: () => openExport(chatId) },
+        { icon: 'trash', label: 'Удалить чат', danger: true, onSelect: () => deleteChat(chatId) },
+      ],
+    });
+  }
+
+  async function deleteChat(chatId) {
+    const c = state.chats.find(x => x.id === chatId);
+    const n = c ? Number(c.message_count) || 0 : 0;
+    const ok = await confirmDialog({
+      title: 'Удалить чат?',
+      message: c ? `Чат с «${c.character_name}» и ${n} ${pluralRu(n, 'сообщение', 'сообщения', 'сообщений')} будут удалены без возможности восстановления.` : 'Чат будет удалён без возможности восстановления.',
+      confirmText: 'Удалить',
+      danger: true,
+    });
+    if (!ok) {
+      closeOpenChatRows();
+      return;
     }
     try {
-      const res2 = await apiFetch(`/api/files/file?path=${encodeURIComponent(relPath)}`);
-      return (res2 && typeof res2.content === 'string') ? res2.content : '';
-    } catch {
+      await api(`/api/chats/${chatId}`, { method: 'DELETE' });
+      state.chats = state.chats.filter(x => x.id !== chatId);
+      if (state.room && state.room.chatId === chatId) closeChatRoom();
+      $$('.modal-overlay').forEach(el => {
+        if (el._layer && el._layer.chatId === chatId) el._layer.close();
+      });
+      renderChatsList();
+      toast('Чат удалён');
+      loadChats();
+    } catch (e) {
+      toast(e.message, { type: 'error' });
+    }
+  }
+
+  // ==========================================================================
+  // NEW CHAT
+  // ==========================================================================
+  function lastUsedCharacterId() {
+    const latest = sortChats(state.chats)[0];
+    return latest ? Number(latest.character_id) : 0;
+  }
+
+  function openNewChat(preselectCharId) {
+    if (!state.characters.length) {
+      toast('Сначала создайте персонажа');
+      openCharacterEditor(null);
+      return;
+    }
+    const sel = {
+      charId: Number(preselectCharId) || Number(state.chatsFilter) || lastUsedCharacterId() || state.characters[0].id,
+      personaId: state.settings.activePersonaId || (state.personas[0] ? state.personas[0].id : 0),
+      modelId: state.settings.selectedModel,
+      effort: state.settings.selectedEffort,
+      q: '',
+      busy: false,
+    };
+    if (!findChar(sel.charId)) sel.charId = state.characters[0].id;
+    if (sel.personaId && !findPersona(sel.personaId)) sel.personaId = state.personas[0] ? state.personas[0].id : 0;
+
+    const render = () => {
+      const ch = findChar(sel.charId);
+      const chars = state.characters.filter(c => !sel.q || c.name.toLowerCase().includes(sel.q.toLowerCase()));
+      const prov = providerOf(sel.modelId);
+      const status = providerStatus(prov);
+      const greeting = ch ? stripMarkdownPreview(ch.first_message || '') : '';
+      return `
+        ${state.characters.length > 6 ? `<label class="search-field" style="margin-bottom:12px">${ic('search', 'ic-sm')}<input data-role="q" placeholder="Найти персонажа" value="${escapeHtml(sel.q)}" autocomplete="off" /></label>` : ''}
+        <div class="section-title">Персонаж</div>
+        <div class="pick-grid">${chars.map(c => `<button class="pick-card${c.id === sel.charId ? ' active' : ''}" data-act="char" data-id="${c.id}">
+            <img class="avatar avatar-64" src="${escapeHtml(resolveAvatarUrl(c.avatar_url, c.name))}" alt="" />
+            <span class="pick-name">${escapeHtml(c.name)}</span></button>`).join('') || '<div class="faint">Нет совпадений</div>'}</div>
+        <div class="greeting-preview">${greeting
+          ? `${ic('chat', 'ic-xs')}<span>Начнётся с приветствия: «${escapeHtml(greeting.slice(0, 140))}${greeting.length > 140 ? '…' : ''}»</span>`
+          : `${ic('info', 'ic-xs')}<span>У персонажа нет приветствия — первым пишете вы.</span>`}</div>
+
+        <div class="section">
+          <div class="section-title">Вы играете за</div>
+          ${state.personas.length
+            ? `<div class="chips wrap">${state.personas.map(p => `<button class="chip${p.id === sel.personaId ? ' active' : ''}" data-act="persona" data-id="${p.id}"><img class="avatar avatar-24" src="${escapeHtml(resolveAvatarUrl(p.avatar_url, p.name))}" alt="" />${escapeHtml(p.name)}</button>`).join('')}</div>`
+            : `<div class="card card-pad muted" style="font-size:var(--fs-sm)">Персон пока нет — модель будет звать вас «Игрок». Создать персону можно во вкладке «Персоны».</div>`}
+        </div>
+
+        <div class="section">
+          <div class="section-title">Модель</div>
+          <div class="list">
+            <button class="row" data-act="model">
+              <span class="row-icon">${ic(PROVIDERS[prov].icon)}</span>
+              <div class="row-body"><div class="row-title">${escapeHtml(modelName(sel.modelId))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effectiveEffort(sel.modelId, sel.effort) ? ' · ' + EFFORT_LABELS[effectiveEffort(sel.modelId, sel.effort)] : ''}</div></div>
+              ${ic('chevron-right', 'row-chevron')}
+            </button>
+          </div>
+          ${status.ok ? '' : `<div class="inline-warn">${ic('alert', 'ic-xs')}<span>${escapeHtml(status.text)}. Чат можно создать, но для ответа нужно </span><button class="link" data-act="provider">настроить провайдера</button></div>`}
+        </div>`;
+    };
+
+    const layer = openSheet({
+      title: 'Новый чат',
+      full: true,
+      body: render(),
+      footer: `<button class="btn btn-primary btn-block" data-act="start">${ic('chat-plus')}Начать историю</button>`,
+    });
+    const rerender = () => {
+      const body = $('.sheet-body', layer.el);
+      const scroll = body.scrollTop;
+      const hadFocus = document.activeElement && document.activeElement.dataset.role === 'q';
+      layer.setBody(render());
+      body.scrollTop = scroll;
+      if (hadFocus) {
+        const q = $('[data-role="q"]', layer.el);
+        q.focus();
+        q.setSelectionRange(q.value.length, q.value.length);
+      }
+    };
+    layer.refresh = rerender;
+    layer.el.addEventListener('input', (e) => {
+      if (e.target.dataset.role === 'q') {
+        sel.q = e.target.value;
+        rerender();
+      }
+    });
+    bindActs(layer, {
+      char: (el) => {
+        sel.charId = Number(el.dataset.id);
+        rerender();
+      },
+      persona: (el) => {
+        sel.personaId = Number(el.dataset.id);
+        rerender();
+      },
+      model: () => openModelPicker({
+        title: 'Модель для чата',
+        modelId: sel.modelId,
+        effort: sel.effort,
+        onPick: (r) => {
+          sel.modelId = r.modelId;
+          if (r.effort) sel.effort = r.effort;
+          rerender();
+        },
+      }),
+      provider: () => openProviderSettings(providerOf(sel.modelId)),
+      start: async (btn) => {
+        if (sel.busy) return;
+        sel.busy = true;
+        btn.disabled = true;
+        try {
+          const payload = { characterId: sel.charId, personaId: sel.personaId, modelId: sel.modelId, effort: sel.effort };
+          if (isClaudeCliModel(sel.modelId)) payload.provider = 'claude-cli';
+          const res = await api('/api/chats', { method: 'POST', body: payload });
+          layer.close();
+          loadChats();
+          openTab('chats');
+          openChatRoom(res.chat.id, res);
+        } catch (e) {
+          toast(e.message, { type: 'error' });
+        } finally {
+          sel.busy = false;
+          btn.disabled = false;
+        }
+      },
+    });
+  }
+
+  // ==========================================================================
+  // MODEL PICKER
+  // ==========================================================================
+  function openModelPicker(o) {
+    const sel = { modelId: o.modelId, effort: o.effort || 'high' };
+    const groups = ['gemini', 'vertex-claude', 'cli'];
+
+    const render = () => {
+      const opts = effortOptionsFor(sel.modelId);
+      const eff = effectiveEffort(sel.modelId, sel.effort);
+      const effortBlock = opts.length
+        ? `<div class="section-title">Глубина рассуждений</div><div class="segmented">${opts.map(e => `<button class="${e === eff ? 'active' : ''}" data-act="effort" data-effort="${e}">${EFFORT_LABELS[e]}</button>`).join('')}</div>
+           <div class="effort-note">${providerOf(sel.modelId) === 'cli' ? 'Передаётся в Claude Code как --effort.' : 'Чем выше, тем дольше модель думает перед ответом.'}</div>`
+        : `<div class="effort-note">${ic('info', 'ic-xs')} Для этой модели глубина рассуждений не настраивается.</div>`;
+      const lists = groups.map(g => {
+        const models = state.models.filter(m => providerOf(m.id) === g);
+        if (!models.length) return '';
+        const st = providerStatus(g);
+        return `<div class="section">
+          <div class="section-title" style="display:flex;align-items:center;gap:8px">${escapeHtml(PROVIDERS[g].label)}${st.ok ? '' : `<span class="pill warn">${escapeHtml(st.text)}</span>`}</div>
+          <div class="list">${models.map(m => `<button class="row model-row${m.id === sel.modelId ? ' selected' : ''}" data-act="model" data-id="${escapeHtml(m.id)}">
+              <span class="row-icon">${m.id === sel.modelId ? ic('check-circle') : ic('circle')}</span>
+              <div class="row-body"><div class="row-title">${escapeHtml(m.name)}</div>${m.badge ? `<div class="row-sub">${escapeHtml(m.badge)}</div>` : ''}</div>
+            </button>`).join('')}</div>
+          ${st.ok ? '' : `<button class="btn btn-ghost btn-sm" style="margin-top:6px" data-act="provider" data-provider="${g}">Настроить ${escapeHtml(PROVIDERS[g].short)}</button>`}
+        </div>`;
+      }).join('');
+      return `${effortBlock}${lists}`;
+    };
+
+    const layer = openSheet({
+      title: o.title || 'Модель',
+      full: true,
+      body: render(),
+      footer: `<button class="btn btn-primary btn-block" data-act="done">Готово</button>`,
+    });
+    const rerender = () => {
+      const body = $('.sheet-body', layer.el);
+      const scroll = body.scrollTop;
+      layer.setBody(render());
+      body.scrollTop = scroll;
+    };
+    layer.refresh = rerender;
+    bindActs(layer, {
+      effort: (el) => {
+        sel.effort = el.dataset.effort;
+        rerender();
+      },
+      model: (el) => {
+        sel.modelId = el.dataset.id;
+        const e = effectiveEffort(sel.modelId, sel.effort);
+        if (e) sel.effort = e;
+        rerender();
+      },
+      provider: (el) => openProviderSettings(el.dataset.provider),
+      done: () => {
+        layer.close();
+        o.onPick({ modelId: sel.modelId, effort: effectiveEffort(sel.modelId, sel.effort) || sel.effort });
+      },
+    });
+  }
+
+  // ==========================================================================
+  // CHAT ROOM
+  // ==========================================================================
+  async function openChatRoom(chatId, preloaded) {
+    const id = Number(chatId);
+    let data = preloaded && preloaded.chat ? preloaded : null;
+    if (!data) {
+      try {
+        data = await api(`/api/chats/${id}`);
+      } catch (e) {
+        toast(e.message, { type: 'error' });
+        return;
+      }
+    }
+    if (state.room) saveDraft();
+    state.room = { chatId: id, data, error: null };
+    const view = $('#chatRoomView');
+    view.classList.remove('hidden');
+    syncBodyFlags();
+    renderRoomHeader();
+    $('#chatFeed').innerHTML = '';
+    syncFeed({ scroll: 'bottom' });
+    const input = $('#chatInput');
+    input.value = state.drafts[id] || '';
+    autoGrow(input, 168);
+    updateComposer();
+    if (!state.generations[id]) attachToRunningGeneration(id);
+    else ensurePolling(id);
+  }
+
+  function saveDraft() {
+    if (!state.room) return;
+    const input = $('#chatInput');
+    state.drafts[state.room.chatId] = input ? input.value : '';
+  }
+
+  function closeChatRoom() {
+    if (!state.room) return;
+    saveDraft();
+    state.room = null;
+    const view = $('#chatRoomView');
+    view.classList.add('hidden');
+    $('#chatFeed').innerHTML = '';
+    syncBodyFlags();
+    const input = $('#chatInput');
+    if (input) input.blur();
+    loadChats();
+  }
+
+  function renderRoomHeader() {
+    const room = state.room;
+    if (!room) return;
+    const d = room.data;
+    const ch = d.character || {};
+    const persona = d.persona || {};
+    const title = isDefaultChatTitle(d.chat.title, ch.name) ? (ch.name || 'Персонаж') : d.chat.title;
+    $('#chatHeaderAvatar').src = resolveAvatarUrl(ch.avatar_url, ch.name);
+    $('#chatHeaderName').textContent = title;
+    $('#chatHeaderSub').textContent = modelSummary(d.chat.model_id, d.chat.effort) + ' · ' + (persona.name || 'Игрок');
+    const st = providerStatus(providerOf(d.chat.model_id));
+    const dot = $('#chatStatusDot');
+    dot.classList.toggle('off', !st.ok);
+    dot.title = st.text;
+  }
+
+  function scroller() {
+    return $('#chatScroll');
+  }
+
+  function isNearBottom() {
+    const s = scroller();
+    return !s || s.scrollHeight - s.scrollTop - s.clientHeight < 140;
+  }
+
+  function scrollToBottom(smooth) {
+    const s = scroller();
+    if (!s) return;
+    if (smooth && s.scrollTo) s.scrollTo({ top: s.scrollHeight, behavior: 'smooth' });
+    else s.scrollTop = s.scrollHeight;
+  }
+
+  function updateJumpBtn() {
+    const btn = $('#jumpBtn');
+    if (btn) btn.classList.toggle('hidden', !state.room || isNearBottom());
+  }
+
+  function feedContext() {
+    const d = state.room.data;
+    const msgs = d.messages || [];
+    let lastAiIdx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role !== 'user') {
+        lastAiIdx = i;
+        break;
+      }
+    }
+    return { msgs, lastAiIdx, character: d.character || {}, persona: d.persona || {} };
+  }
+
+  function messageSig(m, idx, ctx, extra) {
+    return JSON.stringify([
+      m.content, m.swipe_index, (m.swipes || []).length, (m.thoughts || '').length, m.created_at,
+      idx === ctx.lastAiIdx, idx === 0, ctx.character.name, ctx.character.avatar_url ? ctx.character.avatar_url.length : 0,
+      ctx.persona.name, ctx.persona.avatar_url ? ctx.persona.avatar_url.length : 0, extra || '',
+    ]);
+  }
+
+  function messageHtml(m, idx, ctx, opts) {
+    const isUser = m.role === 'user';
+    const name = isUser ? (ctx.persona.name || 'Вы') : (ctx.character.name || 'Персонаж');
+    const avatar = resolveAvatarUrl(isUser ? ctx.persona.avatar_url : ctx.character.avatar_url, name);
+    const time = formatMessageTime(parseServerTime(m.created_at));
+    const swipes = Array.isArray(m.swipes) && m.swipes.length ? m.swipes : [m.content];
+    const si = Math.min(Math.max(0, Number(m.swipe_index) || 0), swipes.length - 1);
+    const isLastAi = idx === ctx.lastAiIdx;
+    const isGreeting = idx === 0 && !isUser;
+    const busy = Boolean(state.room && state.generations[state.room.chatId]);
+    const swipeable = !isUser && isLastAi && !isGreeting && !m._pending && !busy;
+    const hiddenCls = opts && opts.hidden ? ' hidden' : '';
+
+    const head = `<div class="msg-head">
+        <img class="avatar avatar-28" src="${escapeHtml(avatar)}" alt="" data-action="view-avatar" data-who="${isUser ? 'persona' : 'character'}" />
+        <span class="msg-name">${escapeHtml(name)}</span>
+        ${time ? `<span class="msg-time">${escapeHtml(time)}</span>` : ''}
+        ${m._pending ? '' : `<button class="icon-btn sm" data-action="msg-menu" data-id="${m.id}" aria-label="Действия с сообщением">${ic('more', 'ic-sm')}</button>`}
+      </div>`;
+
+    if (isUser) {
+      return `<div class="msg user${hiddenCls}" data-msg-id="${m.id}">${head}<div class="msg-card"><div class="msg-text">${formatRoleplayHtml(m.content, { dialogue: prefs.dialogue })}</div></div></div>`;
+    }
+
+    const thoughts = m.thoughts || '';
+    const thoughtsHtml = thoughts
+      ? `<details class="thoughts"${prefs.thoughtsOpen ? ' open' : ''}><summary>${ic('bulb')}Мысли · ${formatCount(thoughts.length)} симв.${ic('chevron-down', 'chev')}</summary><div class="thoughts-body">${escapeHtml(thoughts)}</div></details>`
+      : '';
+    const nav = swipes.length > 1
+      ? `<div class="swipe-nav"><button data-action="swipe-prev" data-id="${m.id}" aria-label="Предыдущий вариант"${si <= 0 || busy ? ' disabled' : ''}>${ic('chevron-left', 'ic-sm')}</button><span class="swipe-count">${si + 1}/${swipes.length}</span><button data-action="swipe-next" data-id="${m.id}" aria-label="Следующий вариант"${(si >= swipes.length - 1 && !swipeable) || busy ? ' disabled' : ''}>${ic('chevron-right', 'ic-sm')}</button></div>`
+      : '';
+    const reroll = swipeable ? `<button class="foot-btn" data-action="reroll" data-id="${m.id}">${ic('reroll')}Другой вариант</button>` : '';
+    const foot = nav || reroll ? `<div class="msg-foot">${nav}${reroll}</div>` : '';
+    return `<div class="msg assistant${hiddenCls}" data-msg-id="${m.id}"${swipeable ? ' data-swipeable="1"' : ''}>${head}${thoughtsHtml}<div class="msg-text">${formatRoleplayHtml(m.content, { dialogue: prefs.dialogue })}</div>${foot}</div>`;
+  }
+
+  function introHtml(ctx) {
+    return `<div class="feed-intro">
+      <img class="avatar avatar-64" src="${escapeHtml(resolveAvatarUrl(ctx.character.avatar_url, ctx.character.name))}" alt="" />
+      <div class="empty-title">${escapeHtml(ctx.character.name || 'Персонаж')}</div>
+      <div>У персонажа нет приветствия. Опишите сцену и сделайте первый ход.</div>
+    </div>`;
+  }
+
+  function liveHtml(ctx) {
+    const name = ctx.character.name || 'Персонаж';
+    return `<div class="msg assistant live">
+      <div class="msg-head">
+        <img class="avatar avatar-28" src="${escapeHtml(resolveAvatarUrl(ctx.character.avatar_url, name))}" alt="" />
+        <span class="msg-name">${escapeHtml(name)}</span>
+        <span class="live-status"><span data-live="status">Подготовка…</span><span class="elapsed" data-live="elapsed"></span></span>
+        <button class="icon-btn sm" data-action="open-diagnostics" aria-label="Ход генерации">${ic('activity', 'ic-sm')}</button>
+      </div>
+      <details class="thoughts hidden" data-live="thoughts-wrap"${prefs.thoughtsOpen ? ' open' : ''}><summary>${ic('bulb')}<span data-live="thoughts-label">Мысли</span>${ic('chevron-down', 'chev')}</summary><div class="thoughts-body" data-live="thoughts"></div></details>
+      <div class="msg-text" data-live="text"><div class="typing-dots"><i></i><i></i><i></i></div></div>
+    </div>`;
+  }
+
+  function isAuthError(message) {
+    return /401|авториз|войдите|войти|токен|сесси|Среда Claude Code не установлена|Нет авторизации/i.test(String(message || ''));
+  }
+
+  function errorHtml(err) {
+    const provider = providerOf(state.room.data.chat.model_id);
+    const auth = !err.cancelled && isAuthError(err.message);
+    return `<div class="error-card${err.cancelled ? ' cancelled' : ''}">
+      <div class="error-head">${ic(err.cancelled ? 'info' : 'alert')}<div>${escapeHtml(err.cancelled ? 'Генерация остановлена.' : (err.message || 'Неизвестная ошибка'))}</div></div>
+      <div class="error-actions">
+        <button class="btn btn-sm btn-secondary" data-action="retry-generation">${ic('reroll')}Повторить</button>
+        ${auth ? `<button class="btn btn-sm btn-tonal" data-action="open-provider-settings" data-provider="${provider}">Настроить ${escapeHtml(PROVIDERS[provider].short)}</button>` : ''}
+        ${err.cancelled ? '' : '<button class="btn btn-sm btn-ghost" data-action="open-diagnostics">Подробнее</button>'}
+        <button class="btn btn-sm btn-ghost" data-action="dismiss-error">Скрыть</button>
+      </div>
+    </div>`;
+  }
+
+  /** Reconciles the feed DOM with room data, patching only changed messages. */
+  function syncFeed(opts) {
+    const room = state.room;
+    if (!room) return;
+    const o = opts || {};
+    const feed = $('#chatFeed');
+    const wasNearBottom = isNearBottom();
+    const ctx = feedContext();
+    const gen = state.generations[room.chatId];
+    const items = [];
+
+    if (!ctx.msgs.length && !gen) items.push({ key: 'intro', sig: 'intro' + ctx.character.name, html: () => introHtml(ctx) });
+    ctx.msgs.forEach((m, idx) => {
+      const regenerating = gen && gen.kind === 'reroll' && gen.msgId === m.id;
+      items.push({
+        key: 'm' + m.id,
+        sig: messageSig(m, idx, ctx, (regenerating ? 'regen' : '') + (gen ? 'busy' : '') + (prefs.dialogue ? 'd' : '') + (prefs.thoughtsOpen ? 't' : '')),
+        html: () => messageHtml(m, idx, ctx, { hidden: regenerating }),
+      });
+      if (regenerating) items.push({ key: 'live', sig: 'live', html: () => liveHtml(ctx) });
+      if (room.error && room.error.kind === 'reroll' && room.error.msgId === m.id) {
+        items.push({ key: 'error', sig: 'err' + room.error.message + room.error.cancelled, html: () => errorHtml(room.error) });
+      }
+    });
+    if (gen && gen.kind === 'send') items.push({ key: 'live', sig: 'live', html: () => liveHtml(ctx) });
+    if (room.error && room.error.kind === 'send') {
+      items.push({ key: 'error', sig: 'err' + room.error.message + room.error.cancelled, html: () => errorHtml(room.error) });
+    }
+
+    const existing = new Map();
+    Array.from(feed.children).forEach(el => existing.set(el.dataset.key, el));
+    let prev = null;
+    for (const it of items) {
+      let el = existing.get(it.key);
+      if (el && el.dataset.sig !== it.sig) {
+        const fresh = htmlToElement(it.html());
+        el.replaceWith(fresh);
+        el = fresh;
+      } else if (!el) {
+        el = htmlToElement(it.html());
+      }
+      el.dataset.key = it.key;
+      el.dataset.sig = it.sig;
+      existing.delete(it.key);
+      const expected = prev ? prev.nextSibling : feed.firstChild;
+      if (el !== expected) feed.insertBefore(el, expected);
+      prev = el;
+    }
+    existing.forEach(el => el.remove());
+
+    if (gen && gen.last) patchLive(gen.last);
+    if (o.scroll === 'bottom' || (o.scroll !== 'keep' && wasNearBottom)) scrollToBottom();
+    updateJumpBtn();
+  }
+
+  const PHASE_STATUS = {
+    init: 'Подготовка…',
+    context: 'Сборка контекста…',
+    auth: 'Проверка доступа…',
+    oauth_check: 'Проверка доступа…',
+    oauth_refresh: 'Обновление токена…',
+    connecting: 'Подключение…',
+    streaming: 'Ожидание ответа…',
+    waiting_first_token: 'Ожидание ответа…',
+    thinking: 'Думает…',
+    generating: 'Пишет…',
+    streaming_text: 'Пишет…',
+    completed: 'Готово',
+    cancelled: 'Остановлено',
+    error: 'Ошибка',
+  };
+
+  function patchLive(g) {
+    const live = $('#chatFeed [data-key="live"]');
+    if (!live || !g) return;
+    const wasNearBottom = isNearBottom();
+    const status = g.text ? 'Пишет…' : (g.thoughts ? 'Думает…' : (PHASE_STATUS[g.phase] || 'Генерация…'));
+    const statusEl = $('[data-live="status"]', live);
+    if (statusEl && statusEl.textContent !== status) statusEl.textContent = status;
+
+    if (g.thoughts) {
+      const wrap = $('[data-live="thoughts-wrap"]', live);
+      wrap.classList.remove('hidden');
+      $('[data-live="thoughts-label"]', live).textContent = `Мысли · ${formatCount(g.thoughts.length)} симв.`;
+      const body = $('[data-live="thoughts"]', live);
+      if (body.textContent.length !== g.thoughts.length) {
+        body.textContent = g.thoughts;
+        body.scrollTop = body.scrollHeight;
+      }
+    }
+    if (g.text) {
+      const textEl = $('[data-live="text"]', live);
+      if (textEl.dataset.len !== String(g.text.length)) {
+        textEl.dataset.len = String(g.text.length);
+        textEl.innerHTML = formatRoleplayHtml(g.text, { dialogue: prefs.dialogue });
+      }
+    }
+    if (wasNearBottom) scrollToBottom();
+  }
+
+  function tickElapsed() {
+    const room = state.room;
+    if (!room) return;
+    const gen = state.generations[room.chatId];
+    const el = $('#chatFeed [data-live="elapsed"]');
+    if (gen && el) el.textContent = ((Date.now() - gen.startedAt) / 1000).toFixed(1) + ' с';
+  }
+
+  function updateComposer() {
+    const btn = $('#sendBtn');
+    if (!btn || !state.room) return;
+    const gen = state.generations[state.room.chatId];
+    btn.classList.remove('stop', 'busy');
+    btn.disabled = false;
+    if (gen) {
+      if (can.cancel()) {
+        btn.classList.add('stop');
+        btn.dataset.action = 'stop';
+        btn.setAttribute('aria-label', 'Остановить генерацию');
+        btn.innerHTML = gen.stopping ? '<span class="spinner"></span>' : ic('stop');
+        btn.disabled = Boolean(gen.stopping);
+      } else {
+        btn.classList.add('busy');
+        btn.dataset.action = 'noop';
+        btn.setAttribute('aria-label', 'Идёт генерация');
+        btn.innerHTML = '<span class="spinner"></span>';
+      }
+    } else {
+      btn.dataset.action = 'send';
+      btn.setAttribute('aria-label', 'Отправить');
+      btn.innerHTML = ic('send');
+    }
+  }
+
+  // --- generation lifecycle ------------------------------------------------
+  let pollTimer = null;
+  let tickTimer = null;
+
+  function startGeneration(chatId, info) {
+    state.generations[chatId] = Object.assign({ startedAt: Date.now(), last: null, stopping: false }, info);
+    ensurePolling(chatId);
+    if (state.tab === 'chats') renderChatsList();
+  }
+
+  function ensurePolling() {
+    if (!pollTimer) pollTimer = setInterval(pollGenerations, 450);
+    if (!tickTimer) tickTimer = setInterval(tickElapsed, 100);
+  }
+
+  async function pollGenerations() {
+    const ids = Object.keys(state.generations).map(Number);
+    if (!ids.length) {
+      clearInterval(pollTimer);
+      clearInterval(tickTimer);
+      pollTimer = null;
+      tickTimer = null;
+      return;
+    }
+    // Only the chat the user looks at (or whose diagnostics are open) needs live data.
+    const watched = ids.filter(id => (state.room && state.room.chatId === id) || (diag && diag.chatId === id));
+    for (const id of watched) {
+      try {
+        const data = await api(`/api/chats/${id}/generation`);
+        const gen = state.generations[id];
+        if (!gen) continue;
+        if (data.generation) {
+          gen.last = data.generation;
+          if (state.room && state.room.chatId === id) patchLive(data.generation);
+          if (diag && diag.chatId === id) renderDiagnostics();
+        }
+        if (gen.attached && !data.active) {
+          // A generation we only observed (started before the room was opened) finished.
+          delete state.generations[id];
+          if (state.room && state.room.chatId === id) {
+            try {
+              state.room.data = await api(`/api/chats/${id}`);
+            } catch (e) {
+              // keep current data
+            }
+            syncFeed();
+            updateComposer();
+          }
+          loadChats();
+        }
+      } catch (e) {
+        // transient bridge errors are ignored while polling
+      }
+    }
+  }
+
+  async function attachToRunningGeneration(chatId) {
+    try {
+      const data = await api(`/api/chats/${chatId}/generation`);
+      if (data.active && !state.generations[chatId]) {
+        startGeneration(chatId, { kind: 'send', attached: true, last: data.generation || null });
+        if (state.room && state.room.chatId === chatId) {
+          syncFeed({ scroll: 'bottom' });
+          updateComposer();
+        }
+      }
+    } catch (e) {
+      // older engines or no generation yet
+    }
+  }
+
+  function endGeneration(chatId, generation) {
+    delete state.generations[chatId];
+    if (generation) state.lastGeneration = Object.assign(state.lastGeneration || {}, { [chatId]: generation });
+    if (diag && diag.chatId === chatId) {
+      diag.final = generation || diag.final;
+      renderDiagnostics();
+    }
+  }
+
+  function generationError(err) {
+    const g = err && err.data && err.data.generation;
+    const cancelled = Boolean((err && err.status === 409) || (err && err.data && err.data.cancelled) || (g && g.cancelled));
+    return { message: err ? err.message : 'Неизвестная ошибка', cancelled, generation: g || null };
+  }
+
+  function nowServerString() {
+    return new Date().toISOString().replace('T', ' ').slice(0, 19);
+  }
+
+  async function sendMessage() {
+    const room = state.room;
+    if (!room) return;
+    const chatId = room.chatId;
+    if (state.generations[chatId]) return;
+    const input = $('#chatInput');
+    const text = input.value.trim();
+    if (!text) {
+      input.focus();
+      return;
+    }
+    input.value = '';
+    autoGrow(input, 168);
+    state.drafts[chatId] = '';
+    room.error = null;
+
+    const temp = { id: -Date.now(), role: 'user', content: text, swipes: [text], swipe_index: 0, created_at: nowServerString(), _pending: true };
+    room.data.messages.push(temp);
+    startGeneration(chatId, { kind: 'send', text });
+    syncFeed({ scroll: 'bottom' });
+    updateComposer();
+
+    try {
+      const res = await api(`/api/chats/${chatId}/messages`, { method: 'POST', body: { content: text } });
+      endGeneration(chatId, res.generation);
+      if (state.room && state.room.chatId === chatId) state.room.data.messages = res.messages || state.room.data.messages;
+    } catch (err) {
+      const info = generationError(err);
+      endGeneration(chatId, info.generation);
+      if (state.room && state.room.chatId === chatId) {
+        state.room.data.messages = state.room.data.messages.filter(m => m.id !== temp.id);
+        state.room.error = Object.assign({ kind: 'send', text }, info);
+        const box = $('#chatInput');
+        if (!box.value.trim()) {
+          box.value = text;
+          autoGrow(box, 168);
+        }
+      } else {
+        state.drafts[chatId] = state.drafts[chatId] || text;
+        toast(info.cancelled ? 'Генерация остановлена' : 'Ошибка генерации: ' + info.message, {
+          type: info.cancelled ? 'info' : 'error',
+          action: { label: 'Открыть', fn: () => openChatRoom(chatId) },
+        });
+      }
+    } finally {
+      if (state.room && state.room.chatId === chatId) {
+        syncFeed();
+        updateComposer();
+      }
+      loadChats();
+    }
+  }
+
+  async function regenerate(msgId) {
+    const room = state.room;
+    if (!room) return;
+    const chatId = room.chatId;
+    if (state.generations[chatId]) return;
+    room.error = null;
+    startGeneration(chatId, { kind: 'reroll', msgId });
+    syncFeed();
+    updateComposer();
+    try {
+      const res = await api(`/api/messages/${msgId}/swipe`, { method: 'POST', body: { action: 'regenerate' } });
+      endGeneration(chatId, res.generation);
+      replaceMessage(chatId, res.message);
+    } catch (err) {
+      const info = generationError(err);
+      endGeneration(chatId, info.generation);
+      if (state.room && state.room.chatId === chatId) {
+        state.room.error = Object.assign({ kind: 'reroll', msgId }, info);
+      } else if (!info.cancelled) {
+        toast('Ошибка генерации: ' + info.message, { type: 'error', action: { label: 'Открыть', fn: () => openChatRoom(chatId) } });
+      }
+    } finally {
+      if (state.room && state.room.chatId === chatId) {
+        syncFeed({ scroll: 'keep' });
+        updateComposer();
+      }
+      loadChats();
+    }
+  }
+
+  async function stopGeneration() {
+    const room = state.room;
+    if (!room) return;
+    const gen = state.generations[room.chatId];
+    if (!gen || !can.cancel() || gen.stopping) return;
+    gen.stopping = true;
+    updateComposer();
+    try {
+      await api(`/api/chats/${room.chatId}/generation/cancel`, { method: 'POST' });
+    } catch (e) {
+      gen.stopping = false;
+      updateComposer();
+      toast(e.message, { type: 'error' });
+    }
+  }
+
+  function retryGeneration() {
+    const room = state.room;
+    if (!room || !room.error) return;
+    const err = room.error;
+    room.error = null;
+    if (err.kind === 'reroll') {
+      regenerate(err.msgId);
+      return;
+    }
+    const input = $('#chatInput');
+    if (!input.value.trim()) input.value = err.text || '';
+    sendMessage();
+  }
+
+  function replaceMessage(chatId, msg) {
+    if (!msg || !state.room || state.room.chatId !== chatId) return;
+    const list = state.room.data.messages;
+    const idx = list.findIndex(m => m.id === msg.id);
+    if (idx >= 0) list[idx] = msg;
+  }
+
+  async function selectSwipe(msgId, index) {
+    const room = state.room;
+    if (!room || state.generations[room.chatId]) return;
+    try {
+      const res = await api(`/api/messages/${msgId}/swipe`, { method: 'POST', body: { action: 'select', index } });
+      replaceMessage(room.chatId, res.message);
+      syncFeed({ scroll: 'keep' });
+    } catch (e) {
+      toast(e.message, { type: 'error' });
+    }
+  }
+
+  function swipeBy(msgId, delta) {
+    const room = state.room;
+    if (!room) return;
+    const ctx = feedContext();
+    const idx = ctx.msgs.findIndex(m => m.id === msgId);
+    const m = ctx.msgs[idx];
+    if (!m) return;
+    const count = Array.isArray(m.swipes) && m.swipes.length ? m.swipes.length : 1;
+    const next = (Number(m.swipe_index) || 0) + delta;
+    if (next < 0) return;
+    if (next >= count) {
+      if (idx === ctx.lastAiIdx && idx !== 0) regenerate(msgId);
+      return;
+    }
+    selectSwipe(msgId, next);
+  }
+
+  function insertAsterisks() {
+    const input = $('#chatInput');
+    const start = input.selectionStart || 0;
+    const end = input.selectionEnd || 0;
+    const val = input.value;
+    const selected = val.slice(start, end);
+    if (selected) {
+      input.value = val.slice(0, start) + '*' + selected + '*' + val.slice(end);
+      input.setSelectionRange(end + 2, end + 2);
+    } else {
+      input.value = val.slice(0, start) + '**' + val.slice(end);
+      input.setSelectionRange(start + 1, start + 1);
+    }
+    input.focus();
+    autoGrow(input, 168);
+  }
+
+  // --- message actions ------------------------------------------------------
+  function openMessageActions(msgId) {
+    const room = state.room;
+    if (!room) return;
+    const ctx = feedContext();
+    const idx = ctx.msgs.findIndex(m => m.id === msgId);
+    const m = ctx.msgs[idx];
+    if (!m || m._pending) return;
+    const isUser = m.role === 'user';
+    const isGreeting = idx === 0 && !isUser;
+    const isLast = idx === ctx.msgs.length - 1;
+    const busy = Boolean(state.generations[room.chatId]);
+    const later = ctx.msgs.length - idx - 1;
+    actionSheet({
+      title: isUser ? (ctx.persona.name || 'Ваше сообщение') : (ctx.character.name || 'Сообщение'),
+      items: [
+        { icon: 'copy', label: 'Копировать', onSelect: () => copyText(m.content) },
+        { icon: 'file', label: 'Выделить текст', onSelect: () => openTextSheet('Текст сообщения', m.content, { selectable: true }) },
+        { icon: 'edit', label: 'Редактировать', hidden: busy, onSelect: () => openEditMessage(msgId) },
+        { icon: 'reroll', label: 'Сгенерировать другой вариант', hidden: isUser || isGreeting || busy, onSelect: () => regenerate(msgId) },
+        { icon: 'bulb', label: 'Показать мысли', hidden: !m.thoughts, onSelect: () => openTextSheet('Мысли', m.thoughts) },
+        { icon: 'undo', label: `Откатить к этому сообщению (удалить ${later} ${pluralRu(later, 'последующее', 'последующих', 'последующих')})`, hidden: isLast || busy, onSelect: () => rewindTo(msgId) },
+        { icon: 'trash', label: 'Удалить сообщение', danger: true, hidden: busy, onSelect: () => deleteMessage(msgId) },
+      ],
+    });
+  }
+
+  function openEditMessage(msgId) {
+    const room = state.room;
+    const m = room && room.data.messages.find(x => x.id === msgId);
+    if (!m) return;
+    const chatId = room.chatId;
+    const layer = openSheet({
+      title: 'Редактирование',
+      full: true,
+      body: `<textarea class="textarea tall" data-role="text">${escapeHtml(m.content)}</textarea>
+        ${m.role !== 'user' && (m.swipes || []).length > 1 ? '<p class="section-hint">Изменится только текущий вариант ответа.</p>' : ''}`,
+      footer: `<div class="btn-row"><button class="btn btn-secondary" data-action="layer-close">Отмена</button><button class="btn btn-primary" data-act="save">Сохранить</button></div>`,
+      onBack: () => {
+        const v = $('[data-role="text"]', layer.el).value;
+        if (v === m.content) return true;
+        confirmDialog({ title: 'Отменить изменения?', confirmText: 'Отменить', cancelText: 'Продолжить', danger: true })
+          .then(ok => ok && layer.close());
+        return false;
+      },
+    });
+    bindActs(layer, {
+      save: async (btn) => {
+        const content = $('[data-role="text"]', layer.el).value;
+        if (!content.trim()) {
+          toast('Сообщение не может быть пустым');
+          return;
+        }
+        btn.disabled = true;
+        try {
+          const res = await api(`/api/messages/${msgId}`, { method: 'PUT', body: { content } });
+          replaceMessage(chatId, res.message);
+          layer.close();
+          if (state.room && state.room.chatId === chatId) syncFeed({ scroll: 'keep' });
+          toast('Сообщение обновлено', { type: 'success' });
+        } catch (e) {
+          btn.disabled = false;
+          toast(e.message, { type: 'error' });
+        }
+      },
+    });
+  }
+
+  async function deleteMessage(msgId) {
+    const room = state.room;
+    if (!room) return;
+    const chatId = room.chatId;
+    const ok = await confirmDialog({ title: 'Удалить сообщение?', message: 'Все его варианты тоже будут удалены.', confirmText: 'Удалить', danger: true });
+    if (!ok) return;
+    try {
+      await api(`/api/messages/${msgId}`, { method: 'DELETE' });
+      if (state.room && state.room.chatId === chatId) {
+        state.room.data.messages = state.room.data.messages.filter(m => m.id !== msgId);
+        if (state.room.error && state.room.error.msgId === msgId) state.room.error = null;
+        syncFeed({ scroll: 'keep' });
+      }
+      loadChats();
+    } catch (e) {
+      toast(e.message, { type: 'error' });
+    }
+  }
+
+  async function rewindTo(msgId) {
+    const room = state.room;
+    if (!room) return;
+    const chatId = room.chatId;
+    const msgs = room.data.messages;
+    const idx = msgs.findIndex(m => m.id === msgId);
+    const victims = msgs.slice(idx + 1).filter(m => m.id > 0);
+    if (!victims.length) return;
+    const ok = await confirmDialog({
+      title: 'Откатить чат?',
+      message: `${victims.length} ${pluralRu(victims.length, 'сообщение', 'сообщения', 'сообщений')} после выбранного будут удалены.`,
+      confirmText: 'Откатить',
+      danger: true,
+    });
+    if (!ok) return;
+    let removed = 0;
+    for (const m of victims.reverse()) {
+      try {
+        await api(`/api/messages/${m.id}`, { method: 'DELETE' });
+        removed++;
+      } catch (e) {
+        toast(e.message, { type: 'error' });
+        break;
+      }
+    }
+    try {
+      const data = await api(`/api/chats/${chatId}`);
+      if (state.room && state.room.chatId === chatId) {
+        state.room.data = data;
+        state.room.error = null;
+        syncFeed({ scroll: 'bottom' });
+      }
+    } catch (e) {
+      // keep local view
+    }
+    if (removed) toast(`Удалено ${removed} ${pluralRu(removed, 'сообщение', 'сообщения', 'сообщений')}`);
+    loadChats();
+  }
+
+  // --- chat settings sheet --------------------------------------------------
+  async function patchChat(chatId, body) {
+    const res = await api(`/api/chats/${chatId}`, { method: 'PATCH', body });
+    if (state.room && state.room.chatId === chatId) {
+      state.room.data.chat = res.chat;
+      state.room.data.persona = res.persona;
+      state.room.data.character = res.character;
+      renderRoomHeader();
+      syncFeed({ scroll: 'keep' });
+    }
+    loadChats();
+    return res;
+  }
+
+  function openChatSettings() {
+    const room = state.room;
+    if (!room) return;
+    const chatId = room.chatId;
+
+    const render = () => {
+      const d = state.room && state.room.chatId === chatId ? state.room.data : null;
+      if (!d) return '';
+      const ch = d.character || {};
+      const chat = d.chat;
+      const prov = providerOf(chat.model_id);
+      const custom = isDefaultChatTitle(chat.title, ch.name) ? '' : chat.title;
+      const msgCount = (d.messages || []).length;
+      return `
+        <div style="display:flex;align-items:center;gap:14px;padding:4px 0 14px">
+          <img class="avatar avatar-52" src="${escapeHtml(resolveAvatarUrl(ch.avatar_url, ch.name))}" alt="" />
+          <div class="row-body"><div class="row-title" style="font-size:var(--fs-lg)">${escapeHtml(ch.name || 'Персонаж')}</div><div class="row-sub">${msgCount} ${pluralRu(msgCount, 'сообщение', 'сообщения', 'сообщений')}</div></div>
+        </div>
+        ${can.rename() ? `<label class="field"><span class="field-label">Название чата</span><input class="input" data-role="title" value="${escapeHtml(custom)}" placeholder="${escapeHtml(ch.name || 'Без названия')}" maxlength="120" autocomplete="off" /><span class="field-hint">Помогает различать несколько историй с одним персонажем.</span></label>` : ''}
+        <div class="section">
+          <div class="section-title">Модель этого чата</div>
+          <div class="list"><button class="row" data-act="model"><span class="row-icon">${ic(PROVIDERS[prov].icon)}</span><div class="row-body"><div class="row-title">${escapeHtml(modelName(chat.model_id))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effectiveEffort(chat.model_id, chat.effort) ? ' · ' + EFFORT_LABELS[effectiveEffort(chat.model_id, chat.effort)] : ''}</div></div>${ic('chevron-right', 'row-chevron')}</button></div>
+          ${can.perChatModel() ? '' : '<p class="section-hint">На текущей версии APK выбор модели здесь также меняет модель по умолчанию.</p>'}
+        </div>
+        <div class="section">
+          <div class="section-title">Вы играете за</div>
+          ${state.personas.length ? `<div class="chips wrap">${state.personas.map(p => `<button class="chip${p.id === Number(chat.persona_id) ? ' active' : ''}" data-act="persona" data-id="${p.id}"><img class="avatar avatar-24" src="${escapeHtml(resolveAvatarUrl(p.avatar_url, p.name))}" alt="" />${escapeHtml(p.name)}</button>`).join('')}</div>` : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Персон пока нет. Создайте её во вкладке «Персоны».</div>'}
+        </div>
+        <div class="section">
+          <div class="section-title">Контекст</div>
+          <div class="list">
+            <button class="row" data-act="memory"><span class="row-icon">${ic('book')}</span><div class="row-body"><div class="row-title">Память чата</div><div class="row-sub">Заметки для модели в &lt;chat_memory&gt;</div></div>${ic('chevron-right', 'row-chevron')}</button>
+            ${can.promptPreview() ? `<button class="row" data-act="prompt"><span class="row-icon">${ic('eye')}</span><div class="row-body"><div class="row-title">Итоговый системный промпт</div><div class="row-sub">Ровно то, что получает модель</div></div>${ic('chevron-right', 'row-chevron')}</button>` : ''}
+            <button class="row" data-act="diag"><span class="row-icon">${ic('activity')}</span><div class="row-body"><div class="row-title">Последняя генерация</div><div class="row-sub">Журнал, мысли, параметры запроса</div></div>${ic('chevron-right', 'row-chevron')}</button>
+          </div>
+        </div>
+        <div class="section">
+          <div class="list">
+            <button class="row" data-act="export"><span class="row-icon">${ic('share')}</span><div class="row-body"><div class="row-title">Экспорт чата</div></div>${ic('chevron-right', 'row-chevron')}</button>
+            ${ch.id ? `<button class="row" data-act="character"><span class="row-icon">${ic('mask')}</span><div class="row-body"><div class="row-title">Карточка персонажа</div></div>${ic('chevron-right', 'row-chevron')}</button>` : ''}
+            <button class="row danger" data-act="delete"><span class="row-icon">${ic('trash')}</span><div class="row-body"><div class="row-title">Удалить чат</div></div></button>
+          </div>
+        </div>`;
+    };
+
+    const layer = openSheet({ title: 'Настройки чата', full: true, body: render() });
+    layer.chatId = chatId;
+    layer.refresh = () => {
+      if (!state.room || state.room.chatId !== chatId) return;
+      const focused = document.activeElement && layer.el.contains(document.activeElement);
+      if (focused) return;
+      const body = $('.sheet-body', layer.el);
+      const scroll = body.scrollTop;
+      layer.setBody(render());
+      body.scrollTop = scroll;
+    };
+    const saveTitle = async (input) => {
+      const value = input.value.trim();
+      const d = state.room && state.room.data;
+      if (!d) return;
+      const current = isDefaultChatTitle(d.chat.title, d.character.name) ? '' : d.chat.title;
+      if (value === current) return;
+      try {
+        await patchChat(chatId, { title: value });
+        toast(value ? 'Название сохранено' : 'Название сброшено', { type: 'success' });
+      } catch (e) {
+        toast(e.message, { type: 'error' });
+      }
+    };
+    layer.el.addEventListener('change', (e) => {
+      if (e.target.dataset.role === 'title') saveTitle(e.target);
+    });
+    layer.el.addEventListener('keydown', (e) => {
+      if (e.target.dataset.role === 'title' && e.key === 'Enter') e.target.blur();
+    });
+    bindActs(layer, {
+      model: () => {
+        const chat = state.room.data.chat;
+        openModelPicker({
+          title: 'Модель этого чата',
+          modelId: chat.model_id,
+          effort: chat.effort,
+          onPick: async (r) => {
+            try {
+              await patchChat(chatId, { modelId: r.modelId, effort: r.effort });
+              layer.refresh();
+            } catch (e) {
+              toast(e.message, { type: 'error' });
+            }
+          },
+        });
+      },
+      persona: async (el) => {
+        try {
+          await patchChat(chatId, { personaId: Number(el.dataset.id) });
+          layer.refresh();
+        } catch (e) {
+          toast(e.message, { type: 'error' });
+        }
+      },
+      memory: () => {
+        const chat = state.room.data.chat;
+        openFileEditor(chat.memory_file_path || `memories/chat_${chatId}.md`, {
+          title: 'Память чата',
+          hint: 'Попадает в системный промпт внутри &lt;chat_memory&gt;, если здесь есть что-то кроме заголовка. Макросы {{char}} и {{user}} подставляются.',
+          allowDelete: false,
+          plain: true,
+        });
+      },
+      prompt: () => openPromptPreview(chatId),
+      diag: () => openDiagnostics(chatId),
+      export: () => openExport(chatId),
+      character: () => {
+        const id = state.room.data.character.id;
+        if (findChar(id)) openCharacterPage(id);
+      },
+      delete: () => deleteChat(chatId),
+    });
+  }
+
+  async function openPromptPreview(chatId) {
+    const layer = openSheet({ title: 'Системный промпт чата', full: true, body: '<div class="empty"><span class="spinner"></span></div>' });
+    try {
+      const res = await api(`/api/chats/${chatId}/system-prompt`);
+      const text = res.systemPrompt || '';
+      layer.setBody(text
+        ? `<p class="section-hint" style="margin:0 0 10px">${formatCount(text.length)} симв. Собирается заново перед каждым ответом.</p><div class="prose mono" style="font-size:13px">${escapeHtml(text)}</div>`
+        : emptyHtml('scroll', 'Промпт пуст', 'Заполните «Системный промпт» в настройках и описания персонажа и персоны.'));
+      if (text) {
+        const footer = htmlToElement(`<div class="sheet-footer"><button class="btn btn-secondary btn-block" data-act="copy">${ic('copy')}Скопировать</button></div>`);
+        $('.sheet', layer.el).appendChild(footer);
+        bindActs(layer, { copy: () => copyText(text) });
+      }
+    } catch (e) {
+      layer.setBody(emptyHtml('alert', 'Не удалось получить промпт', escapeHtml(e.message)));
+    }
+  }
+
+  // --- diagnostics ----------------------------------------------------------
+  let diag = null;
+
+  function openDiagnostics(chatId) {
+    const id = Number(chatId || (state.room && state.room.chatId));
+    if (!id) return;
+    const layer = openSheet({
+      title: 'Ход генерации',
+      full: true,
+      body: '<div class="empty"><span class="spinner"></span></div>',
+      onClose: () => {
+        diag = null;
+      },
+    });
+    diag = { layer, chatId: id, final: null };
+    const gen = state.generations[id];
+    if (gen && gen.last) {
+      renderDiagnostics();
+    } else {
+      api(`/api/chats/${id}/generation`).then(data => {
+        if (!diag || diag.chatId !== id) return;
+        diag.final = data.generation || data.lastGeneration || (state.lastGeneration && state.lastGeneration[id]) || null;
+        renderDiagnostics();
+      }).catch(() => {
+        if (!diag) return;
+        diag.final = (state.lastGeneration && state.lastGeneration[id]) || null;
+        renderDiagnostics();
+      });
+    }
+    ensurePolling();
+  }
+
+  function renderDiagnostics() {
+    if (!diag) return;
+    const gen = state.generations[diag.chatId];
+    const g = (gen && gen.last) || diag.final;
+    if (!g) {
+      diag.layer.setBody(emptyHtml('activity', 'Пока нет данных', 'Здесь появится журнал после первой генерации в этом чате. Журнал хранится до перезапуска приложения.'));
+      return;
+    }
+    const body = $('.sheet-body', diag.layer.el);
+    const consoleEl = $('.console', body);
+    const stick = !consoleEl || consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 30;
+    const scroll = body.scrollTop;
+    const logs = Array.isArray(g.logs) ? g.logs : [];
+    const phase = PHASE_STATUS[g.phase] || g.phase || '—';
+    const item = (label, value, wide) => `<div class="diag-item${wide ? ' wide' : ''}"><div class="diag-label">${label}</div><div class="diag-value">${escapeHtml(value)}</div></div>`;
+    const openThoughts = $('details[data-role="thoughts"]', body);
+    const openText = $('details[data-role="text"]', body);
+    diag.layer.setBody(`
+      <div class="diag-grid">
+        ${item('Статус', g.statusText || phase, true)}
+        ${item('Модель', `${modelName(g.modelId || g.model)}${g.effort ? ' · ' + String(g.effort).toUpperCase() : ''}`)}
+        ${item('Фаза', phase + (g.finishReason ? ` (${g.finishReason})` : ''))}
+        ${item('Время', (g.elapsedSec || ((g.elapsedMs || 0) / 1000).toFixed(1)) + ' с')}
+        ${item('HTTP / чанки', `${g.httpStatus || '—'} · ${g.chunksCount || 0}`)}
+        ${item('Контекст', `${g.contextMessagesCount || 0} ходов · ${formatCount(g.promptChars || 0)} симв.`, true)}
+        ${g.thinkingConfigSummary ? item('Параметры', g.thinkingConfigSummary, true) : ''}
+        ${g.endpoint ? item('Endpoint', g.endpoint, true) : ''}
+        ${g.error ? item('Ошибка', g.error, true) : ''}
+      </div>
+      <div class="section"><div class="section-title">Журнал · ${logs.length}</div>
+        <div class="console">${logs.map(l => {
+          const line = typeof l === 'string' ? l : `[${l.t || ''}] ${l.text || l.message || ''}`;
+          const cls = /❌|ошибк/i.test(line) ? 'err' : (/✅/.test(line) ? 'ok' : '');
+          return `<div class="${cls}">${escapeHtml(line)}</div>`;
+        }).join('') || '<div>—</div>'}</div>
+      </div>
+      ${g.thoughts ? `<details class="thoughts" data-role="thoughts"${openThoughts && openThoughts.open ? ' open' : ''} style="margin-top:16px"><summary>${ic('bulb')}Мысли · ${formatCount(g.thoughts.length)} симв.${ic('chevron-down', 'chev')}</summary><div class="thoughts-body">${escapeHtml(g.thoughts)}</div></details>` : ''}
+      ${g.text ? `<details class="thoughts" data-role="text"${openText && openText.open ? ' open' : ''}><summary>${ic('file')}Текст ответа · ${formatCount(g.text.length)} симв.${ic('chevron-down', 'chev')}</summary><div class="thoughts-body" style="font-style:normal;color:var(--text)">${escapeHtml(g.text)}</div></details>` : ''}
+    `);
+    body.scrollTop = scroll;
+    const newConsole = $('.console', body);
+    if (newConsole && stick) newConsole.scrollTop = newConsole.scrollHeight;
+  }
+
+  // ==========================================================================
+  // EXPORT
+  // ==========================================================================
+  async function fetchFileText(relPath) {
+    if (!relPath) return '';
+    try {
+      const res = await api(`/api/files/content?path=${encodeURIComponent(relPath)}`);
+      return typeof res.content === 'string' ? res.content : '';
+    } catch (e) {
       return '';
     }
   }
 
-  async function openExportChatModal(chatId = null) {
-    const targetId = chatId || state.currentChatId;
-    if (!targetId) {
-      return showToast('Сначала откройте или выберите чат для экспорта');
-    }
-
-    exportChatState.chatId = targetId;
-    const modalEl = document.getElementById('exportChatModal');
-    if (modalEl) {
-      modalEl.classList.remove('hidden');
-    }
-
-    const previewInput = document.getElementById('exportChatContentInput');
-    const fileLabel = document.getElementById('exportFileNameLabel');
-    const sizeBadge = document.getElementById('exportSizeBadge');
-
-    updateExportFormatButtons();
-
-    // Immediately show preview if we already have the active chat in memory
-    if (Number(targetId) === Number(state.currentChatId) && state.currentChatData && state.currentChatData.chat) {
-      exportChatState.chatData = state.currentChatData;
-      exportChatState.lastGeneration = state.lastGeneration || null;
-      rebuildExportPreview();
-    } else {
-      if (previewInput) previewInput.value = '⏳ Сборка истории чата, промтов и диагностики...';
-      if (fileLabel) fileLabel.textContent = `chat_${targetId}...`;
-      if (sizeBadge) sizeBadge.textContent = '...';
-    }
-
-    try {
-      const chatData = await apiFetch(`/api/chats/${targetId}`);
-      exportChatState.chatData = chatData;
-
-      let genData = null;
-      try {
-        const genRes = await apiFetch(`/api/chats/${targetId}/generation`);
-        if (genRes && genRes.generation) {
-          genData = genRes.generation;
-        }
-      } catch {
-        // ignore if endpoint not available on older runtime
-      }
-      if (!genData && Number(targetId) === Number(state.currentChatId) && state.lastGeneration) {
-        genData = state.lastGeneration;
-      }
-      exportChatState.lastGeneration = genData;
-
-      const charPath = chatData.character?.file_path || '';
-      const personaPath = chatData.persona?.file_path || '';
-      const memoryPath = chatData.memoryPath || `chats/chat_${targetId}/memory.md`;
-
-      const [geminiMd, characterMd, personaMd, memoryMd] = await Promise.all([
-        fetchFileContentSafe('GEMINI.md'),
-        fetchFileContentSafe(charPath),
-        fetchFileContentSafe(personaPath),
-        fetchFileContentSafe(memoryPath),
-      ]);
-
-      exportChatState.geminiMd = geminiMd;
-      exportChatState.characterMd = characterMd;
-      exportChatState.personaMd = personaMd;
-      exportChatState.memoryMd = memoryMd;
-
-      rebuildExportPreview();
-    } catch (err) {
-      if (!exportChatState.chatData && previewInput) {
-        previewInput.value = `❌ Ошибка загрузки чата #${targetId} для экспорта: ${err.message}`;
-      }
-      showToast('Ошибка подготовки экспорта: ' + err.message);
-    }
+  function sanitizeFilenamePart(str) {
+    return String(str || 'chat').trim().replace(/[^\wЀ-ӿ-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 32) || 'chat';
   }
 
-  function updateExportFormatButtons() {
-    document.querySelectorAll('#exportFormatGroup .effort-btn').forEach(btn => {
-      const fmt = btn.getAttribute('data-format');
-      if (fmt) {
-        btn.classList.toggle('active', fmt === exportChatState.format);
-      }
-    });
-    const mdBtn = document.getElementById('exportFmtMdBtn');
-    const jsonBtn = document.getElementById('exportFmtJsonBtn');
-    if (mdBtn) mdBtn.classList.toggle('active', exportChatState.format === 'markdown');
-    if (jsonBtn) jsonBtn.classList.toggle('active', exportChatState.format === 'json');
-  }
-
-  function setExportFormat(fmt) {
-    exportChatState.format = fmt === 'json' ? 'json' : 'markdown';
-    updateExportFormatButtons();
-    rebuildExportPreview();
-  }
-
-  function rebuildExportPreview() {
-    const data = exportChatState.chatData;
-    if (!data || !data.chat) return;
-
-    const includeThoughts = !!document.getElementById('exportOptThoughts')?.checked;
-    const includePrompts = !!document.getElementById('exportOptPrompts')?.checked;
-    const includeDiagnostics = !!document.getElementById('exportOptDiagnostics')?.checked;
-
-    const { chat, character, persona, messages = [] } = data;
-    const safeChar = sanitizeFilenamePart(character?.name || 'character');
-    const ext = exportChatState.format === 'json' ? 'json' : 'md';
-    const filename = `chat_${chat.id}_${safeChar}.${ext}`;
-    exportChatState.filename = filename;
-
-    let output = '';
-
-    if (exportChatState.format === 'json') {
-      const payload = {
-        exportedAt: new Date().toISOString(),
-        appVersion: state.updateInfo?.currentVersion || '1.3.4',
-        chat: {
-          id: chat.id,
-          title: chat.title,
-          model_id: chat.model_id,
-          model_label: getShortModelName(chat.model_id),
-          effort: chat.effort || 'high',
-          created_at: chat.created_at,
-          updated_at: chat.updated_at,
-        },
-        character: {
-          id: character?.id,
-          name: character?.name,
-          file_path: character?.file_path,
-          description: character?.description,
-          greeting: character?.greeting,
-          scenario: character?.scenario,
-        },
-        persona: {
-          id: persona?.id,
-          name: persona?.name,
-          file_path: persona?.file_path,
-          description: persona?.description,
-        },
-      };
-
-      if (includePrompts) {
-        payload.systemPrompts = {
-          'GEMINI.md': exportChatState.geminiMd || '',
-          characterCardMarkdown: exportChatState.characterMd || '',
-          personaCardMarkdown: exportChatState.personaMd || '',
-          chatMemoryMarkdown: exportChatState.memoryMd || '',
-        };
-      }
-
-      payload.messages = messages.map((m, idx) => {
-        const swipes = Array.isArray(m.swipes) && m.swipes.length ? m.swipes : [m.content || ''];
-        const swipeIdx = Math.min(Math.max(0, m.swipe_index || 0), swipes.length - 1);
-        const thoughtSwipes = Array.isArray(m.thought_swipes) ? m.thought_swipes : [];
-        const activeThought = thoughtSwipes[swipeIdx] || m.thoughts || '';
-
-        const msgObj = {
-          index: idx + 1,
-          id: m.id,
-          role: m.role,
-          author: m.role === 'user' ? (persona?.name || 'User') : (character?.name || 'Assistant'),
-          created_at: m.created_at,
-          content: swipes[swipeIdx] || m.content || '',
-        };
-
-        if (includeThoughts && activeThought) {
-          msgObj.thoughts = activeThought;
-        }
-        if (includeDiagnostics && swipes.length > 1) {
-          msgObj.swipe_index = swipeIdx;
-          msgObj.swipes = swipes;
-          if (includeThoughts && thoughtSwipes.length) {
-            msgObj.thought_swipes = thoughtSwipes;
-          }
-        }
-        return msgObj;
-      });
-
-      if (includeDiagnostics && exportChatState.lastGeneration) {
-        payload.lastGenerationDiagnostics = exportChatState.lastGeneration;
-      }
-
-      output = JSON.stringify(payload, null, 2);
-    } else {
-      const lines = [];
-      const nowStr = new Date().toLocaleString('ru-RU');
-      lines.push(`# 🎭 Экспорт чата #${chat.id}: ${character?.name || 'Персонаж'} & ${persona?.name || 'Игрок'}`);
-      lines.push('');
-      lines.push(`- **Дата экспорта:** ${nowStr}`);
-      lines.push(`- **Персонаж:** ${character?.name || '—'} (\`${character?.file_path || ''}\`)`);
-      lines.push(`- **Персона игрока:** ${persona?.name || '—'} (\`${persona?.file_path || ''}\`)`);
-      lines.push(`- **Модель AGY:** \`${chat.model_id}\` (${getShortModelName(chat.model_id)})`);
-      lines.push(`- **Reasoning Effort:** \`${String(chat.effort || 'high').toUpperCase()}\``);
-      lines.push(`- **Сообщений в чате:** ${messages.length}`);
-      lines.push('');
-
-      if (includePrompts) {
-        lines.push('---');
-        lines.push('## 📋 Системные промты и файлы контекста');
-        lines.push('');
-        lines.push('<details>');
-        lines.push('<summary><b>1. GEMINI.md (Глобальные инструкции)</b></summary>');
-        lines.push('');
-        lines.push('```markdown');
-        lines.push((exportChatState.geminiMd || '(пусто)').trim());
-        lines.push('```');
-        lines.push('</details>');
-        lines.push('');
-
-        lines.push('<details>');
-        lines.push(`<summary><b>2. Карточка персонажа: ${character?.name || ''} (${character?.file_path || ''})</b></summary>`);
-        lines.push('');
-        lines.push('```markdown');
-        lines.push((exportChatState.characterMd || character?.fileContent || character?.description || '(пусто)').trim());
-        lines.push('```');
-        lines.push('</details>');
-        lines.push('');
-
-        lines.push('<details>');
-        lines.push(`<summary><b>3. Персона игрока: ${persona?.name || ''} (${persona?.file_path || ''})</b></summary>`);
-        lines.push('');
-        lines.push('```markdown');
-        lines.push((exportChatState.personaMd || persona?.fileContent || persona?.description || '(пусто)').trim());
-        lines.push('```');
-        lines.push('</details>');
-        lines.push('');
-
-        if ((exportChatState.memoryMd || '').trim()) {
-          lines.push('<details>');
-          lines.push(`<summary><b>4. Память чата (${data.memoryPath || `chats/chat_${chat.id}/memory.md`})</b></summary>`);
-          lines.push('');
-          lines.push('```markdown');
-          lines.push(exportChatState.memoryMd.trim());
-          lines.push('```');
-          lines.push('</details>');
-          lines.push('');
-        }
-      }
-
-      lines.push('---');
-      lines.push(`## 💬 История диалога (${messages.length} сообщ.)`);
-      lines.push('');
-
-      messages.forEach((m, idx) => {
-        const isUser = m.role === 'user';
-        const authorLabel = isUser
-          ? `👤 ${persona?.name || 'User'} (Игрок)`
-          : `🎭 ${character?.name || 'Character'} (ИИ)`;
-        const swipes = Array.isArray(m.swipes) && m.swipes.length ? m.swipes : [m.content || ''];
-        const swipeIdx = Math.min(Math.max(0, m.swipe_index || 0), swipes.length - 1);
-        const activeText = swipes[swipeIdx] || m.content || '';
-        const thoughtSwipes = Array.isArray(m.thought_swipes) ? m.thought_swipes : [];
-        const activeThought = (thoughtSwipes[swipeIdx] || m.thoughts || '').trim();
-
-        lines.push(`### [#${idx + 1}] ${authorLabel}`);
-        if (m.created_at) {
-          lines.push(`*Время: ${m.created_at}${swipes.length > 1 ? ` • Выбран вариант ${swipeIdx + 1}/${swipes.length}` : ''}*`);
-        }
-        lines.push('');
-
-        if (includeThoughts && activeThought) {
-          lines.push('<details>');
-          lines.push(`<summary>💭 Мысли модели (${activeThought.length} симв.)</summary>`);
-          lines.push('');
-          lines.push('```text');
-          lines.push(activeThought);
-          lines.push('```');
-          lines.push('</details>');
-          lines.push('');
-        }
-
-        lines.push(activeText || '*(пустое сообщение)*');
-        lines.push('');
-
-        if (includeDiagnostics && swipes.length > 1) {
-          lines.push('<details>');
-          lines.push(`<summary>🔄 Все варианты ответа (Swipes: ${swipes.length})</summary>`);
-          lines.push('');
-          swipes.forEach((swText, sIdx) => {
-            lines.push(`#### Вариант ${sIdx + 1}/${swipes.length}${sIdx === swipeIdx ? ' (Активный)' : ''}`);
-            const swThought = (thoughtSwipes[sIdx] || '').trim();
-            if (includeThoughts && swThought) {
-              lines.push(`> 💭 Мысли варианта ${sIdx + 1}: ${swThought.replace(/\n+/g, ' ')}`);
-              lines.push('');
-            }
-            lines.push(swText || '*(пусто)*');
-            lines.push('');
-          });
-          lines.push('</details>');
-          lines.push('');
-        }
-      });
-
-      if (includeDiagnostics && exportChatState.lastGeneration) {
-        const gen = exportChatState.lastGeneration;
-        lines.push('---');
-        lines.push('## 📡 Диагностика последней генерации AGY');
-        lines.push('');
-        lines.push(`- **Статус:** \`${gen.status || 'unknown'}\``);
-        lines.push(`- **Модель:** \`${gen.modelId || chat.model_id}\` (${gen.modelLabel || ''})`);
-        lines.push(`- **Effort:** \`${gen.effort || chat.effort || 'high'}\``);
-        lines.push(`- **HTTP статус:** \`${gen.httpStatus || 0}\``);
-        const elapsedSecVal = gen.elapsedSec || (gen.elapsedMs ? (gen.elapsedMs / 1000).toFixed(1) : 0);
-        lines.push(`- **Длительность:** ${elapsedSecVal} сек.`);
-        if (gen.error) {
-          lines.push(`- **Ошибка:** \`${gen.error}\``);
-        }
-        lines.push('');
-        if (Array.isArray(gen.logs) && gen.logs.length) {
-          lines.push('### Журнал выполнения по шагам:');
-          lines.push('```text');
-          gen.logs.forEach(l => {
-            if (typeof l === 'string') {
-              lines.push(l);
-            } else {
-              lines.push(`[+${l.t || '0.0'}s] [${l.level || 'info'}] ${l.text || l.message || ''}`);
-            }
-          });
-          lines.push('```');
-          lines.push('');
-        }
-      }
-
-      output = lines.join('\n');
-    }
-
-    const previewInput = document.getElementById('exportChatContentInput');
-    const fileLabel = document.getElementById('exportFileNameLabel');
-    const sizeBadge = document.getElementById('exportSizeBadge');
-
-    if (previewInput) previewInput.value = output;
-    if (fileLabel) fileLabel.textContent = `exports/${filename}`;
-    if (sizeBadge) {
-      const kb = (new Blob([output]).size / 1024).toFixed(1);
-      const lineCount = output.split('\n').length;
-      sizeBadge.textContent = `${kb} KB • ${lineCount} строк`;
-    }
-  }
-
-  async function saveExportToWorkspaceSilently(filename, content) {
-    try {
-      await apiFetch('/api/files/file', {
-        method: 'POST',
-        body: JSON.stringify({
-          path: `exports/${filename}`,
-          content,
-        }),
-      });
-      loadFiles(state.currentFilesPath);
-      return `exports/${filename}`;
-    } catch {
-      return null;
-    }
-  }
-
-  async function copyExportedChat() {
-    const previewInput = document.getElementById('exportChatContentInput');
-    const text = previewInput ? previewInput.value : '';
-    if (!text) return showToast('Нет данных для копирования');
-
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text);
-        showToast('📋 Экспорт чата скопирован в буфер обмена!');
-        return;
-      }
-    } catch {
-      // Fallback below
-    }
-
-    try {
-      if (previewInput) {
-        previewInput.focus();
-        previewInput.select();
-        document.execCommand('copy');
-        showToast('📋 Экспорт чата скопирован в буфер обмена!');
-      }
-    } catch (err) {
-      showToast('Не удалось скопировать: ' + err.message);
-    }
-  }
-
-  async function shareExportedChat() {
-    const previewInput = document.getElementById('exportChatContentInput');
-    const text = previewInput ? previewInput.value : '';
-    const filename = exportChatState.filename || 'chat_export.md';
-    if (!text) return showToast('Нет данных для отправки');
-
-    await saveExportToWorkspaceSilently(filename, text);
-
-    if (typeof window.AndroidServer !== 'undefined' && typeof window.AndroidServer.shareExportText === 'function') {
-      window.AndroidServer.shareExportText(filename, text);
-      return;
-    }
-
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: filename,
-          text,
-        });
-        return;
-      } catch {
-        // User cancelled or share failed
-      }
-    }
-
-    await copyExportedChat();
-  }
-
-  async function downloadExportedChat() {
-    const previewInput = document.getElementById('exportChatContentInput');
-    const text = previewInput ? previewInput.value : '';
-    const filename = exportChatState.filename || 'chat_export.md';
-    if (!text) return showToast('Нет данных для сохранения');
-
-    const savedWorkspacePath = await saveExportToWorkspaceSilently(filename, text);
-    const mimeType = exportChatState.format === 'json' ? 'application/json' : 'text/markdown';
-
-    if (typeof window.AndroidServer !== 'undefined' && typeof window.AndroidServer.saveExportFile === 'function') {
-      window.AndroidServer.saveExportFile(filename, text, mimeType);
-      if (savedWorkspacePath) {
-        showToast(`💾 Также сохранено в 📁 Файлы → ${savedWorkspacePath}`);
-      }
-      return;
-    }
-
-    try {
-      const blob = new Blob([text], { type: `${mimeType};charset=utf-8` });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => {
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }, 300);
-    } catch {
-      // ignore if WebView blocks blob download
-    }
-
-    await copyExportedChat();
-    if (savedWorkspacePath) {
-      showToast(`✅ Сохранено в 📁 Файлы → ${savedWorkspacePath} (и скопировано в буфер!)`);
-    } else {
-      showToast('💾 Экспорт скопирован в буфер обмена!');
-    }
-  }
-
-  // ==================== FULL BACKUP & RESTORE ====================
-
-  async function exportFullBackup() {
-    showToast('⏳ Готовим резервную копию...');
-    try {
-      const backup = await apiFetch('/api/backup/export');
-      const text = JSON.stringify(backup, null, 2);
-      const counts = backup.counts || {};
-      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-      const filename = `agy-backup-${stamp}.json`;
-
-      if (typeof window.AndroidServer !== 'undefined' && typeof window.AndroidServer.saveExportFile === 'function') {
-        window.AndroidServer.saveExportFile(filename, text, 'application/json');
-      } else {
-        try {
-          const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = filename;
-          document.body.appendChild(a);
-          a.click();
-          setTimeout(() => {
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-          }, 300);
-        } catch {
-          await navigator.clipboard?.writeText(text).catch(() => {});
-        }
-      }
-
-      showToast(
-        `✅ Копия готова: персонажей ${counts.characters ?? 0}, чатов ${counts.chats ?? 0}, ` +
-        `сообщений ${counts.messages ?? 0}, файлов ${counts.workspaceFiles ?? 0}`
-      );
-    } catch (err) {
-      showToast(`❌ Не удалось создать копию: ${err.message}`);
-    }
-  }
-
-  async function importFullBackup() {
-    const field = document.getElementById('inputBackupJson');
-    const raw = (field?.value || '').trim();
-    if (!raw) return showToast('Вставьте содержимое файла резервной копии');
-
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return showToast('❌ Это не похоже на JSON резервной копии');
-    }
-
-    const counts = parsed.counts || {};
-    const summary =
-      `Восстановить данные из копии?\n\n` +
-      `Персонажей: ${counts.characters ?? '?'}\n` +
-      `Чатов: ${counts.chats ?? '?'}\n` +
-      `Сообщений: ${counts.messages ?? '?'}\n\n` +
-      `ВНИМАНИЕ: текущие персонажи, чаты и сообщения будут полностью заменены. Отменить это действие нельзя.`;
-    if (!window.confirm(summary)) return;
-
-    showToast('⏳ Восстанавливаем данные...');
-    try {
-      const res = await apiFetch('/api/backup/import', {
-        method: 'POST',
-        body: JSON.stringify({ backup: parsed }),
-      });
-      if (field) field.value = '';
-      showToast(`✅ ${res.message || 'Данные восстановлены'}`);
-      // Reload characters/personas/chats so the UI reflects the restored data.
-      await initApp();
-    } catch (err) {
-      showToast(`❌ Восстановление не удалось: ${err.message}`);
-    }
-  }
-
-  // ==================== POPUP IMAGE VIEWER (2-FINGER PINCH-TO-ZOOM & PAN) ====================
-  const viewerState = {
-    scale: 1,
-    tx: 0,
-    ty: 0,
-    mode: null,
-    startDist: 0,
-    startScale: 1,
-    startMidX: 0,
-    startMidY: 0,
-    startTx: 0,
-    startTy: 0,
-    panStartX: 0,
-    panStartY: 0,
-    lastTapTime: 0,
-    moved: false,
-  };
-
-  function applyViewerTransform(animate = false) {
-    const img = document.getElementById('imageViewerImg');
-    const badge = document.getElementById('imageViewerZoomBadge');
-    if (img) {
-      img.style.transition = animate ? 'transform 0.18s ease-out' : 'none';
-      img.style.transform = `translate3d(${viewerState.tx}px, ${viewerState.ty}px, 0) scale(${viewerState.scale})`;
-    }
-    if (badge) {
-      badge.textContent = `${Math.round(viewerState.scale * 100)}%`;
-    }
-  }
-
-  function resetAvatarZoom(animate = true) {
-    viewerState.scale = 1;
-    viewerState.tx = 0;
-    viewerState.ty = 0;
-    viewerState.mode = null;
-    applyViewerTransform(animate);
-  }
-
-  function openAvatarViewer(src, title = 'Изображение персонажа') {
-    const modal = document.getElementById('imageViewerModal');
-    const img = document.getElementById('imageViewerImg');
-    const titleEl = document.getElementById('imageViewerTitle');
-    if (!modal || !img) return;
-
-    const resolvedSrc = src ? resolveAvatarUrl(src) : FALLBACK_AVATAR;
-    img.src = resolvedSrc;
-    if (titleEl) {
-      titleEl.textContent = title || 'Изображение';
-    }
-    resetAvatarZoom(false);
-    modal.classList.remove('hidden');
-  }
-
-  function closeAvatarViewer() {
-    const modal = document.getElementById('imageViewerModal');
-    if (modal) {
-      modal.classList.add('hidden');
-    }
-    resetAvatarZoom(false);
-  }
-
-  function initImageViewerGestures() {
-    const stage = document.getElementById('imageViewerStage');
-    const img = document.getElementById('imageViewerImg');
-    if (!stage || !img) return;
-
-    function getTouchDistance(t0, t1) {
-      return Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
-    }
-
-    function getTouchMidpoint(t0, t1) {
-      return {
-        x: (t0.clientX + t1.clientX) / 2,
-        y: (t0.clientY + t1.clientY) / 2,
-      };
-    }
-
-    stage.addEventListener(
-      'touchstart',
-      (e) => {
-        if (e.touches.length === 2) {
-          e.preventDefault();
-          viewerState.mode = 'pinch';
-          viewerState.moved = true;
-          viewerState.startDist = Math.max(getTouchDistance(e.touches[0], e.touches[1]), 10);
-          viewerState.startScale = viewerState.scale;
-          const mid = getTouchMidpoint(e.touches[0], e.touches[1]);
-          viewerState.startMidX = mid.x;
-          viewerState.startMidY = mid.y;
-          viewerState.startTx = viewerState.tx;
-          viewerState.startTy = viewerState.ty;
-        } else if (e.touches.length === 1) {
-          viewerState.mode = 'pan';
-          viewerState.moved = false;
-          viewerState.panStartX = e.touches[0].clientX;
-          viewerState.panStartY = e.touches[0].clientY;
-          viewerState.startTx = viewerState.tx;
-          viewerState.startTy = viewerState.ty;
-        }
-      },
-      { passive: false }
-    );
-
-    stage.addEventListener(
-      'touchmove',
-      (e) => {
-        if (e.touches.length === 2) {
-          e.preventDefault();
-          if (viewerState.mode !== 'pinch') {
-            viewerState.mode = 'pinch';
-            viewerState.startDist = Math.max(getTouchDistance(e.touches[0], e.touches[1]), 10);
-            viewerState.startScale = viewerState.scale;
-            const midInit = getTouchMidpoint(e.touches[0], e.touches[1]);
-            viewerState.startMidX = midInit.x;
-            viewerState.startMidY = midInit.y;
-            viewerState.startTx = viewerState.tx;
-            viewerState.startTy = viewerState.ty;
-          }
-          const curDist = Math.max(getTouchDistance(e.touches[0], e.touches[1]), 10);
-          const ratio = curDist / viewerState.startDist;
-          const nextScale = Math.min(Math.max(viewerState.startScale * ratio, 0.5), 6);
-
-          const rect = stage.getBoundingClientRect();
-          const centerX = rect.left + rect.width / 2;
-          const centerY = rect.top + rect.height / 2;
-          const mid = getTouchMidpoint(e.touches[0], e.touches[1]);
-
-          const scaleRatio = nextScale / viewerState.startScale;
-          const focalOffsetX = viewerState.startMidX - centerX;
-          const focalOffsetY = viewerState.startMidY - centerY;
-          const panDx = mid.x - viewerState.startMidX;
-          const panDy = mid.y - viewerState.startMidY;
-
-          viewerState.scale = nextScale;
-          viewerState.tx = focalOffsetX - (focalOffsetX - viewerState.startTx) * scaleRatio + panDx;
-          viewerState.ty = focalOffsetY - (focalOffsetY - viewerState.startTy) * scaleRatio + panDy;
-          viewerState.moved = true;
-          applyViewerTransform(false);
-        } else if (e.touches.length === 1 && viewerState.mode === 'pan') {
-          const dx = e.touches[0].clientX - viewerState.panStartX;
-          const dy = e.touches[0].clientY - viewerState.panStartY;
-          if (Math.hypot(dx, dy) > 6) {
-            viewerState.moved = true;
-          }
-          if (viewerState.moved) {
-            e.preventDefault();
-            viewerState.tx = viewerState.startTx + dx;
-            viewerState.ty = viewerState.startTy + dy;
-            applyViewerTransform(false);
-          }
-        }
-      },
-      { passive: false }
-    );
-
-    stage.addEventListener(
-      'touchend',
-      (e) => {
-        if (e.touches.length === 1) {
-          // Smooth transition from 2-finger pinch to 1-finger drag without jump
-          viewerState.mode = 'pan';
-          viewerState.panStartX = e.touches[0].clientX;
-          viewerState.panStartY = e.touches[0].clientY;
-          viewerState.startTx = viewerState.tx;
-          viewerState.startTy = viewerState.ty;
-          return;
-        }
-
-        if (e.touches.length === 0) {
-          const wasMoved = viewerState.moved;
-          viewerState.mode = null;
-
-          // Snap back gently if zoomed out below 1x and user released fingers
-          if (viewerState.scale < 0.85) {
-            resetAvatarZoom(true);
-            return;
-          }
-
-          if (!wasMoved && e.changedTouches && e.changedTouches.length === 1) {
-            const now = Date.now();
-            const tapTouch = e.changedTouches[0];
-            if (now - viewerState.lastTapTime < 280) {
-              // Double-tap toggles 1x <-> 2.5x zoom around tap point
-              viewerState.lastTapTime = 0;
-              if (viewerState.scale > 1.2) {
-                resetAvatarZoom(true);
-              } else {
-                const rect = stage.getBoundingClientRect();
-                const cx = rect.left + rect.width / 2;
-                const cy = rect.top + rect.height / 2;
-                const targetScale = 2.5;
-                viewerState.tx = (cx - tapTouch.clientX) * (targetScale - 1) * 0.6;
-                viewerState.ty = (cy - tapTouch.clientY) * (targetScale - 1) * 0.6;
-                viewerState.scale = targetScale;
-                applyViewerTransform(true);
-              }
-            } else {
-              viewerState.lastTapTime = now;
-              // Close if user tapped outside the image on dark backdrop while at 1x zoom
-              if (e.target === stage && viewerState.scale <= 1.05) {
-                setTimeout(() => {
-                  if (viewerState.lastTapTime === now) {
-                    closeAvatarViewer();
-                  }
-                }, 260);
-              }
-            }
-          }
-        }
-      },
-      { passive: false }
-    );
-
-    // Desktop / mouse wheel zoom support
-    stage.addEventListener(
-      'wheel',
-      (e) => {
-        e.preventDefault();
-        const factor = e.deltaY < 0 ? 1.15 : 0.87;
-        const nextScale = Math.min(Math.max(viewerState.scale * factor, 0.5), 6);
-        viewerState.scale = nextScale;
-        if (nextScale <= 1.02) {
-          viewerState.tx = 0;
-          viewerState.ty = 0;
-        }
-        applyViewerTransform(false);
-      },
-      { passive: false }
-    );
-  }
-
-  // Handle adaptive chat input, keyboard auto-hide, and scroll auto-hide on Chats tab
-  document.addEventListener('DOMContentLoaded', () => {
-    initImageViewerGestures();
-    const chatInput = document.getElementById('chatInput');
-    if (chatInput) {
-      chatInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey && window.innerWidth > 700) {
-          e.preventDefault();
-          sendMessage();
-        }
-      });
-      chatInput.addEventListener('input', () => {
-        autoResizeChatInput();
-        state.isKeyboardOpen = true;
-        setBottomNavHidden(true);
-      });
-      chatInput.addEventListener('focus', () => {
-        autoResizeChatInput();
-        state.isKeyboardOpen = true;
-        setBottomNavHidden(true);
-      });
-      chatInput.addEventListener('click', () => {
-        state.isKeyboardOpen = true;
-        setBottomNavHidden(true);
-      });
-      chatInput.addEventListener('blur', () => {
-        setTimeout(() => {
-          if (document.activeElement !== chatInput) {
-            state.isKeyboardOpen = false;
-            setBottomNavHidden(false);
-          }
-        }, 160);
-      });
-    }
-
-    window.onAndroidKeyboardVisibilityChanged = (kbOpen) => {
-      state.isKeyboardOpen = !!kbOpen;
-      const isChatsTab = document.getElementById('tab-chats')?.classList.contains('active');
-      if (isChatsTab) {
-        setBottomNavHidden(!!kbOpen);
-      }
+  function buildExport(src, o) {
+    const { chat, character, persona } = src.data;
+    const messages = src.data.messages || [];
+    const ext = o.format === 'json' ? 'json' : 'md';
+    const filename = `chat_${chat.id}_${sanitizeFilenamePart(character && character.name)}.${ext}`;
+    const variants = (m) => {
+      const swipes = Array.isArray(m.swipes) && m.swipes.length ? m.swipes : [m.content || ''];
+      const idx = Math.min(Math.max(0, Number(m.swipe_index) || 0), swipes.length - 1);
+      const thoughtSwipes = Array.isArray(m.thought_swipes) ? m.thought_swipes : [];
+      return { swipes, idx, text: swipes[idx] || m.content || '', thoughts: m.thoughts || thoughtSwipes[idx] || '', thoughtSwipes };
     };
 
-    if (window.visualViewport) {
-      let baseHeight = window.visualViewport.height || window.innerHeight;
-      window.visualViewport.addEventListener('resize', () => {
-        const curH = window.visualViewport.height;
-        if (curH > baseHeight) baseHeight = curH;
-        const isChatsTab = document.getElementById('tab-chats')?.classList.contains('active');
-        const kbActive = (baseHeight - curH) > 110;
-        state.isKeyboardOpen = kbActive;
-        if (isChatsTab) {
-          setBottomNavHidden(kbActive);
+    if (o.format === 'json') {
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        appVersion: state.webVersion || (state.updateInfo && state.updateInfo.currentVersion) || '',
+        chat: { id: chat.id, title: chat.title, model_id: chat.model_id, model_label: modelName(chat.model_id), effort: chat.effort, created_at: chat.created_at || '' },
+        character: { id: character && character.id, name: character && character.name, file_path: character && character.file_path, first_message: character && character.first_message },
+        persona: { id: persona && persona.id, name: persona && persona.name, file_path: persona && persona.file_path },
+      };
+      if (o.prompts) {
+        payload.context = src.systemPrompt !== null
+          ? { systemPrompt: src.systemPrompt }
+          : { 'GEMINI.md': src.rules, characterCard: src.characterMd, personaCard: src.personaMd, chatMemory: src.memoryMd };
+      }
+      payload.messages = messages.map((m, i) => {
+        const v = variants(m);
+        const out = { index: i + 1, id: m.id, role: m.role, author: m.role === 'user' ? (persona && persona.name) : (character && character.name), created_at: m.created_at, content: v.text };
+        if (o.thoughts && v.thoughts) out.thoughts = v.thoughts;
+        if (o.variants && v.swipes.length > 1) {
+          out.swipe_index = v.idx;
+          out.swipes = v.swipes;
+          if (o.thoughts && v.thoughtSwipes.length) out.thought_swipes = v.thoughtSwipes;
         }
+        return out;
+      });
+      if (o.variants && src.generation) payload.lastGenerationDiagnostics = src.generation;
+      return { filename, text: JSON.stringify(payload, null, 2), mime: 'application/json' };
+    }
+
+    const lines = [];
+    const charName = (character && character.name) || 'Персонаж';
+    const personaName = (persona && persona.name) || 'Игрок';
+    lines.push(`# ${isDefaultChatTitle(chat.title, charName) ? charName : chat.title}`);
+    lines.push('');
+    lines.push(`- **Персонаж:** ${charName}`);
+    lines.push(`- **Персона:** ${personaName}`);
+    lines.push(`- **Модель:** ${modelSummary(chat.model_id, chat.effort)} (\`${chat.model_id}\`)`);
+    lines.push(`- **Сообщений:** ${messages.length}`);
+    lines.push(`- **Экспорт:** ${new Date().toLocaleString('ru-RU')}`);
+    lines.push('');
+    if (o.prompts) {
+      lines.push('---', '', '## Контекст', '');
+      const block = (title, text) => {
+        if (!String(text || '').trim()) return;
+        lines.push('<details>', `<summary><b>${title}</b></summary>`, '', '```markdown', String(text).trim(), '```', '</details>', '');
+      };
+      if (src.systemPrompt !== null) {
+        block('Итоговый системный промпт', src.systemPrompt);
+      } else {
+        block('Системный промпт (GEMINI.md)', src.rules);
+        block(`Карточка персонажа: ${charName}`, src.characterMd);
+        block(`Персона: ${personaName}`, src.personaMd);
+        block('Память чата', src.memoryMd);
+      }
+    }
+    lines.push('---', '', '## История', '');
+    messages.forEach((m, i) => {
+      const v = variants(m);
+      const author = m.role === 'user' ? personaName : charName;
+      lines.push(`### ${i + 1}. ${author}`);
+      const meta = [m.created_at ? m.created_at + ' UTC' : '', v.swipes.length > 1 ? `вариант ${v.idx + 1}/${v.swipes.length}` : ''].filter(Boolean).join(' · ');
+      if (meta) lines.push(`*${meta}*`);
+      lines.push('');
+      if (o.thoughts && v.thoughts.trim()) {
+        lines.push('<details>', `<summary>Мысли (${v.thoughts.length} симв.)</summary>`, '', '```text', v.thoughts.trim(), '```', '</details>', '');
+      }
+      lines.push(v.text || '*(пусто)*', '');
+      if (o.variants && v.swipes.length > 1) {
+        lines.push('<details>', `<summary>Все варианты (${v.swipes.length})</summary>`, '');
+        v.swipes.forEach((s, si) => lines.push(`#### Вариант ${si + 1}${si === v.idx ? ' (выбран)' : ''}`, '', s || '*(пусто)*', ''));
+        lines.push('</details>', '');
+      }
+    });
+    if (o.variants && src.generation) {
+      const g = src.generation;
+      lines.push('---', '', '## Последняя генерация', '');
+      lines.push(`- **Статус:** ${g.status || '—'}`, `- **Модель:** ${g.modelId || chat.model_id}`, `- **Время:** ${g.elapsedSec || '—'} с`);
+      if (g.error) lines.push(`- **Ошибка:** ${g.error}`);
+      if (Array.isArray(g.logs) && g.logs.length) lines.push('', '```text', ...g.logs.map(l => (typeof l === 'string' ? l : JSON.stringify(l))), '```');
+      lines.push('');
+    }
+    return { filename, text: lines.join('\n'), mime: 'text/markdown' };
+  }
+
+  async function openExport(chatId) {
+    const id = Number(chatId);
+    const o = { format: 'markdown', thoughts: false, prompts: false, variants: false };
+    let src = null;
+    let result = null;
+
+    const toggleRow = (key, title, sub) => `<button class="row" data-act="toggle" data-key="${key}"><div class="row-body"><div class="row-title">${title}</div><div class="row-sub">${sub}</div></div><span class="switch${o[key] ? ' on' : ''}"></span></button>`;
+    const render = () => {
+      if (!src) return '<div class="empty"><span class="spinner"></span></div>';
+      result = buildExport(src, o);
+      const kb = (new Blob([result.text]).size / 1024).toFixed(1);
+      return `
+        <div class="segmented"><button class="${o.format === 'markdown' ? 'active' : ''}" data-act="fmt" data-fmt="markdown">Markdown</button><button class="${o.format === 'json' ? 'active' : ''}" data-act="fmt" data-fmt="json">JSON</button></div>
+        <div class="section"><div class="list flush">
+          ${toggleRow('thoughts', 'Мысли модели', 'Рассуждения рядом с ответами')}
+          ${toggleRow('prompts', 'Контекст', 'Системный промпт, карточки и память')}
+          ${toggleRow('variants', 'Все варианты и диагностика', 'Свайпы и журнал последней генерации')}
+        </div></div>
+        <div class="section"><div class="section-title">${escapeHtml(result.filename)} · ${kb} КБ</div>
+          <textarea class="textarea mono" readonly style="min-height:30vh">${escapeHtml(result.text.slice(0, 20000))}${result.text.length > 20000 ? '\n…' : ''}</textarea>
+        </div>`;
+    };
+
+    const layer = openSheet({
+      title: 'Экспорт чата',
+      full: true,
+      body: render(),
+      footer: `<div class="btn-row"><button class="btn btn-secondary" data-act="copy">${ic('copy')}Копировать</button><button class="btn btn-secondary" data-act="share">${ic('share')}Поделиться</button></div><button class="btn btn-primary btn-block" style="margin-top:10px" data-act="save">${ic('download')}Сохранить файл</button>`,
+    });
+    layer.chatId = id;
+    const rerender = () => {
+      const body = $('.sheet-body', layer.el);
+      const scroll = body.scrollTop;
+      layer.setBody(render());
+      body.scrollTop = scroll;
+    };
+    bindActs(layer, {
+      fmt: (el) => {
+        o.format = el.dataset.fmt;
+        rerender();
+      },
+      toggle: (el) => {
+        o[el.dataset.key] = !o[el.dataset.key];
+        rerender();
+      },
+      copy: () => result && copyText(result.text),
+      share: () => {
+        if (!result) return;
+        if (hasBridge && typeof window.AndroidServer.shareExportText === 'function') {
+          window.AndroidServer.shareExportText(result.filename, result.text);
+        } else if (navigator.share) {
+          navigator.share({ title: result.filename, text: result.text }).catch(() => {});
+        } else {
+          copyText(result.text);
+        }
+      },
+      save: () => result && saveFile(result.filename, result.text, result.mime),
+    });
+
+    try {
+      const data = state.room && state.room.chatId === id ? state.room.data : await api(`/api/chats/${id}`);
+      let systemPrompt = null;
+      let rules = '';
+      let characterMd = '';
+      let personaMd = '';
+      let memoryMd = '';
+      if (can.promptPreview()) {
+        try {
+          systemPrompt = (await api(`/api/chats/${id}/system-prompt`)).systemPrompt || '';
+        } catch (e) {
+          systemPrompt = null;
+        }
+      }
+      if (systemPrompt === null) {
+        [rules, characterMd, personaMd, memoryMd] = await Promise.all([
+          fetchFileText('GEMINI.md'),
+          fetchFileText(data.character && data.character.file_path),
+          fetchFileText(data.persona && data.persona.file_path),
+          fetchFileText(data.chat.memory_file_path),
+        ]);
+      }
+      let generation = (state.lastGeneration && state.lastGeneration[id]) || null;
+      if (!generation) {
+        try {
+          const g = await api(`/api/chats/${id}/generation`);
+          generation = g.generation || g.lastGeneration || null;
+        } catch (e) {
+          generation = null;
+        }
+      }
+      src = { data, systemPrompt, rules, characterMd, personaMd, memoryMd, generation };
+      if (!layer.closed) rerender();
+    } catch (e) {
+      layer.setBody(emptyHtml('alert', 'Не удалось подготовить экспорт', escapeHtml(e.message)));
+    }
+  }
+
+  // ==========================================================================
+  // CHARACTERS TAB
+  // ==========================================================================
+  function chatsOfCharacter(charId) {
+    return sortChats(state.chats.filter(c => Number(c.character_id) === Number(charId)));
+  }
+
+  function renderCharactersTab() {
+    const pane = $('#tab-characters');
+    if (!pane) return;
+    const header = state.charsSearchOpen
+      ? `<div class="appbar"><label class="search-field">${ic('search', 'ic-sm')}<input id="charsSearchInput" type="search" placeholder="Поиск персонажей" value="${escapeHtml(state.charsQuery)}" autocomplete="off" /><button class="icon-btn sm" data-action="chars-search-close" aria-label="Закрыть поиск">${ic('x', 'ic-sm')}</button></label></div>`
+      : `<div class="appbar"><h1 class="appbar-title">Персонажи</h1><div class="appbar-actions">
+          ${state.characters.length > 1 ? `<button class="icon-btn" data-action="chars-search-open" aria-label="Поиск">${ic('search')}</button>` : ''}
+          <button class="icon-btn accent" data-action="new-character" aria-label="Новый персонаж">${ic('plus')}</button></div></div>`;
+    pane.innerHTML = `<div class="tab-inner">${header}<div id="charsToolbar"></div><div id="charsList"></div></div>`;
+    renderCharactersList();
+    if (state.charsSearchOpen) setTimeout(() => {
+      const input = $('#charsSearchInput');
+      if (input) input.focus();
+    }, 30);
+  }
+
+  function renderCharactersList() {
+    const host = $('#charsList');
+    const toolbar = $('#charsToolbar');
+    if (!host || !toolbar) return;
+    if (!state.loaded) {
+      toolbar.innerHTML = '';
+      host.innerHTML = state.loadError ? loadErrorHtml() : '<div class="char-grid">' + Array.from({ length: 4 }, () => '<div class="skeleton" style="aspect-ratio:3/4.6"></div>').join('') + '</div>';
+      return;
+    }
+    if (!state.characters.length) {
+      toolbar.innerHTML = '';
+      host.innerHTML = emptyHtml('mask', 'Персонажей пока нет', 'Персонаж — это имя, портрет, описание (оно попадает в &lt;character_persona&gt;) и приветствие, с которого начинается чат.',
+        `<button class="btn btn-primary" data-action="new-character">${ic('plus')}Создать персонажа</button>`);
+      return;
+    }
+    toolbar.innerHTML = state.characters.length > 1
+      ? `<div class="chips" style="margin-bottom:12px"><button class="chip sm${state.charsSort === 'name' ? ' active' : ''}" data-action="chars-sort" data-sort="name">По имени</button><button class="chip sm${state.charsSort === 'recent' ? ' active' : ''}" data-action="chars-sort" data-sort="recent">Недавние</button></div>`
+      : '';
+    const q = state.charsQuery.trim().toLowerCase();
+    let list = state.characters.filter(c => !q || c.name.toLowerCase().includes(q) || String(c.description_preview || '').toLowerCase().includes(q));
+    if (state.charsSort === 'recent') {
+      const lastOf = (c) => {
+        const t = chatActivityTime(chatsOfCharacter(c.id)[0]);
+        return t ? t.getTime() : 0;
+      };
+      list = list.slice().sort((a, b) => lastOf(b) - lastOf(a) || a.name.localeCompare(b.name, 'ru'));
+    } else {
+      list = list.slice().sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    }
+    host.innerHTML = list.length
+      ? `<div class="char-grid">${list.map(c => {
+        const n = chatsOfCharacter(c.id).length;
+        const desc = stripMarkdownPreview(c.description_preview || c.fileContent || '') || 'Без описания';
+        return `<div class="char-card" role="button" tabindex="0" data-action="open-character" data-id="${c.id}">
+          <div class="char-portrait"><img src="${escapeHtml(resolveAvatarUrl(c.avatar_url, c.name))}" alt="" /><div class="char-portrait-name">${escapeHtml(c.name)}</div></div>
+          <div class="char-card-body"><div class="char-card-desc">${escapeHtml(desc)}</div><div class="char-card-meta">${ic('chat')}${n ? `${n} ${pluralRu(n, 'чат', 'чата', 'чатов')}` : 'Нет чатов'}</div></div>
+        </div>`;
+      }).join('')}</div>`
+      : emptyHtml('search', 'Ничего не найдено', '');
+  }
+
+  function openCharacterPage(charId) {
+    const id = Number(charId);
+    if (!findChar(id)) return;
+    let showFullDesc = false;
+    let showFullGreeting = false;
+
+    const render = () => {
+      const c = findChar(id);
+      if (!c) return emptyHtml('mask', 'Персонаж удалён', '');
+      const chats = chatsOfCharacter(id);
+      const desc = String(c.fileContent || c.description_preview || '').trim();
+      const greeting = String(c.first_message || '').trim();
+      return `
+        <div class="hero" data-act="view"><img src="${escapeHtml(resolveAvatarUrl(c.avatar_url, c.name))}" alt="" /></div>
+        <h1 class="hero-name">${escapeHtml(c.name)}</h1>
+        <div class="hero-meta">${chats.length ? `${chats.length} ${pluralRu(chats.length, 'чат', 'чата', 'чатов')}` : 'Ещё нет чатов'}</div>
+        <div class="section">
+          <div class="section-title">Приветствие</div>
+          ${greeting
+            ? `<div class="card card-pad"><div class="prose msg-text${!showFullGreeting && greeting.length > 360 ? ' clamp' : ''}">${formatRoleplayHtml(greeting, { dialogue: prefs.dialogue })}</div>${greeting.length > 360 ? `<button class="btn btn-ghost btn-sm" style="margin-top:6px;padding:0" data-act="more-greeting">${showFullGreeting ? 'Свернуть' : 'Показать полностью'}</button>` : ''}</div>`
+            : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Нет приветствия — первым пишет игрок.</div>'}
+        </div>
+        <div class="section">
+          <div class="section-title">Описание · попадает в &lt;character_persona&gt;</div>
+          ${desc
+            ? `<div class="card card-pad"><div class="prose${!showFullDesc && desc.length > 420 ? ' clamp' : ''}">${escapeHtml(desc)}</div>${desc.length > 420 ? `<button class="btn btn-ghost btn-sm" style="margin-top:6px;padding:0" data-act="more-desc">${showFullDesc ? 'Свернуть' : 'Показать полностью'}</button>` : ''}</div>`
+            : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Описание не заполнено — модель почти ничего не знает о персонаже.</div>'}
+        </div>
+        ${chats.length ? `<div class="section"><div class="section-title">Чаты</div><div class="list">${chats.map(ch => `<button class="row" data-act="chat" data-id="${ch.id}"><span class="row-icon">${ic('chat')}</span><div class="row-body"><div class="row-title">${escapeHtml(isDefaultChatTitle(ch.title, c.name) ? (ch.persona_name || 'Чат') : ch.title)}</div><div class="row-sub">${escapeHtml(stripMarkdownPreview(ch.last_message) || 'Без сообщений')}</div></div><span class="row-value">${escapeHtml(formatRelativeTime(chatActivityTime(ch)))}</span></button>`).join('')}</div></div>` : ''}
+      `;
+    };
+
+    const c0 = findChar(id);
+    const layer = openPage({
+      title: c0.name,
+      body: render(),
+      actions: `<button class="icon-btn" data-act="edit" aria-label="Изменить">${ic('edit')}</button>`,
+      footer: `<button class="btn btn-primary btn-block" data-act="start">${ic('chat-plus')}Начать новый чат</button>`,
+    });
+    layer.cardId = id;
+    layer.cardKind = 'character';
+    layer.refresh = () => {
+      const c = findChar(id);
+      if (c) layer.setTitle(escapeHtml(c.name));
+      const body = $('.page-body', layer.el);
+      const scroll = body.scrollTop;
+      layer.setBody(render());
+      body.scrollTop = scroll;
+    };
+    bindActs(layer, {
+      view: () => {
+        const c = findChar(id);
+        if (c) openImageViewer(resolveAvatarUrl(c.avatar_url, c.name), c.name);
+      },
+      edit: () => openCharacterEditor(id),
+      start: () => openNewChat(id),
+      chat: (el) => {
+        layer.close();
+        closeLayersAbove(null);
+        openChatRoom(Number(el.dataset.id));
+      },
+      'more-desc': () => {
+        showFullDesc = !showFullDesc;
+        layer.refresh();
+      },
+      'more-greeting': () => {
+        showFullGreeting = !showFullGreeting;
+        layer.refresh();
+      },
+    });
+  }
+
+  function closeLayersAbove(layer) {
+    while (layerStack.length && topLayer() !== layer) closeLayer(topLayer(), { immediate: true });
+  }
+
+  // --- card editor (characters & personas) ----------------------------------
+  function downscaleImage(file, maxSide) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error || new Error('Не удалось прочитать файл'));
+      reader.onload = () => {
+        const dataUrl = reader.result;
+        const img = new Image();
+        img.onload = () => {
+          const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+          if (scale === 1 && file.size < 300 * 1024) {
+            resolve(dataUrl);
+            return;
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(img.width * scale));
+          canvas.height = Math.max(1, Math.round(img.height * scale));
+          canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+          resolve(canvas.toDataURL('image/jpeg', 0.84));
+        };
+        img.onerror = () => resolve(dataUrl);
+        img.src = dataUrl;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /**
+   * Shared editor for characters (kind='character') and personas (kind='persona').
+   * The description is saved verbatim as the card file (rawFileContent) — that
+   * exact text is what the model receives inside <character_persona>/<user_persona>.
+   */
+  function openCardEditor(kind, id) {
+    const isChar = kind === 'character';
+    const item = id ? (isChar ? findChar(id) : findPersona(id)) : null;
+    const init = {
+      name: item ? item.name : '',
+      description: item ? String(item.fileContent ?? item.description_preview ?? '') : '',
+      greeting: item && isChar ? (item.first_message || '') : '',
+      avatarUrl: item ? (item.avatar_url || '') : '',
+      filePath: item ? (item.file_path || '') : '',
+    };
+    const cur = Object.assign({}, init);
+    let saving = false;
+    const dirty = () => Object.keys(init).some(k => init[k] !== cur[k]);
+    const noun = isChar ? 'персонажа' : 'персону';
+    const tag = isChar ? '&lt;character_persona&gt;' : '&lt;user_persona&gt;';
+    const chatsCount = item && isChar ? chatsOfCharacter(item.id).length : 0;
+
+    const body = `
+      <div class="avatar-picker">
+        <button class="avatar-picker-btn${isChar ? '' : ' round'}" data-act="avatar" aria-label="Изменить изображение">
+          <img data-role="avatar" src="${escapeHtml(resolveAvatarUrl(cur.avatarUrl, cur.name))}" alt="" />
+          <span class="avatar-picker-badge">${ic('camera')}</span>
+        </button>
+        <input type="file" accept="image/*" class="hidden" data-role="file" />
+      </div>
+      <label class="field"><span class="field-label">Имя</span>
+        <input class="input" data-field="name" value="${escapeHtml(cur.name)}" placeholder="${isChar ? 'Например, Кира' : 'Как вас зовут в истории'}" maxlength="80" autocomplete="off" /></label>
+      <label class="field"><span class="field-label">${isChar ? 'Описание персонажа' : 'Описание персоны'}</span>
+        <textarea class="textarea" data-field="description" placeholder="${isChar ? 'Кто это: внешность, характер, манера речи, прошлое, отношения с {{user}}…' : 'Кто вы: внешность, характер, навыки, цели…'}">${escapeHtml(cur.description)}</textarea>
+        <span class="field-hint">Текст целиком попадает в системный промпт внутри ${tag}. Макросы {{char}} и {{user}} подставляются.</span></label>
+      ${isChar ? `<label class="field"><span class="field-label">Приветствие</span>
+        <textarea class="textarea" data-field="greeting" placeholder="Первое сообщение персонажа в новом чате. Можно оставить пустым.">${escapeHtml(cur.greeting)}</textarea>
+        <div class="macro-chips"><button class="chip sm" data-act="macro" data-macro="{{char}}">{{char}}</button><button class="chip sm" data-act="macro" data-macro="{{user}}">{{user}}</button></div></label>` : ''}
+      <details class="disclosure section"><summary>Дополнительно ${ic('chevron-down', 'ic-sm')}</summary>
+        <label class="field"><span class="field-label">Файл в workspace</span>
+          <input class="input mono" data-field="filePath" value="${escapeHtml(cur.filePath)}" placeholder="${isChar ? 'characters/имя.md' : 'personas/имя.md'} — создастся автоматически" autocomplete="off" /></label>
+      </details>
+      ${item ? `<div class="danger-zone"><button class="btn btn-danger btn-block" data-act="delete">${ic('trash')}Удалить ${noun}</button>
+        ${chatsCount ? `<p class="section-hint">${chatsCount} ${pluralRu(chatsCount, 'чат останется', 'чата останутся', 'чатов останутся')} без карточки персонажа.</p>` : ''}</div>` : ''}`;
+
+    const title = item ? (isChar ? 'Изменить персонажа' : 'Изменить персону') : (isChar ? 'Новый персонаж' : 'Новая персона');
+    const layer = openPage({
+      title,
+      backIcon: 'x',
+      body,
+      actions: `<button class="btn btn-ghost" data-act="save">Сохранить</button>`,
+      onBack: () => {
+        if (!dirty() || saving) return true;
+        confirmDialog({ title: 'Выйти без сохранения?', message: 'Изменения будут потеряны.', confirmText: 'Выйти', cancelText: 'Остаться', danger: true })
+          .then(ok => ok && layer.close());
+        return false;
+      },
+    });
+
+    const updateTitle = () => layer.setTitle(escapeHtml(title) + (dirty() ? '<span class="dirty-dot" title="Есть несохранённые изменения"></span>' : ''));
+    const updateAvatar = () => {
+      $('[data-role="avatar"]', layer.el).src = resolveAvatarUrl(cur.avatarUrl, cur.name);
+    };
+    $$('textarea', layer.el).forEach(t => autoGrow(t));
+    layer.el.addEventListener('input', (e) => {
+      const f = e.target.dataset.field;
+      if (!f) return;
+      cur[f] = e.target.value;
+      if (e.target.tagName === 'TEXTAREA') autoGrow(e.target);
+      if (f === 'name' && !cur.avatarUrl) updateAvatar();
+      updateTitle();
+    });
+    const fileInput = $('[data-role="file"]', layer.el);
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      fileInput.value = '';
+      if (!file) return;
+      try {
+        const dataUrl = await downscaleImage(file, 640);
+        const res = await api('/api/upload-avatar', { method: 'POST', body: { base64Data: dataUrl, filename: file.name } });
+        cur.avatarUrl = res.avatarUrl || dataUrl;
+        updateAvatar();
+        updateTitle();
+      } catch (e) {
+        toast('Не удалось загрузить изображение: ' + e.message, { type: 'error' });
+      }
+    });
+
+    bindActs(layer, {
+      avatar: () => actionSheet({
+        title: 'Изображение',
+        items: [
+          { icon: 'image', label: 'Выбрать с устройства', onSelect: () => fileInput.click() },
+          { icon: 'eye', label: 'Посмотреть', hidden: !cur.avatarUrl, onSelect: () => openImageViewer(resolveAvatarUrl(cur.avatarUrl, cur.name), cur.name) },
+          {
+            icon: 'trash',
+            label: 'Заменить на инициалы',
+            hidden: !cur.avatarUrl,
+            danger: true,
+            onSelect: () => {
+              cur.avatarUrl = '';
+              updateAvatar();
+              updateTitle();
+            },
+          },
+        ],
+      }),
+      macro: (el) => {
+        const ta = $('[data-field="greeting"]', layer.el);
+        const s = ta.selectionStart || ta.value.length;
+        const e2 = ta.selectionEnd || s;
+        ta.value = ta.value.slice(0, s) + el.dataset.macro + ta.value.slice(e2);
+        ta.focus();
+        ta.setSelectionRange(s + el.dataset.macro.length, s + el.dataset.macro.length);
+        cur.greeting = ta.value;
+        autoGrow(ta);
+        updateTitle();
+      },
+      save: async (btn) => {
+        if (saving) return;
+        const name = cur.name.trim();
+        if (!name) {
+          toast(isChar ? 'Введите имя персонажа' : 'Введите имя персоны');
+          $('[data-field="name"]', layer.el).focus();
+          return;
+        }
+        saving = true;
+        btn.disabled = true;
+        const payload = {
+          name,
+          filePath: cur.filePath.trim(),
+          avatarUrl: cur.avatarUrl,
+          description: cur.description,
+          rawFileContent: cur.description,
+        };
+        if (isChar) payload.firstMessage = cur.greeting;
+        try {
+          const base = isChar ? '/api/characters' : '/api/personas';
+          await api(item ? `${base}/${item.id}` : base, { method: item ? 'PUT' : 'POST', body: payload });
+          await loadCards();
+          loadChats();
+          if (state.room) {
+            try {
+              state.room.data = await api(`/api/chats/${state.room.chatId}`);
+              renderRoomHeader();
+              syncFeed({ scroll: 'keep' });
+            } catch (e) {
+              // room refresh is best-effort
+            }
+          }
+          layer.close();
+          toast(isChar ? 'Персонаж сохранён' : 'Персона сохранена', { type: 'success' });
+        } catch (e) {
+          saving = false;
+          btn.disabled = false;
+          toast(e.message, { type: 'error' });
+        }
+      },
+      delete: async () => {
+        const ok = await confirmDialog({
+          title: isChar ? `Удалить «${item.name}»?` : `Удалить персону «${item.name}»?`,
+          message: isChar && chatsCount
+            ? `Карточка и её файл будут удалены. ${chatsCount} ${pluralRu(chatsCount, 'чат останется', 'чата останутся', 'чатов останутся')} без персонажа.`
+            : 'Карточка и её файл будут удалены.',
+          confirmText: 'Удалить',
+          danger: true,
+        });
+        if (!ok) return;
+        try {
+          await api(`${isChar ? '/api/characters' : '/api/personas'}/${item.id}?deleteFile=1`, { method: 'DELETE' });
+          saving = true;
+          layer.close();
+          // close the character page that opened this editor
+          $$('.modal-overlay').forEach(el => {
+            if (el._layer && el._layer.cardId === item.id && el._layer.cardKind === kind) el._layer.close();
+          });
+          await loadCards();
+          loadChats();
+          toast(isChar ? 'Персонаж удалён' : 'Персона удалена');
+        } catch (e) {
+          toast(e.message, { type: 'error' });
+        }
+      },
+    });
+    return layer;
+  }
+
+  function openCharacterEditor(id) {
+    return openCardEditor('character', id ? Number(id) : null);
+  }
+
+  function openPersonaEditor(id) {
+    return openCardEditor('persona', id ? Number(id) : null);
+  }
+
+  // ==========================================================================
+  // PERSONAS TAB
+  // ==========================================================================
+  function renderPersonasTab() {
+    const pane = $('#tab-personas');
+    if (!pane) return;
+    let body;
+    if (!state.loaded) {
+      body = state.loadError ? loadErrorHtml() : skeletonList(3);
+    } else if (!state.personas.length) {
+      body = emptyHtml('user', 'Создайте свою персону', 'Персона — это вы в истории. Её описание попадает в системный промпт внутри &lt;user_persona&gt;, а имя подставляется вместо {{user}}.',
+        `<button class="btn btn-primary" data-action="new-persona">${ic('plus')}Создать персону</button>`);
+    } else {
+      const active = state.settings.activePersonaId;
+      body = `<p class="section-hint" style="margin:0 4px 12px">Отмеченная персона выбирается по умолчанию в новых чатах. В открытом чате персону можно сменить в его настройках.</p>
+        <div class="list">${state.personas.map(p => `<div class="row pressable" role="button" tabindex="0" data-action="open-persona" data-id="${p.id}">
+            <img class="avatar avatar-48" src="${escapeHtml(resolveAvatarUrl(p.avatar_url, p.name))}" alt="" />
+            <div class="row-body"><div class="row-title">${escapeHtml(p.name)}${p.id === active ? ' <span class="pill accent" style="margin-left:6px">По умолчанию</span>' : ''}</div>
+              <div class="row-sub wrap">${escapeHtml(stripMarkdownPreview(p.description_preview || p.fileContent) || 'Без описания')}</div></div>
+            <button class="icon-btn sm" data-action="activate-persona" data-id="${p.id}" aria-label="Сделать персоной по умолчанию"><span class="radio${p.id === active ? ' on' : ''}"></span></button>
+          </div>`).join('')}</div>`;
+    }
+    pane.innerHTML = `<div class="tab-inner"><div class="appbar"><h1 class="appbar-title">Персоны</h1><div class="appbar-actions"><button class="icon-btn accent" data-action="new-persona" aria-label="Новая персона">${ic('plus')}</button></div></div>${body}</div>`;
+  }
+
+  async function activatePersona(id) {
+    if (state.settings.activePersonaId === id) return;
+    try {
+      await api(`/api/personas/${id}/activate`, { method: 'POST' });
+      state.settings.activePersonaId = id;
+      renderPersonasTab();
+      const p = findPersona(id);
+      toast(`По умолчанию: ${p ? p.name : 'персона'}`);
+    } catch (e) {
+      toast(e.message, { type: 'error' });
+    }
+  }
+
+  // ==========================================================================
+  // SETTINGS TAB
+  // ==========================================================================
+  async function loadSystemPromptText() {
+    try {
+      const res = await api('/api/files/content?path=GEMINI.md');
+      state.systemPromptText = typeof res.content === 'string' ? res.content : '';
+    } catch (e) {
+      state.systemPromptText = '';
+    }
+    if (state.tab === 'settings') renderSettingsTab();
+  }
+
+  function normalizedPromptText(text) {
+    const t = String(text || '');
+    return t.trim() === '# GEMINI.md' ? '' : t;
+  }
+
+  function settingsRow(o) {
+    return `<button class="row" data-action="settings-open" data-page="${o.page}">
+      <span class="row-icon">${ic(o.icon)}</span>
+      <div class="row-body"><div class="row-title">${o.title}</div>${o.sub ? `<div class="row-sub">${o.sub}</div>` : ''}</div>
+      ${o.value || ''}${ic('chevron-right', 'row-chevron')}
+    </button>`;
+  }
+
+  function renderSettingsTab() {
+    const pane = $('#tab-settings');
+    if (!pane) return;
+    if (state.systemPromptText === null && state.loaded) {
+      state.systemPromptText = '';
+      loadSystemPromptText();
+    }
+    const s = state.settings;
+    const promptText = normalizedPromptText(state.systemPromptText).trim();
+    const promptSub = promptText ? escapeHtml(stripMarkdownPreview(promptText).slice(0, 80)) : 'Не задан — модель получит только карточки';
+    const vertex = providerStatus('gemini');
+    const cli = providerStatus('cli');
+    const upd = state.updateInfo;
+    const updAvailable = upd && (upd.updateAvailable || upd.nativeUpdateRequired);
+    const pill = (st) => `<span class="pill ${st.ok ? 'ok' : 'warn'}">${st.ok ? 'Готово' : 'Настроить'}</span>`;
+    pane.innerHTML = `<div class="tab-inner">
+      <div class="appbar"><h1 class="appbar-title">Настройки</h1></div>
+      <div class="section"><div class="section-title">ИИ</div><div class="list">
+        ${settingsRow({ page: 'prompt', icon: 'scroll', title: 'Системный промпт', sub: promptSub })}
+        ${settingsRow({ page: 'model', icon: 'cpu', title: 'Модель по умолчанию', sub: escapeHtml(modelSummary(s.selectedModel, s.selectedEffort)) + ' · для новых чатов' })}
+      </div></div>
+      <div class="section"><div class="section-title">Провайдеры</div><div class="list">
+        ${settingsRow({ page: 'vertex', icon: 'cloud', title: 'Google Vertex', sub: s.agyAuthenticated ? escapeHtml(s.agyEmail || 'Gemini и Claude через Google') : escapeHtml(vertex.text), value: pill(vertex) })}
+        ${settingsRow({ page: 'claude', icon: 'terminal', title: 'Claude Code CLI', sub: cli.ok ? 'На устройстве, по подписке' : escapeHtml(cli.text), value: pill(cli) })}
+      </div></div>
+      <div class="section"><div class="section-title">Интерфейс</div><div class="list">
+        ${settingsRow({ page: 'appearance', icon: 'palette', title: 'Оформление', value: `<span class="row-value">${escapeHtml(THEMES[prefs.theme] ? THEMES[prefs.theme].label : 'Тёмная')}</span>` })}
+        ${settingsRow({ page: 'reading', icon: 'type', title: 'Чтение', value: `<span class="row-value">${prefs.fontSize} px${prefs.serif ? ' · с засечками' : ''}</span>` })}
+      </div></div>
+      <div class="section"><div class="section-title">Данные</div><div class="list">
+        ${settingsRow({ page: 'backup', icon: 'database', title: 'Резервная копия', sub: 'Сохранить или восстановить все данные' })}
+        ${settingsRow({ page: 'files', icon: 'folder', title: 'Файлы workspace', sub: 'Для продвинутых: все файлы как есть' })}
+      </div></div>
+      <div class="section"><div class="section-title">Приложение</div><div class="list">
+        ${settingsRow({ page: 'updates', icon: 'update', title: 'Обновления', sub: upd ? `Установлена v${escapeHtml(upd.currentVersion || state.webVersion)}` : (state.webVersion ? `v${escapeHtml(state.webVersion)}` : ''), value: updAvailable ? '<span class="pill accent">Доступно</span>' : '' })}
+      </div></div>
+      <p class="section-hint" style="text-align:center;margin-top:24px">AGY Roleplay Studio${state.webVersion ? ' v' + escapeHtml(state.webVersion) : ''} · движок build ${state.engineBuild}</p>
+    </div>`;
+  }
+
+  function openSettingsPage(page) {
+    if (page === 'prompt') openSystemPromptPage();
+    else if (page === 'model') openDefaultModelPicker();
+    else if (page === 'vertex') openVertexPage();
+    else if (page === 'claude') openClaudePage();
+    else if (page === 'appearance') openAppearancePage();
+    else if (page === 'reading') openReadingPage();
+    else if (page === 'backup') openBackupPage();
+    else if (page === 'files') openFilesPage('');
+    else if (page === 'updates') openUpdatesPage();
+  }
+
+  function openProviderSettings(provider) {
+    if (provider === 'cli') openClaudePage();
+    else openVertexPage();
+  }
+
+  function openDefaultModelPicker() {
+    openModelPicker({
+      title: 'Модель по умолчанию',
+      modelId: state.settings.selectedModel,
+      effort: state.settings.selectedEffort,
+      onPick: async (r) => {
+        if (!can.perChatModel()) {
+          const ok = await confirmDialog({
+            title: 'Сменить модель везде?',
+            message: 'На текущей версии APK модель по умолчанию также применяется ко всем существующим чатам. Обновите APK, чтобы чаты сохраняли свою модель.',
+            confirmText: 'Сменить',
+          });
+          if (!ok) return;
+        }
+        try {
+          applySettings(await api('/api/settings', { method: 'POST', body: { selectedModel: r.modelId, selectedEffort: r.effort } }));
+          renderSettingsTab();
+          if (!can.perChatModel()) loadChats();
+          toast('Модель по умолчанию: ' + modelSummary(r.modelId, r.effort), { type: 'success' });
+        } catch (e) {
+          toast(e.message, { type: 'error' });
+        }
+      },
+    });
+  }
+
+  // --- system prompt --------------------------------------------------------
+  async function openSystemPromptPage() {
+    let initial = '';
+    try {
+      initial = normalizedPromptText((await api('/api/files/content?path=GEMINI.md')).content || '');
+    } catch (e) {
+      initial = normalizedPromptText(state.systemPromptText || '');
+    }
+    let saving = false;
+    const layer = openPage({
+      title: 'Системный промпт',
+      body: `
+        <details class="card card-pad disclosure" style="margin-bottom:16px"${initial.trim() ? '' : ' open'}>
+          <summary style="padding:0;min-height:0;line-height:1.5">Ваш текст — это весь системный промпт для Gemini и Claude. Что добавляется ниже? ${ic('chevron-down', 'ic-sm')}</summary>
+          <div style="font-size:var(--fs-sm);line-height:1.55;color:var(--text-2);margin-top:10px">Встроенных скрытых инструкций нет. Под вашим текстом автоматически идут:</div>
+          <pre class="prompt-schema" style="margin-top:10px">ваш текст
+<b>&lt;character_persona&gt;</b>
+  описание персонажа чата
+<b>&lt;/character_persona&gt;</b>
+<b>&lt;user_persona&gt;</b>
+  описание вашей персоны
+<b>&lt;/user_persona&gt;</b>
+<b>&lt;chat_memory&gt;</b> — если память чата заполнена</pre>
+        </details>
+        <textarea class="textarea tall" data-role="text" placeholder="Например: Ты — ведущий ролевой игры. Пиши от третьего лица, живо и образно. Отвечай только за {{char}}, никогда не пиши действия и реплики {{user}}…">${escapeHtml(initial)}</textarea>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+          <div class="macro-chips" style="margin:0"><button class="chip sm" data-act="macro" data-macro="{{char}}">{{char}}</button><button class="chip sm" data-act="macro" data-macro="{{user}}">{{user}}</button></div>
+          <span class="char-count" data-role="count" style="margin-left:auto"></span>
+        </div>
+        <p class="section-hint">{{char}} — имя персонажа чата, {{user}} — имя вашей персоны. Хранится в файле GEMINI.md.</p>`,
+      actions: `<button class="btn btn-ghost" data-act="save">Сохранить</button>`,
+      onBack: () => {
+        if (saving || $('[data-role="text"]', layer.el).value === initial) return true;
+        confirmDialog({ title: 'Выйти без сохранения?', confirmText: 'Выйти', cancelText: 'Остаться', danger: true }).then(ok => ok && layer.close());
+        return false;
+      },
+    });
+    const ta = $('[data-role="text"]', layer.el);
+    const count = () => {
+      $('[data-role="count"]', layer.el).textContent = formatCount(ta.value.length) + ' симв.';
+      layer.setTitle('Системный промпт' + (ta.value !== initial ? '<span class="dirty-dot"></span>' : ''));
+    };
+    count();
+    ta.addEventListener('input', count);
+    bindActs(layer, {
+      macro: (el) => {
+        const s = ta.selectionStart || ta.value.length;
+        const e = ta.selectionEnd || s;
+        ta.value = ta.value.slice(0, s) + el.dataset.macro + ta.value.slice(e);
+        ta.focus();
+        ta.setSelectionRange(s + el.dataset.macro.length, s + el.dataset.macro.length);
+        count();
+      },
+      save: async (btn) => {
+        btn.disabled = true;
+        try {
+          await api('/api/files/file', { method: 'POST', body: { filePath: 'GEMINI.md', content: ta.value } });
+          initial = ta.value;
+          state.systemPromptText = ta.value;
+          saving = true;
+          layer.close();
+          renderSettingsTab();
+          toast('Системный промпт сохранён', { type: 'success' });
+        } catch (e) {
+          btn.disabled = false;
+          toast(e.message, { type: 'error' });
+        }
+      },
+    });
+  }
+
+  // --- Google Vertex --------------------------------------------------------
+  const SAFETY_OPTIONS = [
+    { value: 'OFF', title: 'Без фильтров + авто-обход', sub: 'Фильтры отключены. Если ответ заблокирован, до 4 повторов на той же модели.' },
+    { value: 'NSFW_BYPASS', title: 'Обходной режим сразу', sub: 'Как предыдущий, но уже первая попытка идёт в обходном режиме.' },
+    { value: 'BLOCK_NONE', title: 'Разрешить все категории + авто-обход', sub: 'Порог BLOCK_NONE для всех категорий и повторы при блокировке.' },
+    { value: 'BLOCK_ONLY_HIGH', title: 'Стандартный фильтр Google', sub: 'Блокируется только высокий риск. Одна попытка, без обхода.' },
+  ];
+
+  function openVertexPage() {
+    let pollAuth = null;
+    const render = () => {
+      const s = state.settings;
+      return `
+        <div class="card status-card">
+          <span class="status-card-icon ${s.agyAuthenticated ? 'ok' : 'warn'}">${ic(s.agyAuthenticated ? 'check-circle' : 'alert')}</span>
+          <div class="row-body"><div class="status-card-title">${s.agyAuthenticated ? 'Подключено' : 'Вход не выполнен'}</div>
+            <div class="status-card-sub">${s.agyAuthenticated ? escapeHtml(s.agyEmail || 'Аккаунт Google') : 'Войдите через аккаунт Google — API-ключ не нужен.'}</div></div>
+        </div>
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn ${s.agyAuthenticated ? 'btn-secondary' : 'btn-primary'}" data-act="login">${ic('login')}${s.agyAuthenticated ? 'Переподключить' : 'Войти через Google'}</button>
+          ${s.agyAuthenticated ? `<button class="btn btn-danger" data-act="logout">${ic('logout')}Выйти</button>` : ''}
+        </div>
+        <details class="disclosure section"><summary>Браузер не вернул в приложение? ${ic('chevron-down', 'ic-sm')}</summary>
+          <label class="field"><span class="field-label">Ссылка из адресной строки или код</span>
+            <input class="input" data-role="code" placeholder="http://localhost:51121/oauth-callback?code=…" autocomplete="off" /></label>
+          <button class="btn btn-secondary btn-block" style="margin-top:10px" data-act="exchange">Подтвердить</button>
+        </details>
+        <div class="section"><label class="field"><span class="field-label">Project ID</span>
+          <input class="input mono" data-role="project" value="${escapeHtml(s.projectId)}" placeholder="project-…" autocomplete="off" />
+          <span class="field-hint">Сохраняется автоматически. Обычно определяется при входе.</span></label></div>
+        <div class="section"><div class="section-title">Фильтр безопасности (Gemini)</div><div class="list">
+          ${SAFETY_OPTIONS.map(o => `<button class="row" data-act="safety" data-value="${o.value}"><span class="radio${s.safetyThreshold === o.value ? ' on' : ''}"></span><div class="row-body"><div class="row-title">${escapeHtml(o.title)}</div><div class="row-sub wrap">${escapeHtml(o.sub)}</div></div></button>`).join('')}
+        </div></div>`;
+    };
+    const layer = openPage({
+      title: 'Google Vertex',
+      body: render(),
+      onClose: () => clearInterval(pollAuth),
+    });
+    layer.refresh = () => {
+      if (document.activeElement && layer.el.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+      const body = $('.page-body', layer.el);
+      const scroll = body.scrollTop;
+      layer.setBody(render());
+      body.scrollTop = scroll;
+    };
+    layer.el.addEventListener('change', async (e) => {
+      if (e.target.dataset.role !== 'project') return;
+      const projectId = e.target.value.trim();
+      if (!projectId || projectId === state.settings.projectId) return;
+      try {
+        applySettings(await api('/api/settings', { method: 'POST', body: { projectId } }));
+        toast('Project ID сохранён', { type: 'success' });
+      } catch (err) {
+        toast(err.message, { type: 'error' });
+      }
+    });
+    bindActs(layer, {
+      login: async () => {
+        try {
+          const res = await api('/api/agy/auth/start', { method: 'POST' });
+          if (res.authUrl && !hasBridge) window.open(res.authUrl, '_blank');
+          toast('Завершите вход в браузере');
+          let checks = 0;
+          clearInterval(pollAuth);
+          pollAuth = setInterval(async () => {
+            checks++;
+            await refreshAgyStatus();
+            if (state.settings.agyAuthenticated || checks > 90) clearInterval(pollAuth);
+          }, 2000);
+        } catch (e) {
+          toast('Не удалось начать вход: ' + e.message, { type: 'error' });
+        }
+      },
+      logout: async () => {
+        const ok = await confirmDialog({ title: 'Выйти из Google?', message: 'Gemini и Claude через Vertex перестанут отвечать до повторного входа.', confirmText: 'Выйти', danger: true });
+        if (!ok) return;
+        try {
+          await api('/api/agy/auth/logout', { method: 'POST' });
+          state.settings.agyAuthenticated = false;
+          layer.refresh();
+          renderSettingsTab();
+          renderRoomHeader();
+        } catch (e) {
+          toast(e.message, { type: 'error' });
+        }
+      },
+      exchange: async () => {
+        const input = $('[data-role="code"]', layer.el);
+        const codeOrUrl = input.value.trim();
+        if (!codeOrUrl) {
+          toast('Вставьте ссылку или код');
+          return;
+        }
+        try {
+          const res = await api('/api/agy/auth/exchange', { method: 'POST', body: { codeOrUrl } });
+          state.settings.agyAuthenticated = Boolean(res.authenticated);
+          state.settings.agyEmail = res.email || state.settings.agyEmail;
+          if (res.projectId) state.settings.projectId = res.projectId;
+          input.blur();
+          layer.refresh();
+          renderSettingsTab();
+          renderRoomHeader();
+          toast('Вход выполнен', { type: 'success' });
+        } catch (e) {
+          toast('Ошибка авторизации: ' + e.message, { type: 'error' });
+        }
+      },
+      safety: async (el) => {
+        const value = el.dataset.value;
+        if (value === state.settings.safetyThreshold) return;
+        try {
+          applySettings(await api('/api/settings', { method: 'POST', body: { safetyThreshold: value } }));
+          layer.refresh();
+        } catch (e) {
+          toast(e.message, { type: 'error' });
+        }
+      },
+    });
+  }
+
+  // --- Claude Code CLI ------------------------------------------------------
+  function openClaudePage() {
+    let installing = false;
+    const render = () => {
+      const s = state.settings;
+      const urlKnown = s.claudeRuntimeUrlConfigured;
+      const runtimeBlocked = urlKnown === false && !s.claudeRuntimeReady;
+      return `
+        <p class="section-hint" style="margin:0 4px 14px">Claude Code запускается прямо на телефоне через proot — без ПК. Системный промпт тот же, что и для Gemini.</p>
+        <div class="card">
+          <div class="step${s.claudeRuntimeReady ? ' done' : ''}">
+            <span class="step-num">${s.claudeRuntimeReady ? ic('check', 'ic-xs') : '1'}</span>
+            <div class="step-body"><div class="step-title">Среда выполнения</div>
+              <div class="step-text">${s.claudeRuntimeReady ? 'Установлена.' : (runtimeBlocked ? 'Пакет среды для этой сборки ещё не опубликован. Установка станет доступна после обновления.' : 'Разовая загрузка около 300 МБ, лучше по Wi-Fi. Проверяется по SHA-256.')}</div>
+              <button class="btn ${s.claudeRuntimeReady ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="install"${installing || runtimeBlocked ? ' disabled' : ''}>${installing ? '<span class="spinner"></span>Загрузка… не закрывайте приложение' : (s.claudeRuntimeReady ? `${ic('reroll')}Переустановить` : `${ic('download')}Скачать среду`)}</button>
+            </div>
+          </div>
+          <div class="step${s.claudeAuthenticated ? ' done' : ''}">
+            <span class="step-num">${s.claudeAuthenticated ? ic('check', 'ic-xs') : '2'}</span>
+            <div class="step-body"><div class="step-title">Вход по подписке Claude</div>
+              <div class="step-text">${s.claudeAuthenticated ? 'Вход выполнен.' : 'Откроется браузер. После входа скопируйте код и вставьте его ниже.'}</div>
+              <div class="btn-row">
+                <button class="btn ${s.claudeAuthenticated ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="login"${s.claudeRuntimeReady ? '' : ' disabled'}>${ic('login')}${s.claudeAuthenticated ? 'Войти заново' : 'Войти'}</button>
+                ${s.claudeAuthenticated ? `<button class="btn btn-danger btn-sm" data-act="logout">${ic('logout')}Выйти</button>` : ''}
+              </div>
+              ${s.claudeRuntimeReady && !s.claudeAuthenticated ? `<label class="field"><span class="field-label">Код из браузера</span><input class="input" data-role="code" placeholder="Вставьте код" autocomplete="off" /></label><button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="exchange">Подтвердить код</button>` : ''}
+            </div>
+          </div>
+          <div class="step">
+            <span class="step-num">3</span>
+            <div class="step-body"><div class="step-title">Рабочая папка</div>
+              <div class="step-text">Папка внутри workspace, в которой запускается CLI. Можно оставить пустой.</div>
+              <input class="input mono" data-role="project" value="${escapeHtml(s.claudeProjectPath)}" placeholder="например, projects/rp" autocomplete="off" />
+            </div>
+          </div>
+        </div>`;
+    };
+    const layer = openPage({ title: 'Claude Code CLI', body: render() });
+    layer.refresh = () => {
+      if (document.activeElement && layer.el.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+      const body = $('.page-body', layer.el);
+      const scroll = body.scrollTop;
+      layer.setBody(render());
+      body.scrollTop = scroll;
+    };
+    refreshClaudeStatus();
+    layer.el.addEventListener('change', async (e) => {
+      if (e.target.dataset.role !== 'project') return;
+      const claudeProjectPath = e.target.value.trim();
+      try {
+        applySettings(await api('/api/settings', { method: 'POST', body: { claudeProjectPath } }));
+        toast('Рабочая папка сохранена', { type: 'success' });
+      } catch (err) {
+        toast(err.message, { type: 'error' });
+      }
+    });
+    bindActs(layer, {
+      install: async () => {
+        const ok = await confirmDialog({
+          title: state.settings.claudeRuntimeReady ? 'Переустановить среду?' : 'Скачать среду Claude Code?',
+          message: 'Около 300 МБ. Нужны стабильный интернет и свободное место. Загрузка займёт несколько минут.',
+          confirmText: 'Скачать',
+        });
+        if (!ok) return;
+        installing = true;
+        layer.refresh();
+        try {
+          const res = await api('/api/claude/runtime/install', { method: 'POST' });
+          state.settings.claudeRuntimeReady = Boolean(res.runtimeReady);
+          state.settings.claudeAuthenticated = Boolean(res.authenticated);
+          toast(state.settings.claudeRuntimeReady ? 'Среда установлена' : 'Установка не завершилась', { type: state.settings.claudeRuntimeReady ? 'success' : 'error' });
+        } catch (e) {
+          toast('Ошибка установки: ' + e.message, { type: 'error' });
+        } finally {
+          installing = false;
+          layer.refresh();
+          renderSettingsTab();
+        }
+      },
+      login: async () => {
+        try {
+          const res = await api('/api/claude/auth/start', { method: 'POST' });
+          if (res.authUrl && !hasBridge) window.open(res.authUrl, '_blank');
+          toast(res.authUrl ? 'Войдите в браузере и вставьте код' : 'Если браузер не открылся, повторите вход');
+        } catch (e) {
+          toast('Не удалось начать вход: ' + e.message, { type: 'error' });
+        }
+      },
+      exchange: async () => {
+        const input = $('[data-role="code"]', layer.el);
+        const code = input ? input.value.trim() : '';
+        if (!code) {
+          toast('Вставьте код из браузера');
+          return;
+        }
+        try {
+          const res = await api('/api/claude/auth/exchange', { method: 'POST', body: { code } });
+          state.settings.claudeAuthenticated = Boolean(res.authenticated);
+          if (input) input.blur();
+          toast(res.authenticated ? 'Вход в Claude выполнен' : ('Не удалось: ' + (res.error || 'повторите вход')), { type: res.authenticated ? 'success' : 'error' });
+          layer.refresh();
+          renderSettingsTab();
+          renderRoomHeader();
+        } catch (e) {
+          toast('Ошибка авторизации: ' + e.message, { type: 'error' });
+        }
+      },
+      logout: async () => {
+        try {
+          await api('/api/claude/auth/logout', { method: 'POST' });
+          state.settings.claudeAuthenticated = false;
+          layer.refresh();
+          renderSettingsTab();
+          renderRoomHeader();
+        } catch (e) {
+          toast(e.message, { type: 'error' });
+        }
+      },
+    });
+  }
+
+  // --- appearance & reading -------------------------------------------------
+  function openAppearancePage() {
+    const render = () => `
+      <div class="section"><div class="section-title">Тема</div>
+        <div class="theme-options">${Object.keys(THEMES).map(k => {
+          const t = THEMES[k];
+          return `<button class="theme-option${prefs.theme === k ? ' active' : ''}" data-act="theme" data-theme="${k}">
+            <span class="theme-swatch" style="background:${t.swatch[0]}"><i style="background:${t.swatch[1]};width:80%"></i><i style="background:hsl(${prefs.accent} 70% 60%);width:50%"></i><i style="background:${t.swatch[1]};width:65%"></i></span>${t.label}</button>`;
+        }).join('')}</div>
+        ${can.systemBars() ? '' : '<p class="section-hint">Цвет строки состояния подстроится под тему после обновления APK.</p>'}
+      </div>
+      <div class="section"><div class="section-title">Акцентный цвет</div>
+        <div class="accent-options">${ACCENTS.map(a => `<button class="accent-option${prefs.accent === a.hue ? ' active' : ''}" style="background:hsl(${a.hue} 68% 58%)" data-act="accent" data-hue="${a.hue}" aria-label="${a.label}"></button>`).join('')}</div>
+      </div>`;
+    const layer = openPage({ title: 'Оформление', body: render() });
+    bindActs(layer, {
+      theme: (el) => {
+        prefs.theme = el.dataset.theme;
+        savePrefs();
+        applyTheme();
+        layer.setBody(render());
+        renderSettingsTab();
+      },
+      accent: (el) => {
+        prefs.accent = Number(el.dataset.hue);
+        savePrefs();
+        applyTheme();
+        layer.setBody(render());
+      },
+    });
+  }
+
+  function openReadingPage() {
+    const sample = '*Кира отрывается от карты и медленно поднимает взгляд.* «Ты опоздал. Опять.»\n\n*Она кивает на стул напротив.* «Садись. У нас есть **проблема**.»';
+    const toggle = (key, title, sub) => `<button class="row" data-act="toggle" data-key="${key}"><div class="row-body"><div class="row-title">${title}</div>${sub ? `<div class="row-sub wrap">${sub}</div>` : ''}</div><span class="switch${prefs[key] ? ' on' : ''}"></span></button>`;
+    const render = () => `
+      <div class="card reading-preview"><div class="msg-text">${formatRoleplayHtml(sample, { dialogue: prefs.dialogue })}</div></div>
+      <div class="section"><div class="section-title" style="display:flex">Размер текста<span style="margin-left:auto" class="faint">${prefs.fontSize} px</span></div>
+        <input type="range" class="slider" min="13" max="22" step="1" value="${prefs.fontSize}" data-role="size" aria-label="Размер текста" /></div>
+      <div class="section"><div class="section-title">Межстрочный интервал</div>
+        <div class="segmented">${[[1.45, 'Плотно'], [1.6, 'Обычно'], [1.8, 'Свободно']].map(([v, l]) => `<button class="${prefs.lineHeight === v ? 'active' : ''}" data-act="lh" data-value="${v}">${l}</button>`).join('')}</div></div>
+      <div class="section"><div class="list">
+        ${toggle('serif', 'Шрифт с засечками', 'Книжный шрифт для текста сообщений')}
+        ${toggle('dialogue', 'Подсвечивать реплики', 'Текст в «кавычках» выделяется цветом')}
+        ${toggle('thoughtsOpen', 'Раскрывать мысли модели', 'Иначе мысли свёрнуты под заголовком')}
+        ${toggle('enterSends', 'Enter отправляет сообщение', 'Перенос строки — Shift+Enter. Ctrl+Enter отправляет всегда.')}
+      </div></div>`;
+    const layer = openPage({ title: 'Чтение', body: render() });
+    const changed = () => {
+      savePrefs();
+      applyTheme();
+      if (state.room) syncFeed({ scroll: 'keep' });
+      renderSettingsTab();
+    };
+    layer.el.addEventListener('input', (e) => {
+      if (e.target.dataset.role !== 'size') return;
+      prefs.fontSize = Number(e.target.value);
+      applyTheme();
+      const label = e.target.parentElement.querySelector('.faint');
+      if (label) label.textContent = prefs.fontSize + ' px';
+    });
+    layer.el.addEventListener('change', (e) => {
+      if (e.target.dataset.role === 'size') changed();
+    });
+    bindActs(layer, {
+      lh: (el) => {
+        prefs.lineHeight = Number(el.dataset.value);
+        changed();
+        layer.setBody(render());
+      },
+      toggle: (el) => {
+        const k = el.dataset.key;
+        prefs[k] = !prefs[k];
+        changed();
+        layer.setBody(render());
+      },
+    });
+  }
+
+  // --- backup ---------------------------------------------------------------
+  function openBackupPage() {
+    const layer = openPage({
+      title: 'Резервная копия',
+      body: `
+        <div class="card card-pad">
+          <div class="status-card-title">Создать копию</div>
+          <p class="step-text">Персонажи, персоны, все чаты (с мыслями и вариантами), файлы workspace и настройки. Токены входа не сохраняются — после восстановления войдите заново.</p>
+          <button class="btn btn-primary btn-block" data-act="export">${ic('download')}Сохранить копию</button>
+        </div>
+        <div class="card card-pad section">
+          <div class="status-card-title">Восстановить</div>
+          <p class="step-text">Текущие персонажи, чаты и сообщения будут <b>полностью заменены</b> данными из копии.</p>
+          ${can.jsonPicker()
+            ? `<button class="btn btn-secondary btn-block" data-act="pick">${ic('upload')}Выбрать файл .json</button><input type="file" accept=".json,application/json" class="hidden" data-role="file" />
+               <details class="disclosure" style="margin-top:6px"><summary>Вставить JSON вручную ${ic('chevron-down', 'ic-sm')}</summary><textarea class="textarea mono" data-role="paste" placeholder='{"backupFormat":1, …}'></textarea><button class="btn btn-secondary btn-block" style="margin-top:10px" data-act="paste">Восстановить из текста</button></details>`
+            : `<textarea class="textarea mono" data-role="paste" placeholder='{"backupFormat":1, …}'></textarea><button class="btn btn-secondary btn-block" style="margin-top:10px" data-act="paste">Восстановить из текста</button><p class="section-hint">Выбор файла станет доступен после обновления APK.</p>`}
+        </div>
+        <p class="section-hint">Перед переустановкой приложения обязательно сделайте копию: при удалении APK все чаты стираются.</p>`,
+    });
+    const restore = async (raw) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (e) {
+        toast('Это не похоже на JSON резервной копии', { type: 'error' });
+        return;
+      }
+      const c = parsed.counts || {};
+      const ok = await confirmDialog({
+        title: 'Восстановить данные?',
+        message: `В копии: персонажей ${c.characters ?? '?'}, чатов ${c.chats ?? '?'}, сообщений ${c.messages ?? '?'}.\n\nТекущие данные будут полностью заменены. Отменить это нельзя.`,
+        confirmText: 'Восстановить',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        const res = await api('/api/backup/import', { method: 'POST', body: { backup: parsed } });
+        toast(res.message || 'Данные восстановлены', { type: 'success' });
+        closeChatRoom();
+        state.systemPromptText = null;
+        await loadAll();
+        layer.close();
+      } catch (e) {
+        toast('Восстановление не удалось: ' + e.message, { type: 'error' });
+      }
+    };
+    const fileInput = $('[data-role="file"]', layer.el);
+    if (fileInput) {
+      fileInput.addEventListener('change', () => {
+        const file = fileInput.files && fileInput.files[0];
+        fileInput.value = '';
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => restore(String(reader.result || ''));
+        reader.onerror = () => toast('Не удалось прочитать файл', { type: 'error' });
+        reader.readAsText(file);
+      });
+    }
+    bindActs(layer, {
+      export: async (btn) => {
+        btn.disabled = true;
+        try {
+          const backup = await api('/api/backup/export');
+          const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+          saveFile(`agy-backup-${stamp}.json`, JSON.stringify(backup, null, 2), 'application/json');
+          const c = backup.counts || {};
+          toast(`Копия: персонажей ${c.characters ?? 0}, чатов ${c.chats ?? 0}, сообщений ${c.messages ?? 0}`, { type: 'success' });
+        } catch (e) {
+          toast('Не удалось создать копию: ' + e.message, { type: 'error' });
+        } finally {
+          btn.disabled = false;
+        }
+      },
+      pick: () => fileInput && fileInput.click(),
+      paste: () => {
+        const raw = ($('[data-role="paste"]', layer.el).value || '').trim();
+        if (!raw) {
+          toast('Вставьте содержимое файла копии');
+          return;
+        }
+        restore(raw);
+      },
+    });
+  }
+
+  // --- updates --------------------------------------------------------------
+  async function checkForUpdates(manual) {
+    try {
+      const data = await api('/api/updates/check');
+      state.updateInfo = data;
+      const nativeRequired = Boolean(data.nativeUpdateRequired || (data.remoteReachable && Number(data.latestBuild || 0) > Number(data.bundledBuild || 0)));
+      const available = Boolean(data.updateAvailable || nativeRequired);
+      const badge = $('#navSettingsBadge');
+      if (badge) badge.classList.toggle('hidden', !available);
+      if (state.tab === 'settings') renderSettingsTab();
+      refreshLayers();
+      if (available && !manual && !state.updateToastShown) {
+        state.updateToastShown = true;
+        toast(nativeRequired && data.otaActive && Number(data.currentBuild || 0) >= Number(data.latestBuild || 0)
+          ? `Нужен новый APK (build ${data.latestBuild})`
+          : `Доступна версия ${data.latestVersion}`, {
+          action: { label: 'Подробнее', fn: () => openUpdatesPage() },
+          duration: 8000,
+        });
+      }
+      if (manual) {
+        toast(available ? `Доступна версия ${data.latestVersion}` : (data.remoteReachable ? 'Установлена последняя версия' : 'Репозиторий недоступен: ' + (data.remoteError || '')),
+          { type: available ? 'info' : (data.remoteReachable ? 'success' : 'error') });
+      }
+    } catch (e) {
+      if (manual) toast('Не удалось проверить обновления: ' + e.message, { type: 'error' });
+    }
+  }
+
+  async function applyGitUpdate(ref, commitSha) {
+    toast('Загружаю обновление…');
+    try {
+      const info = state.updateInfo || {};
+      const res = await api('/api/updates/apply', {
+        method: 'POST',
+        body: { gitBranch: info.gitBranch || 'main', ref: ref || info.gitBranch || 'main', commitSha: commitSha || '' },
+      });
+      toast((res.message || 'Обновление установлено') + '. Перезапуск…', { type: 'success' });
+      setTimeout(reloadApp, 700);
+    } catch (e) {
+      toast('Ошибка обновления: ' + e.message, { type: 'error' });
+    }
+  }
+
+  function openUpdatesPage() {
+    let checking = false;
+    const render = () => {
+      const d = state.updateInfo;
+      if (!d) return '<div class="empty"><span class="spinner"></span></div>';
+      const nativeRequired = Boolean(d.nativeUpdateRequired || (d.remoteReachable && Number(d.latestBuild || 0) > Number(d.bundledBuild || 0)));
+      const apkOnly = nativeRequired && d.otaActive && Number(d.currentBuild || 0) >= Number(d.latestBuild || 0);
+      let status;
+      if (!d.remoteReachable) status = `<span class="pill warn">${ic('alert', 'ic-xs')}Репозиторий недоступен</span>`;
+      else if (apkOnly) status = `<span class="pill warn">Нужен новый APK</span>`;
+      else if (d.updateAvailable) status = `<span class="pill accent">Доступно обновление</span>`;
+      else status = `<span class="pill ok">${ic('check', 'ic-xs')}Актуальная версия</span>`;
+      const releases = d.releases || [];
+      const commits = d.commits || [];
+      return `
+        <div class="version-hero">
+          <div class="version-box"><div class="version-label">Установлена</div><div class="version-value">v${escapeHtml(d.currentVersion || state.webVersion || '—')}</div><div class="version-sub">build ${escapeHtml(d.currentBuild || '—')} · ${d.otaActive ? 'OTA' : 'APK'} · движок ${escapeHtml(d.bundledBuild || state.engineBuild)}</div></div>
+          <div class="version-box highlight"><div class="version-label">В репозитории</div><div class="version-value">v${escapeHtml(d.latestVersion || '—')}</div><div class="version-sub">build ${escapeHtml(d.latestBuild || '—')}${d.latestCommit ? ' · ' + escapeHtml(d.latestCommit) : ''}</div></div>
+        </div>
+        <div style="margin:12px 0">${status}${d.remoteError && !d.remoteReachable ? `<p class="section-hint">${escapeHtml(d.remoteError)}</p>` : ''}</div>
+        ${apkOnly
+          ? `<button class="btn btn-primary btn-block" data-act="apk">${ic('package')}Скачать новый APK</button>`
+          : `<button class="btn btn-primary btn-block" data-act="apply"${d.updateAvailable ? '' : ' disabled'}>${ic('update')}${d.updateAvailable ? `Обновить до v${escapeHtml(d.latestVersion)}` : 'Обновлений нет'}</button>`}
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn btn-secondary" data-act="check"${checking ? ' disabled' : ''}>${checking ? '<span class="spinner"></span>' : ic('reroll')}Проверить</button>
+          ${d.otaActive ? `<button class="btn btn-secondary" data-act="reset">${ic('undo')}Сброс к APK</button>` : `<button class="btn btn-secondary" data-act="apk">${ic('package')}APK</button>`}
+        </div>
+        ${releases.length ? `<div class="section"><div class="section-title">Что нового</div><div class="card">${releases.slice(0, 6).map(r => `<div class="release">
+            <div class="release-head"><span class="release-ver">v${escapeHtml(r.version)}</span>${r.version === d.currentVersion ? '<span class="pill ok">Установлена</span>' : ''}<span class="release-date">${escapeHtml(r.date || '')}</span></div>
+            ${r.title ? `<div class="release-title">${escapeHtml(r.title)}</div>` : ''}
+            ${(r.changelog || []).length ? `<ul>${r.changelog.map(l => `<li>${escapeHtml(l)}</li>`).join('')}</ul>` : ''}
+            ${r.version !== d.currentVersion ? `<button class="btn btn-ghost btn-sm" style="padding:0" data-act="release" data-ref="${escapeHtml(r.ref || d.gitBranch || 'main')}">Установить v${escapeHtml(r.version)}</button>` : ''}
+          </div>`).join('')}</div></div>` : ''}
+        <details class="disclosure section"><summary>${ic('code', 'ic-sm')}Для разработчиков ${ic('chevron-down', 'ic-sm')}</summary>
+          <label class="field"><span class="field-label">Ветка</span><input class="input mono" data-role="branch" value="${escapeHtml(d.gitBranch || 'main')}" autocomplete="off" />
+            <span class="field-hint">Репозиторий ${escapeHtml(d.gitRepo || '')} зафиксирован в подписанном APK.</span></label>
+          <button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="branch">Сохранить ветку</button>
+          <button class="btn btn-ghost btn-sm" style="margin-top:10px" data-act="github">${ic('external', 'ic-sm')}GitHub</button>
+          ${commits.length ? `<div class="list section">${commits.slice(0, 15).map(c => `<div class="row"><div class="row-body"><div class="row-title">${escapeHtml(c.message)}</div><div class="row-sub"><span class="mono">${escapeHtml(c.shortSha)}</span> · ${escapeHtml(c.author || '')} · ${escapeHtml(String(c.date || '').replace('T', ' ').slice(0, 16))}</div></div>
+            ${d.installedCommit && c.shortSha === d.installedCommit ? '<span class="pill ok">Активен</span>' : `<button class="btn btn-ghost btn-sm" data-act="commit" data-sha="${escapeHtml(c.sha)}">Установить</button>`}</div>`).join('')}</div>` : ''}
+        </details>`;
+    };
+    const layer = openPage({ title: 'Обновления', body: render() });
+    layer.refresh = () => {
+      if (document.activeElement && layer.el.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+      const body = $('.page-body', layer.el);
+      const scroll = body.scrollTop;
+      const devOpen = $('details.disclosure', layer.el);
+      const wasOpen = devOpen && devOpen.open;
+      layer.setBody(render());
+      if (wasOpen) $('details.disclosure', layer.el).open = true;
+      body.scrollTop = scroll;
+    };
+    if (!state.updateInfo) checkForUpdates(false);
+    bindActs(layer, {
+      apply: async () => {
+        const ok = await confirmDialog({ title: 'Установить обновление?', message: 'Приложение перезапустится. Чаты и настройки сохранятся.', confirmText: 'Обновить' });
+        if (ok) applyGitUpdate('', '');
+      },
+      release: async (el) => {
+        const ok = await confirmDialog({ title: 'Переключить версию?', message: 'Будут загружены файлы интерфейса этой версии. Приложение перезапустится.', confirmText: 'Установить' });
+        if (ok) applyGitUpdate(el.dataset.ref, '');
+      },
+      commit: async (el) => {
+        const ok = await confirmDialog({ title: 'Установить коммит?', message: 'Только для отладки. Приложение перезапустится.', confirmText: 'Установить' });
+        if (ok) applyGitUpdate(el.dataset.sha, el.dataset.sha);
+      },
+      check: async () => {
+        checking = true;
+        layer.refresh();
+        await checkForUpdates(true);
+        checking = false;
+        layer.refresh();
+      },
+      reset: async () => {
+        const ok = await confirmDialog({ title: 'Вернуть интерфейс из APK?', message: 'OTA-обновление будет удалено, приложение перезапустится.', confirmText: 'Сбросить', danger: true });
+        if (!ok) return;
+        try {
+          await api('/api/updates/reset', { method: 'POST' });
+          setTimeout(reloadApp, 400);
+        } catch (e) {
+          toast(e.message, { type: 'error' });
+        }
+      },
+      apk: () => {
+        const d = state.updateInfo || {};
+        openExternal(d.apkDownloadUrl || 'https://raw.githubusercontent.com/Kuka001/111/main/agy-roleplay-android16.apk');
+      },
+      github: () => {
+        const d = state.updateInfo || {};
+        openExternal(d.repoWebUrl || 'https://github.com/' + (d.gitRepo || 'Kuka001/111'));
+      },
+      branch: async () => {
+        const gitBranch = ($('[data-role="branch"]', layer.el).value || 'main').trim();
+        try {
+          await api('/api/updates/config', { method: 'POST', body: { gitBranch } });
+          toast('Ветка сохранена', { type: 'success' });
+          await checkForUpdates(true);
+        } catch (e) {
+          toast(e.message, { type: 'error' });
+        }
+      },
+    });
+  }
+
+  // --- workspace files ------------------------------------------------------
+  function openFilesPage(startPath) {
+    let path = startPath || '';
+    let items = null;
+    const render = () => {
+      const parts = path ? path.split('/') : [];
+      const crumbs = [`<button class="crumb${parts.length ? '' : ' current'}" data-act="go" data-path="">workspace</button>`]
+        .concat(parts.map((p, i) => `<span class="crumb-sep">${ic('chevron-right')}</span><button class="crumb${i === parts.length - 1 ? ' current' : ''}" data-act="go" data-path="${escapeHtml(parts.slice(0, i + 1).join('/'))}">${escapeHtml(p)}</button>`))
+        .join('');
+      let list;
+      if (items === null) list = '<div class="empty"><span class="spinner"></span></div>';
+      else if (!items.length) list = emptyHtml('folder', 'Папка пуста', 'Создайте файл или папку кнопкой «+».');
+      else {
+        list = `<div class="list">${items.map(it => `<div class="row pressable" role="button" tabindex="0" data-act="${it.isDirectory ? 'go' : 'open'}" data-path="${escapeHtml(it.path)}">
+          <span class="row-icon">${ic(it.isDirectory ? 'folder' : 'file')}</span>
+          <div class="row-body"><div class="row-title">${escapeHtml(it.name)}</div><div class="row-sub">${it.isDirectory ? 'Папка' : formatSize(it.size)}</div></div>
+          <button class="icon-btn sm" data-act="item-menu" data-path="${escapeHtml(it.path)}" data-dir="${it.isDirectory ? 1 : 0}" aria-label="Действия">${ic('more', 'ic-sm')}</button>
+        </div>`).join('')}</div>`;
+      }
+      return `<div class="breadcrumbs">${crumbs}</div>${list}
+        <p class="section-hint">Персонажи, персоны, системный промпт и память чатов удобнее редактировать в их разделах. Здесь — все файлы как есть.</p>`;
+    };
+    const layer = openPage({
+      title: 'Файлы',
+      body: render(),
+      actions: `<button class="icon-btn accent" data-act="add" aria-label="Создать">${ic('plus')}</button>`,
+    });
+    const load = async () => {
+      items = null;
+      layer.setBody(render());
+      try {
+        const data = await api(`/api/files?path=${encodeURIComponent(path)}`);
+        items = data.items || [];
+      } catch (e) {
+        items = [];
+        toast(e.message, { type: 'error' });
+      }
+      layer.setBody(render());
+    };
+    layer.refresh = load;
+    load();
+    bindActs(layer, {
+      go: (el) => {
+        path = el.dataset.path || '';
+        load();
+      },
+      open: (el, e) => {
+        if (e.target.closest('[data-act="item-menu"]')) return;
+        openFileEditor(el.dataset.path, { onChange: load });
+      },
+      'item-menu': (el, e) => {
+        e.stopPropagation();
+        const p = el.dataset.path;
+        actionSheet({
+          title: p.split('/').pop(),
+          items: [
+            { icon: 'edit', label: 'Открыть', hidden: el.dataset.dir === '1', onSelect: () => openFileEditor(p, { onChange: load }) },
+            {
+              icon: 'trash',
+              label: el.dataset.dir === '1' ? 'Удалить папку со всем содержимым' : 'Удалить файл',
+              danger: true,
+              onSelect: async () => {
+                const ok = await confirmDialog({ title: 'Удалить?', message: p, confirmText: 'Удалить', danger: true });
+                if (!ok) return;
+                try {
+                  await api(`/api/files?path=${encodeURIComponent(p)}`, { method: 'DELETE' });
+                  toast('Удалено');
+                  load();
+                  loadCards();
+                } catch (err) {
+                  toast(err.message, { type: 'error' });
+                }
+              },
+            },
+          ],
+        });
+      },
+      add: () => actionSheet({
+        title: 'Создать',
+        items: [
+          {
+            icon: 'file-plus',
+            label: 'Новый файл',
+            onSelect: async () => {
+              const name = await promptDialog({ title: 'Новый файл', value: 'new_file.md', confirmText: 'Создать' });
+              if (!name) return;
+              openFileEditor((path ? path + '/' : '') + name.replace(/^\/+/, ''), { isNew: true, onChange: load });
+            },
+          },
+          {
+            icon: 'folder-plus',
+            label: 'Новая папка',
+            onSelect: async () => {
+              const name = await promptDialog({ title: 'Новая папка', value: 'new_folder', confirmText: 'Создать' });
+              if (!name) return;
+              try {
+                await api('/api/files/folder', { method: 'POST', body: { folderPath: (path ? path + '/' : '') + name.replace(/^\/+|\/+$/g, '') } });
+                load();
+              } catch (e) {
+                toast(e.message, { type: 'error' });
+              }
+            },
+          },
+        ],
+      }),
+    });
+  }
+
+  function formatSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return n + ' Б';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' КБ';
+    return (n / 1024 / 1024).toFixed(1) + ' МБ';
+  }
+
+  async function openFileEditor(relPath, opts) {
+    const o = opts || {};
+    let initial = '';
+    if (!o.isNew) {
+      try {
+        initial = (await api(`/api/files/content?path=${encodeURIComponent(relPath)}`)).content || '';
+      } catch (e) {
+        if (!o.plain) {
+          toast(e.message, { type: 'error' });
+          return;
+        }
+      }
+    }
+    let saved = false;
+    const title = o.title || relPath.split('/').pop();
+    const layer = openPage({
+      title,
+      backIcon: 'x',
+      body: `${o.hint ? `<p class="section-hint" style="margin:0 4px 12px">${o.hint}</p>` : `<p class="section-hint mono" style="margin:0 4px 12px">${escapeHtml(relPath)}</p>`}
+        <textarea class="textarea tall${o.plain ? '' : ' mono'}" data-role="text">${escapeHtml(initial)}</textarea>
+        ${o.allowDelete === false || o.isNew ? '' : `<div class="danger-zone"><button class="btn btn-danger btn-block" data-act="delete">${ic('trash')}Удалить файл</button></div>`}`,
+      actions: `<button class="btn btn-ghost" data-act="save">Сохранить</button>`,
+      onBack: () => {
+        if (saved || $('[data-role="text"]', layer.el).value === initial) return true;
+        confirmDialog({ title: 'Выйти без сохранения?', confirmText: 'Выйти', cancelText: 'Остаться', danger: true }).then(ok => ok && layer.close());
+        return false;
+      },
+    });
+    const ta = $('[data-role="text"]', layer.el);
+    ta.addEventListener('input', () => layer.setTitle(escapeHtml(title) + (ta.value !== initial ? '<span class="dirty-dot"></span>' : '')));
+    bindActs(layer, {
+      save: async (btn) => {
+        btn.disabled = true;
+        try {
+          await api('/api/files/file', { method: 'POST', body: { filePath: relPath, content: ta.value } });
+          saved = true;
+          layer.close();
+          toast('Сохранено', { type: 'success' });
+          if (o.onChange) o.onChange();
+          if (relPath === 'GEMINI.md') state.systemPromptText = ta.value;
+          if (/^(characters|personas)\//.test(relPath)) loadCards();
+        } catch (e) {
+          btn.disabled = false;
+          toast(e.message, { type: 'error' });
+        }
+      },
+      delete: async () => {
+        const ok = await confirmDialog({ title: 'Удалить файл?', message: relPath, confirmText: 'Удалить', danger: true });
+        if (!ok) return;
+        try {
+          await api(`/api/files?path=${encodeURIComponent(relPath)}`, { method: 'DELETE' });
+          saved = true;
+          layer.close();
+          toast('Файл удалён');
+          if (o.onChange) o.onChange();
+          loadCards();
+        } catch (e) {
+          toast(e.message, { type: 'error' });
+        }
+      },
+    });
+  }
+
+  // ==========================================================================
+  // IMAGE VIEWER (pinch-zoom, double-tap, pan)
+  // ==========================================================================
+  function openImageViewer(src, title) {
+    const layer = openLayer({
+      kind: 'viewer',
+      html: `<div class="viewer-bar"><div class="viewer-title">${escapeHtml(title || 'Изображение')}</div><span class="viewer-zoom" data-role="zoom">100%</span>
+          <button class="icon-btn" data-action="layer-close" aria-label="Закрыть">${ic('x')}</button></div>
+        <div class="viewer-stage" data-role="stage"><img class="viewer-img" data-role="img" src="${escapeHtml(src)}" alt="" draggable="false" /></div>`,
+    });
+    const stage = $('[data-role="stage"]', layer.el);
+    const img = $('[data-role="img"]', layer.el);
+    const zoomLabel = $('[data-role="zoom"]', layer.el);
+    const v = { scale: 1, tx: 0, ty: 0, mode: null, startDist: 0, startScale: 1, midX: 0, midY: 0, startTx: 0, startTy: 0, panX: 0, panY: 0, lastTap: 0, moved: false };
+    const apply = (animate) => {
+      img.style.transition = animate ? 'transform 0.18s ease-out' : 'none';
+      img.style.transform = `translate3d(${v.tx}px, ${v.ty}px, 0) scale(${v.scale})`;
+      zoomLabel.textContent = Math.round(v.scale * 100) + '%';
+    };
+    const reset = () => {
+      v.scale = 1;
+      v.tx = 0;
+      v.ty = 0;
+      apply(true);
+    };
+    const dist = (a, b) => Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+    stage.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        v.mode = 'pinch';
+        v.moved = true;
+        v.startDist = Math.max(dist(e.touches[0], e.touches[1]), 10);
+        v.startScale = v.scale;
+        v.midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        v.midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        v.startTx = v.tx;
+        v.startTy = v.ty;
+      } else if (e.touches.length === 1) {
+        v.mode = 'pan';
+        v.moved = false;
+        v.panX = e.touches[0].clientX;
+        v.panY = e.touches[0].clientY;
+        v.startTx = v.tx;
+        v.startTy = v.ty;
+      }
+    }, { passive: false });
+    stage.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 2 && v.mode === 'pinch') {
+        e.preventDefault();
+        const next = Math.min(Math.max(v.startScale * (Math.max(dist(e.touches[0], e.touches[1]), 10) / v.startDist), 0.5), 6);
+        const rect = stage.getBoundingClientRect();
+        const fx = v.midX - (rect.left + rect.width / 2);
+        const fy = v.midY - (rect.top + rect.height / 2);
+        const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const my = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        const ratio = next / v.startScale;
+        v.scale = next;
+        v.tx = fx - (fx - v.startTx) * ratio + (mx - v.midX);
+        v.ty = fy - (fy - v.startTy) * ratio + (my - v.midY);
+        apply(false);
+      } else if (e.touches.length === 1 && v.mode === 'pan') {
+        const dx = e.touches[0].clientX - v.panX;
+        const dy = e.touches[0].clientY - v.panY;
+        if (Math.hypot(dx, dy) > 6) v.moved = true;
+        if (v.moved && v.scale > 1.02) {
+          e.preventDefault();
+          v.tx = v.startTx + dx;
+          v.ty = v.startTy + dy;
+          apply(false);
+        }
+      }
+    }, { passive: false });
+    stage.addEventListener('touchend', (e) => {
+      if (e.touches.length === 1) {
+        v.mode = 'pan';
+        v.panX = e.touches[0].clientX;
+        v.panY = e.touches[0].clientY;
+        v.startTx = v.tx;
+        v.startTy = v.ty;
+        return;
+      }
+      if (e.touches.length) return;
+      v.mode = null;
+      if (v.scale < 0.9) {
+        reset();
+        return;
+      }
+      if (v.moved || !e.changedTouches || !e.changedTouches.length) return;
+      const now = Date.now();
+      const t = e.changedTouches[0];
+      if (now - v.lastTap < 280) {
+        v.lastTap = 0;
+        if (v.scale > 1.2) {
+          reset();
+        } else {
+          const rect = stage.getBoundingClientRect();
+          v.scale = 2.5;
+          v.tx = (rect.left + rect.width / 2 - t.clientX) * 1.5 * 0.6;
+          v.ty = (rect.top + rect.height / 2 - t.clientY) * 1.5 * 0.6;
+          apply(true);
+        }
+      } else {
+        v.lastTap = now;
+        if (e.target === stage && v.scale <= 1.05) {
+          setTimeout(() => {
+            if (v.lastTap === now) layer.close();
+          }, 280);
+        }
+      }
+    }, { passive: false });
+    stage.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      v.scale = Math.min(Math.max(v.scale * (e.deltaY < 0 ? 1.15 : 0.87), 0.5), 6);
+      if (v.scale <= 1.02) {
+        v.tx = 0;
+        v.ty = 0;
+      }
+      apply(false);
+    }, { passive: false });
+    stage.addEventListener('click', (e) => {
+      if (e.target === stage && !('ontouchstart' in window)) layer.close();
+    });
+    return layer;
+  }
+
+  // ==========================================================================
+  // GESTURES: long-press menus, swipe-to-reveal chat rows, variant swipes
+  // ==========================================================================
+  let suppressClickUntil = 0;
+  let lastMenuAt = 0;
+  const ROW_REVEAL = 152;
+
+  function openMenuFor(row, msg) {
+    if (Date.now() - lastMenuAt < 800) return;
+    lastMenuAt = Date.now();
+    if (row) openChatActions(Number(row.dataset.chatId));
+    else if (msg) openMessageActions(Number(msg.dataset.msgId));
+  }
+
+  function initGestures() {
+    let g = null;
+    const reset = () => {
+      if (g) clearTimeout(g.timer);
+      g = null;
+    };
+
+    document.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) {
+        reset();
+        return;
+      }
+      const t = e.touches[0];
+      const target = e.target;
+      if (target.closest('.layer-viewer')) return;
+      const row = target.closest('.chat-row');
+      const msg = target.closest('#chatFeed .msg[data-msg-id]');
+      const swipeMsg = msg && msg.dataset.swipeable === '1' ? msg : null;
+      if (!target.closest('.chat-row.open')) closeOpenChatRows(row);
+      g = { x0: t.clientX, y0: t.clientY, dx: 0, dy: 0, row, msg, swipeMsg, axis: null, moved: false, fired: false, timer: null };
+      const interactive = target.closest('button, a, input, textarea, summary, [data-action="view-avatar"]');
+      if ((row || msg) && !interactive) {
+        g.timer = setTimeout(() => {
+          if (!g || g.moved) return;
+          g.fired = true;
+          suppressClickUntil = Date.now() + 600;
+          try {
+            if (navigator.vibrate) navigator.vibrate(10);
+          } catch (err) {
+            // vibration is optional
+          }
+          openMenuFor(row, msg);
+        }, 480);
+      }
+    }, { passive: true });
+
+    document.addEventListener('touchmove', (e) => {
+      if (!g || !e.touches.length) return;
+      const t = e.touches[0];
+      g.dx = t.clientX - g.x0;
+      g.dy = t.clientY - g.y0;
+      if (!g.moved && Math.hypot(g.dx, g.dy) > 9) {
+        g.moved = true;
+        clearTimeout(g.timer);
+        g.axis = Math.abs(g.dx) > Math.abs(g.dy) * 1.3 ? 'x' : 'y';
+      }
+      if (g.axis !== 'x') return;
+      if (g.row) {
+        const main = $('.chat-row-main', g.row);
+        const base = g.row.classList.contains('open') ? -ROW_REVEAL : 0;
+        const x = Math.max(-ROW_REVEAL - 20, Math.min(0, base + g.dx));
+        g.row.classList.add('dragging');
+        main.style.transform = `translateX(${x}px)`;
+      } else if (g.swipeMsg) {
+        const text = $('.msg-text', g.swipeMsg);
+        text.classList.remove('swipe-anim');
+        text.style.transform = `translateX(${g.dx * 0.5}px)`;
+        text.style.opacity = String(1 - Math.min(Math.abs(g.dx) / 500, 0.45));
+      }
+    }, { passive: true });
+
+    const end = () => {
+      if (!g) return;
+      clearTimeout(g.timer);
+      if (g.axis === 'x' && g.row) {
+        const main = $('.chat-row-main', g.row);
+        const base = g.row.classList.contains('open') ? -ROW_REVEAL : 0;
+        const open = base + g.dx < -ROW_REVEAL / 2;
+        g.row.classList.remove('dragging');
+        g.row.classList.toggle('open', open);
+        main.style.transform = open ? `translateX(${-ROW_REVEAL}px)` : '';
+        suppressClickUntil = Date.now() + 350;
+      } else if (g.axis === 'x' && g.swipeMsg) {
+        const text = $('.msg-text', g.swipeMsg);
+        text.classList.add('swipe-anim');
+        text.style.transform = '';
+        text.style.opacity = '';
+        const id = Number(g.swipeMsg.dataset.msgId);
+        if (g.dx < -70) swipeBy(id, 1);
+        else if (g.dx > 70) swipeBy(id, -1);
+        suppressClickUntil = Date.now() + 350;
+      }
+      g = null;
+    };
+    document.addEventListener('touchend', end);
+    document.addEventListener('touchcancel', () => {
+      if (g && g.row) {
+        g.row.classList.remove('dragging');
+        $('.chat-row-main', g.row).style.transform = g.row.classList.contains('open') ? `translateX(${-ROW_REVEAL}px)` : '';
+      }
+      if (g && g.swipeMsg) {
+        const text = $('.msg-text', g.swipeMsg);
+        text.style.transform = '';
+        text.style.opacity = '';
+      }
+      reset();
+    });
+
+    // Mouse / desktop: right click opens the same menus.
+    document.addEventListener('contextmenu', (e) => {
+      const row = e.target.closest('.chat-row');
+      const msg = e.target.closest('#chatFeed .msg[data-msg-id]');
+      if (!row && !msg) return;
+      if (window.getSelection && String(window.getSelection())) return;
+      e.preventDefault();
+      openMenuFor(row, msg);
+    });
+  }
+
+  // ==========================================================================
+  // GLOBAL EVENTS
+  // ==========================================================================
+  const ACTIONS = {
+    tab: (el) => {
+      if (state.room) closeChatRoom();
+      openTab(el.dataset.tab);
+    },
+    'layer-close': (el) => requestCloseLayer(layerOf(el)),
+    'layer-dismiss': (el) => {
+      const l = layerOf(el);
+      if (l && l.dismissible) requestCloseLayer(l);
+    },
+    'reload-data': () => {
+      state.loadError = '';
+      renderAllTabs();
+      loadAll().catch(showLoadError);
+    },
+    noop: () => {},
+
+    'new-chat': (el) => openNewChat(Number(el.dataset.id) || 0),
+    'open-chat': (el) => {
+      const row = el.closest('.chat-row');
+      if (row && row.classList.contains('open')) {
+        closeOpenChatRows();
+        return;
+      }
+      openChatRoom(Number(el.dataset.id));
+    },
+    'chat-export': (el) => {
+      closeOpenChatRows();
+      openExport(Number(el.dataset.id));
+    },
+    'chat-delete': (el) => deleteChat(Number(el.dataset.id)),
+    'chats-search-open': () => {
+      state.chatsSearchOpen = true;
+      renderChatsTab();
+    },
+    'chats-search-close': () => {
+      state.chatsSearchOpen = false;
+      state.chatsQuery = '';
+      renderChatsTab();
+    },
+    'chats-filter': (el) => {
+      state.chatsFilter = Number(el.dataset.id) || 0;
+      renderChatsList();
+    },
+
+    'close-chat': () => closeChatRoom(),
+    'chat-settings': () => openChatSettings(),
+    send: () => sendMessage(),
+    stop: () => stopGeneration(),
+    'insert-action': () => insertAsterisks(),
+    'jump-bottom': () => scrollToBottom(true),
+    'msg-menu': (el) => openMessageActions(Number(el.dataset.id)),
+    'swipe-prev': (el) => swipeBy(Number(el.dataset.id), -1),
+    'swipe-next': (el) => swipeBy(Number(el.dataset.id), 1),
+    reroll: (el) => regenerate(Number(el.dataset.id)),
+    'retry-generation': () => retryGeneration(),
+    'dismiss-error': () => {
+      if (!state.room) return;
+      state.room.error = null;
+      syncFeed({ scroll: 'keep' });
+    },
+    'open-diagnostics': () => openDiagnostics(state.room && state.room.chatId),
+    'open-provider-settings': (el) => openProviderSettings(el.dataset.provider),
+    'view-avatar': (el) => {
+      if (!state.room) return;
+      const who = el.dataset.who === 'persona' ? state.room.data.persona : state.room.data.character;
+      if (who) openImageViewer(resolveAvatarUrl(who.avatar_url, who.name), who.name);
+    },
+
+    'open-character': (el) => openCharacterPage(Number(el.dataset.id)),
+    'new-character': () => openCharacterEditor(null),
+    'chars-search-open': () => {
+      state.charsSearchOpen = true;
+      renderCharactersTab();
+    },
+    'chars-search-close': () => {
+      state.charsSearchOpen = false;
+      state.charsQuery = '';
+      renderCharactersTab();
+    },
+    'chars-sort': (el) => {
+      state.charsSort = el.dataset.sort;
+      renderCharactersList();
+    },
+
+    'open-persona': (el, e) => {
+      if (e.target.closest('[data-action="activate-persona"]')) return;
+      openPersonaEditor(Number(el.dataset.id));
+    },
+    'new-persona': () => openPersonaEditor(null),
+    'activate-persona': (el) => activatePersona(Number(el.dataset.id)),
+
+    'settings-open': (el) => openSettingsPage(el.dataset.page),
+  };
+
+  function initEvents() {
+    document.addEventListener('click', (e) => {
+      if (Date.now() < suppressClickUntil) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }, true);
+
+    document.addEventListener('click', (e) => {
+      const el = e.target.closest('[data-action]');
+      if (!el) return;
+      const fn = ACTIONS[el.dataset.action];
+      if (fn) {
+        if (el.dataset.action === 'activate-persona') e.stopPropagation();
+        fn(el, e);
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      const el = e.target;
+      if ((e.key === 'Enter' || e.key === ' ') && el.getAttribute && el.getAttribute('role') === 'button' && el.dataset.action) {
+        e.preventDefault();
+        el.click();
+      }
+      if (e.key === 'Escape') handleBack();
+    });
+
+    document.addEventListener('input', (e) => {
+      if (e.target.id === 'chatsSearchInput') {
+        state.chatsQuery = e.target.value;
+        renderChatsList();
+      } else if (e.target.id === 'charsSearchInput') {
+        state.charsQuery = e.target.value;
+        renderCharactersList();
+      }
+    });
+
+    const input = $('#chatInput');
+    input.addEventListener('input', () => autoGrow(input, 168));
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      if (e.ctrlKey || e.metaKey || (prefs.enterSends && !e.shiftKey)) {
+        e.preventDefault();
+        if (state.room && !state.generations[state.room.chatId]) sendMessage();
+      }
+    });
+    input.addEventListener('focus', () => {
+      setTimeout(() => {
+        if (isNearBottom()) scrollToBottom();
+      }, 250);
+    });
+
+    const scroll = $('#chatScroll');
+    let ticking = false;
+    scroll.addEventListener('scroll', () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        updateJumpBtn();
+      });
+    }, { passive: true });
+
+    // Keep the layer stack honest when the legacy native back handler hides a layer.
+    const layersHost = $('#layers');
+    new MutationObserver((mutations) => {
+      mutations.forEach(m => {
+        const el = m.target;
+        if (el && el._layer && el.classList.contains('hidden') && !el._layer.closed) closeLayer(el._layer, { immediate: true });
+      });
+    }).observe(layersHost, { attributes: true, attributeFilter: ['class'], subtree: true });
+
+    // Keyboard visibility (native callback + visualViewport fallback)
+    const setKeyboard = (open) => document.body.classList.toggle('kb-open', Boolean(open));
+    window.onAndroidKeyboardVisibilityChanged = setKeyboard;
+    if (window.visualViewport) {
+      let base = window.visualViewport.height;
+      window.visualViewport.addEventListener('resize', () => {
+        const h = window.visualViewport.height;
+        if (h > base) base = h;
+        setKeyboard(base - h > 120);
+        if (state.room && isNearBottom()) scrollToBottom();
       });
     }
 
-    function attachChatsScrollAutoHide(el) {
-      if (!el) return;
-      let lastScrollY = el.scrollTop || 0;
-      let touchStartY = null;
-
-      el.addEventListener('touchstart', (e) => {
-        if (e.touches && e.touches.length === 1) {
-          touchStartY = e.touches[0].clientY;
-        }
-      }, { passive: true });
-
-      el.addEventListener('touchmove', (e) => {
-        if (touchStartY === null || !e.touches || e.touches.length !== 1) return;
-        const isChatsTab = document.getElementById('tab-chats')?.classList.contains('active');
-        if (!isChatsTab) return;
-        const dy = touchStartY - e.touches[0].clientY; // dy > 0 means finger moves up -> scrolling down
-        if (dy > 18) {
-          setBottomNavHidden(true);
-          touchStartY = e.touches[0].clientY;
-        } else if (dy < -18 && !state.isKeyboardOpen) {
-          setBottomNavHidden(false);
-          touchStartY = e.touches[0].clientY;
-        }
-      }, { passive: true });
-
-      el.addEventListener('scroll', () => {
-        const isChatsTab = document.getElementById('tab-chats')?.classList.contains('active');
-        if (!isChatsTab) return;
-        const curY = el.scrollTop;
-        if (state.ignoreScrollEvents || Date.now() < navTransitionUntil) {
-          lastScrollY = curY;
-          return;
-        }
-        const delta = curY - lastScrollY;
-        if (curY <= 12 && !state.isKeyboardOpen) {
-          setBottomNavHidden(false);
-        } else if (delta > 8 && curY > 24) {
-          setBottomNavHidden(true);
-        } else if (delta < -8 && !state.isKeyboardOpen) {
-          setBottomNavHidden(false);
-        }
-        lastScrollY = curY;
-      }, { passive: true });
-    }
-
-    attachChatsScrollAutoHide(document.getElementById('chatMessagesContainer'));
-    attachChatsScrollAutoHide(document.getElementById('chatsListView'));
-
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') {
-        checkAgyAuthStatus();
-      }
+      if (document.visibilityState === 'visible') refreshAgyStatus();
     });
-    initApp();
-  });
+  }
 
-  // Expose public UI methods
+  function showLoadError(err) {
+    state.loadError = (err && err.message) || 'Встроенный сервер не отвечает';
+    renderAllTabs();
+  }
+
+  async function loadWebVersion() {
+    try {
+      const res = await fetch('version.json', { cache: 'no-store' });
+      const v = await res.json();
+      state.webVersion = v.version || '';
+      if (state.tab === 'settings') renderSettingsTab();
+    } catch (e) {
+      // version is informational only
+    }
+  }
+
+  function init() {
+    applyTheme();
+    initEvents();
+    initGestures();
+    renderAllTabs();
+    loadWebVersion();
+    loadAll()
+      .then(() => setTimeout(() => checkForUpdates(false), 800))
+      .catch(showLoadError);
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+
+  // ==========================================================================
+  // PUBLIC SURFACE
+  // ==========================================================================
   window.appUI = {
+    handleBack,
     openTab,
-    openModelModal,
-    openModal,
-    closeModal,
-    openNewChatModal,
-    onNewChatCharacterChange,
-    confirmCreateChat,
-    toggleChatGroup,
     openChatRoom,
     closeChatRoom,
-    openAvatarViewer,
-    closeAvatarViewer,
-    resetAvatarZoom,
-    openExportChatModal,
-    setExportFormat,
-    rebuildExportPreview,
-    copyExportedChat,
-    shareExportedChat,
-    downloadExportedChat,
-    toggleStreamingDetails,
-    closeStreamingBox,
-    sendMessage,
-    insertAsterisks,
-    swipeMessage,
-    regenerateMessage,
-    openEditMessageModal,
-    saveEditedMessage,
-    deleteMessage,
-    deleteChat,
-    switchCharSubtab,
+    openNewChat,
     openCharacterEditor,
-    editCurrentChatCharacter,
-    handleAvatarUpload,
-    updateAvatarPreview,
-    saveCharacterFromModal,
-    deleteCharacterFromModal,
     openPersonaEditor,
-    savePersonaFromModal,
-    deletePersonaFromModal,
-    activatePersona,
-    openPersonaQuickModal,
-    loadFiles,
-    promptCreateFolder,
-    promptCreateFile,
-    openFileEditor,
-    openChatMemoryFile,
-    saveFileFromModal,
-    deleteFileFromModal,
-    deleteWorkspaceItem,
-    selectModel,
-    setEffort,
-    refreshModels,
-    startAgyOAuth,
-    exchangeAgyOAuthCode,
-    logoutAgyOAuth,
-    onNewChatModelChange,
-    installClaudeRuntime,
-    startClaudeAuth,
-    exchangeClaudeAuthCode,
-    logoutClaudeAuth,
-    saveSettings,
-    applyServerUrl,
-    checkForUpdates,
-    applyGitUpdate,
-    downloadLatestApkFromGit,
-    resetOtaUpdate,
-    saveGitRepoConfig,
-    openGitRepoExternal,
-    dismissUpdateBanner,
-    exportFullBackup,
-    importFullBackup,
+    openSettingsPage,
+    // Legacy name kept for older native back handlers / bookmarks.
+    closeModal: (id) => {
+      const el = document.getElementById(id);
+      if (el && el._layer) el._layer.close();
+    },
   };
 
-  // Pure, side-effect-free helpers exposed for the unit tests in mobile/tests/.
+  // Pure, side-effect-free helpers for the unit tests in mobile/tests/.
   // Not part of the UI API — do not call these from markup.
   window.__appInternals = {
     escapeHtml,
     stripMarkdownPreview,
     formatRoleplayHtml,
+    highlightDialogue,
     resolveAvatarUrl,
     isClaudeCliModel,
+    providerOf,
+    effortOptionsFor,
+    effectiveEffort,
+    parseServerTime,
+    formatRelativeTime,
+    formatMessageTime,
+    pluralRu,
+    initialsOf,
+    hueFromString,
+    sortChats,
+    filterChats,
+    isDefaultChatTitle,
   };
 })();
-

@@ -197,7 +197,8 @@ Write-Host "SHA-256: $ApkSha"
 $VersionJsonPath = "$ProjectRoot\version.json"
 if (Test-Path $VersionJsonPath) {
     try {
-        $Manifest = Get-Content $VersionJsonPath -Raw | ConvertFrom-Json
+        # -Encoding UTF8: Windows PowerShell 5.1 otherwise reads the BOM-less file as ANSI (cp1251)
+        $Manifest = Get-Content $VersionJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $Manifest | Add-Member -NotePropertyName apkSha256 -NotePropertyValue $ApkSha -Force
         $Manifest | Add-Member -NotePropertyName apkSize -NotePropertyValue $ApkInfo.Length -Force
         $Json = $Manifest | ConvertTo-Json -Depth 20

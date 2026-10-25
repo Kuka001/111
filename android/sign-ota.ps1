@@ -138,7 +138,8 @@ function Get-Sha256Hex([string]$Path) {
     (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLower()
 }
 
-$Manifest = Get-Content $VersionJson -Raw | ConvertFrom-Json
+# -Encoding UTF8: Windows PowerShell 5.1 otherwise reads the BOM-less file as ANSI (cp1251)
+$Manifest = Get-Content $VersionJson -Raw -Encoding UTF8 | ConvertFrom-Json
 $Version  = $Manifest.version
 $Build    = [int]$Manifest.build
 
