@@ -133,6 +133,12 @@ public class LocalBackendServer {
     private volatile String claudeLoginManualUrl = "";
     private volatile long claudeLoginStartedAt = 0L;
     private static final String CLAUDE_LOGIN_DEBUG_LOG = "agy-login-debug.log";
+    /** No sign-in link by then means Claude Code hung while starting. */
+    private static final long CLAUDE_LOGIN_START_TIMEOUT_MS = 75000L;
+
+    // The self-test runs for minutes; the UI polls its current stage.
+    private volatile boolean claudeSelftestRunning = false;
+    private volatile String claudeSelftestProgress = "";
 
     private volatile ServerSocket oauthCallbackServer;
     private volatile String pendingCodeVerifier = "";
@@ -2444,6 +2450,10 @@ public class LocalBackendServer {
         res.put("loginUrl", claudeLoginManualUrl);
         res.put("loginAutoUrl", readFirstUrl(claudeRuntime.browserUrlFile()));
         res.put("loginElapsed", claudeLoginStartedAt > 0 ? (System.currentTimeMillis() - claudeLoginStartedAt) / 1000 : 0);
+        res.put("loginTimeout", CLAUDE_LOGIN_START_TIMEOUT_MS / 1000);
+        res.put("selftestRunning", claudeSelftestRunning);
+        res.put("selftestProgress", claudeSelftestProgress);
+        res.put("safeMode", claudeRuntime.isSafeMode());
         if (pending || !claudeLoginError.isEmpty()) {
             res.put("loginOutput", loginOutputTail());
             res.put("loginDebug", fileTail(claudeRuntime.tmpFile(CLAUDE_LOGIN_DEBUG_LOG), 1500));
@@ -2508,12 +2518,14 @@ public class LocalBackendServer {
         claudeRuntime.browserUrlFile().delete();
         claudeRuntime.tmpFile(CLAUDE_LOGIN_DEBUG_LOG).delete();
 
+        // --debug-to-stderr: the debug log arrives line by line as it is written
+        // (a --debug-file is flushed late, and stays empty if the CLI hangs).
+        // Global options go before the subcommand: the CLI parses positionally.
         List<String> args = new ArrayList<>();
+        args.add("--debug-to-stderr");
         args.add("auth");
         args.add("login");
         args.add("--claudeai");
-        args.add("--debug-file");
-        args.add("/tmp/" + CLAUDE_LOGIN_DEBUG_LOG);
         ProcessBuilder pb = claudeRuntime.newClaudeProcess(args);
         pb.environment().put("BROWSER", ClaudeRuntime.GUEST_BROWSER_SHIM);
         final Process proc;
@@ -2536,13 +2548,14 @@ public class LocalBackendServer {
             public void run() {
                 try {
                     int code = proc.waitFor();
-                    if (pendingClaudeAuthProcess == proc) pendingClaudeAuthProcess = null;
-                    if (!claudeRuntime.isAuthenticated()) {
+                    // Stopped on purpose (cancel, a new attempt, the hang watchdog
+                    // below): nothing to report, or the report is already there.
+                    boolean current = pendingClaudeAuthProcess == proc;
+                    if (current) pendingClaudeAuthProcess = null;
+                    if (current && !claudeRuntime.isAuthenticated() && claudeLoginError.isEmpty()) {
                         String out = loginOutputTail();
-                        String dbg = fileTail(claudeRuntime.tmpFile(CLAUDE_LOGIN_DEBUG_LOG), 1500);
                         claudeLoginError = "Вход не завершён (" + describeExit(code) + ")"
-                            + (out.isEmpty() ? "." : ":\n" + out)
-                            + (dbg.isEmpty() ? "" : "\n--- debug ---\n" + dbg);
+                            + (out.isEmpty() ? "." : ":\n" + out);
                     }
                 } catch (InterruptedException ignored) {
                 }
@@ -2550,6 +2563,32 @@ public class LocalBackendServer {
         });
         watcher.setDaemon(true);
         watcher.start();
+
+        // No link at all after the timeout: Claude Code hung while starting.
+        // Record what every sandbox process is doing, then stop the attempt.
+        Thread watchdog = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                long deadline = System.currentTimeMillis() + CLAUDE_LOGIN_START_TIMEOUT_MS;
+                while (System.currentTimeMillis() < deadline) {
+                    if (pendingClaudeAuthProcess != proc || !isAlive(proc)) return;
+                    if (!claudeLoginManualUrl.isEmpty() || !readFirstUrl(claudeRuntime.browserUrlFile()).isEmpty()) return;
+                    try { Thread.sleep(500); } catch (InterruptedException e) { return; }
+                }
+                if (pendingClaudeAuthProcess != proc || !isAlive(proc) || claudeRuntime.isAuthenticated()) return;
+                if (!claudeLoginManualUrl.isEmpty() || !readFirstUrl(claudeRuntime.browserUrlFile()).isEmpty()) return;
+                String snapshot = sandboxSnapshot();
+                String out = loginOutputTail();
+                claudeLoginError = "Claude Code не ответил за " + (CLAUDE_LOGIN_START_TIMEOUT_MS / 1000)
+                    + " с: завис при запуске, ещё до ссылки для входа. Нажмите «Проверить запуск» —"
+                    + " проверка подберёт режим, в котором Claude Code запускается на этом телефоне.\n"
+                    + (out.isEmpty() ? "\n(Claude Code ничего не вывел)" : "\n--- вывод ---\n" + out)
+                    + "\n--- процессы ---\n" + snapshot;
+                stopPendingClaudeAuth();
+            }
+        });
+        watchdog.setDaemon(true);
+        watchdog.start();
 
         JSONObject res = new JSONObject();
         res.put("ok", true);
@@ -2567,7 +2606,9 @@ public class LocalBackendServer {
                     while ((l = br.readLine()) != null) {
                         String clean = stripAnsi(l);
                         synchronized (claudeLoginOutput) {
-                            if (claudeLoginOutput.length() < 8000) claudeLoginOutput.append(clean).append("\n");
+                            // Debug lines keep coming: keep the latest part.
+                            claudeLoginOutput.append(clean).append("\n");
+                            if (claudeLoginOutput.length() > 24000) claudeLoginOutput.delete(0, claudeLoginOutput.length() - 16000);
                         }
                         if (scanUrls && claudeLoginManualUrl.isEmpty()) {
                             String url = extractFirstUrl(clean);
@@ -2661,6 +2702,19 @@ public class LocalBackendServer {
         if (!claudeRuntime.isReady()) {
             return errorJson(409, "Сначала скачайте среду Claude Code.");
         }
+        synchronized (this) {
+            if (claudeSelftestRunning) return errorJson(409, "Проверка уже идёт.");
+            claudeSelftestRunning = true;
+        }
+        try {
+            return runClaudeSelfTest();
+        } finally {
+            claudeSelftestRunning = false;
+            claudeSelftestProgress = "";
+        }
+    }
+
+    private JSONObject runClaudeSelfTest() throws Exception {
         refreshGuestDns();
         JSONArray stages = new JSONArray();
         StringBuilder report = new StringBuilder();
@@ -2670,7 +2724,9 @@ public class LocalBackendServer {
             .append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL)
             .append(" · ").append(android.os.Build.SUPPORTED_ABIS.length > 0 ? android.os.Build.SUPPORTED_ABIS[0] : "?")
             .append("\nruntime ").append(ClaudeRuntime.version())
+            .append(" · режим до проверки: ").append(claudeRuntime.isSafeMode() ? "безопасный Bun" : "обычный")
             .append("\nresolv.conf: ").append(claudeRuntime.guestResolvConf().trim().replace("\n", "; ")).append("\n");
+        final int headerEnd = report.length();
 
         ClaudeRuntime.Engine working = null;
         ClaudeRuntime.Engine[] order = claudeRuntime.preferredEngine() == ClaudeRuntime.Engine.STATIC
@@ -2679,6 +2735,7 @@ public class LocalBackendServer {
         for (ClaudeRuntime.Engine engine : order) {
             if (!claudeRuntime.hasEngine(engine)) continue;
             String label = engine == ClaudeRuntime.Engine.ANDROID ? "proot (Termux)" : "proot (static)";
+            claudeSelftestProgress = label + " · запуск";
             JSONObject s1 = runStage(label + " · запуск", claudeRuntime.newProotVersionProcess(engine), 20000L, null);
             stages.put(s1);
             appendStage(report, s1);
@@ -2688,6 +2745,7 @@ public class LocalBackendServer {
             probe.add("/bin/busybox");
             probe.add("echo");
             probe.add("agy-sandbox-ok");
+            claudeSelftestProgress = label + " · песочница Alpine";
             JSONObject s2 = runStage(label + " · песочница Alpine",
                 claudeRuntime.newGuestProcess(engine, probe, 0), 30000L, "agy-sandbox-ok");
             if (!s2.optBoolean("ok")) {
@@ -2700,8 +2758,9 @@ public class LocalBackendServer {
             List<String> version = new ArrayList<>();
             version.add(ClaudeRuntime.GUEST_CLAUDE);
             version.add("--version");
+            claudeSelftestProgress = label + " · Claude Code";
             JSONObject s3 = runStage(label + " · Claude Code",
-                claudeRuntime.newGuestProcess(engine, version, 0), 90000L, null);
+                claudeRuntime.newGuestProcess(engine, version, 0), 90000L, 90000L, null, true);
             if (!s3.optBoolean("ok")) {
                 s3.put("verbose", runStage("verbose", claudeRuntime.newGuestProcess(engine, version, 1), 90000L, null).optString("output"));
             }
@@ -2712,7 +2771,11 @@ public class LocalBackendServer {
                 break;
             }
         }
-        if (working != null) {
+        boolean fullStartOk = false;
+        String summary;
+        if (working == null) {
+            summary = "proot или Claude Code не запускаются на этом телефоне.";
+        } else {
             claudeRuntime.setPreferredEngine(working);
             String label = working == ClaudeRuntime.Engine.ANDROID ? "proot (Termux)" : "proot (static)";
 
@@ -2721,40 +2784,145 @@ public class LocalBackendServer {
             dns.add("/bin/busybox");
             dns.add("nslookup");
             dns.add("api.anthropic.com");
+            claudeSelftestProgress = label + " · сеть (DNS)";
             JSONObject s4 = runStage(label + " · сеть (DNS)", claudeRuntime.newGuestProcess(working, dns, 0), 25000L, null);
             stages.put(s4);
             appendStage(report, s4);
 
-            // A full CLI start (not the --version fast path) with a debug log, the
-            // same start-up path sign-in and replies go through.
-            File dbgFile = claudeRuntime.tmpFile("agy-selftest-debug.log");
-            dbgFile.delete();
-            List<String> full = new ArrayList<>();
-            full.add(ClaudeRuntime.GUEST_CLAUDE);
-            full.add("auth");
-            full.add("status");
-            full.add("--json");
-            full.add("--debug-file");
-            full.add("/tmp/agy-selftest-debug.log");
-            JSONObject s5 = runStage(label + " · полный запуск Claude Code", claudeRuntime.newGuestProcess(working, full, 0), 90000L, null);
-            // `auth status` exits 1 when signed out; that still proves start-up works.
-            if (!s5.optBoolean("ok") && s5.optInt("exitCode", -1) == 1 && s5.optString("output").contains("loggedIn")) {
-                s5.put("ok", true);
+            boolean scripts = true;
+            try {
+                claudeRuntime.installDiagScripts();
+            } catch (Exception e) {
+                scripts = false;
+                report.append("\n(диагностические скрипты не установлены: ").append(e.getMessage()).append(")\n");
             }
-            String dbg = fileTail(dbgFile, 2500);
-            if (!dbg.isEmpty() && !s5.optBoolean("ok")) s5.put("verbose", dbg);
-            stages.put(s5);
-            appendStage(report, s5);
+
+            // Which runtime feature stalls, if any: the probe tries them one by one
+            // inside Claude Code's own Bun, first as is, then with the safe flags.
+            boolean preload = false;
+            if (scripts) {
+                JSONObject p = runProbe(working, label + " · проверка рантайма Bun", new ClaudeRuntime.RunOptions(), stages, report);
+                preload = p.optBoolean("preload");
+                if (preload && !p.optBoolean("ok")) {
+                    runProbe(working, label + " · проверка рантайма Bun (безопасный режим)", safeOptions(null), stages, report);
+                }
+            }
+
+            // Full start-up (the path sign-in and replies take), from the plain
+            // set-up to the most conservative one; the first that works is kept.
+            if (runFullStart(working, label + " · полный запуск Claude Code", new ClaudeRuntime.RunOptions(), preload, stages, report)) {
+                claudeRuntime.setSafeMode(false);
+                fullStartOk = true;
+                summary = "Claude Code запускается в обычном режиме.";
+            } else if (runFullStart(working, label + " · полный запуск (безопасный режим Bun)", safeOptions(null), preload, stages, report)) {
+                claudeRuntime.setSafeMode(true);
+                fullStartOk = true;
+                summary = "Claude Code запускается только в безопасном режиме Bun — он включён для входа и ответов.";
+            } else if (runFullStart(working, label + " · полный запуск (чистый профиль)", safeOptions(claudeRuntime.freshHome()), preload, stages, report)) {
+                // Old Claude Code data was in the way: start the profile over
+                // (credentials are carried over) and see if the plain mode works now.
+                claudeRuntime.resetHome();
+                fullStartOk = true;
+                if (runFullStart(working, label + " · полный запуск (новый профиль, обычный режим)", new ClaudeRuntime.RunOptions(), preload, stages, report)) {
+                    claudeRuntime.setSafeMode(false);
+                    summary = "Мешали старые данные Claude Code — профиль создан заново (вход, если был, сохранён).";
+                } else {
+                    claudeRuntime.setSafeMode(true);
+                    summary = "Мешали старые данные Claude Code — профиль создан заново (вход, если был, сохранён); включён безопасный режим Bun.";
+                }
+            } else {
+                JSONObject last = stages.optJSONObject(stages.length() - 1);
+                summary = last != null && last.optBoolean("finished")
+                    ? "Claude Code при запуске завершается с ошибкой (" + last.optString("exit")
+                        + ") во всех режимах. Скопируйте отчёт и пришлите его."
+                    : "Claude Code зависает при запуске во всех режимах. Скопируйте отчёт и пришлите его: в нём видно, на чём именно.";
+            }
+            claudeRuntime.discardFreshHome();
         }
+        report.insert(headerEnd, "Итог: " + summary + "\n");
 
         JSONObject res = new JSONObject();
-        res.put("ok", working != null);
+        res.put("ok", working != null && fullStartOk);
         res.put("engine", working == null ? "" : (working == ClaudeRuntime.Engine.ANDROID ? "android" : "static"));
+        res.put("summary", summary);
+        res.put("safeMode", claudeRuntime.isSafeMode());
         res.put("stages", stages);
         // Back-compat with the 1.6.2 UI, which only shows `output`.
         res.put("output", report.toString().trim());
         res.put("report", report.toString().trim());
         return res;
+    }
+
+    private static ClaudeRuntime.RunOptions safeOptions(File home) {
+        ClaudeRuntime.RunOptions o = new ClaudeRuntime.RunOptions();
+        o.safe = true;
+        o.home = home;
+        return o;
+    }
+
+    /**
+     * `claude --version` with the probe preloaded: the probe runs its checks and
+     * exits before Claude Code does. ok = it finished with no failed check.
+     */
+    private JSONObject runProbe(ClaudeRuntime.Engine engine, String name, ClaudeRuntime.RunOptions opts,
+                                JSONArray stages, StringBuilder report) throws Exception {
+        claudeSelftestProgress = name;
+        List<String> cmd = new ArrayList<>();
+        cmd.add(ClaudeRuntime.GUEST_CLAUDE);
+        cmd.add("--version");
+        opts.env.put("BUN_OPTIONS", "--preload " + ClaudeRuntime.GUEST_PROBE);
+        JSONObject s = runStage(name, claudeRuntime.newGuestProcess(engine, cmd, 0, opts), 45000L, 60000L, null, true);
+        String out = s.optString("output");
+        boolean preload = out.contains("[probe");
+        s.put("preload", preload);
+        s.put("ok", preload && out.contains("done · всё в порядке"));
+        if (!preload && s.optBoolean("finished")) {
+            s.put("exit", s.optString("exit") + " · предзагрузка (BUN_OPTIONS) не сработала");
+        }
+        stages.put(s);
+        appendStage(report, s);
+        return s;
+    }
+
+    /**
+     * A full CLI start: `claude auth status` with the debug log on stderr and,
+     * when preloads work, the start-up trace (heartbeat + child processes).
+     */
+    private boolean runFullStart(ClaudeRuntime.Engine engine, String name, ClaudeRuntime.RunOptions opts, boolean trace,
+                                 JSONArray stages, StringBuilder report) throws Exception {
+        claudeSelftestProgress = name;
+        // Global options go before the subcommand: the CLI parses positionally.
+        List<String> cmd = new ArrayList<>();
+        cmd.add(ClaudeRuntime.GUEST_CLAUDE);
+        cmd.add("--debug-to-stderr");
+        cmd.add("auth");
+        cmd.add("status");
+        cmd.add("--json");
+        if (trace) opts.env.put("BUN_OPTIONS", "--preload " + ClaudeRuntime.GUEST_TRACE);
+        // Waits longer while Claude Code keeps logging: a slow start is not a hang.
+        JSONObject s = runStage(name, claudeRuntime.newGuestProcess(engine, cmd, 0, opts), 40000L, 150000L, null, true);
+        if (trace && s.optBoolean("finished") && s.optString("output").contains("--preload")) {
+            // The preload flag reached Claude Code's own arguments: run it plain.
+            opts.env.remove("BUN_OPTIONS");
+            s = runStage(name + " (без трассировки)", claudeRuntime.newGuestProcess(engine, cmd, 0, opts), 40000L, 150000L, null, true);
+        }
+        // `auth status` exits 1 when signed out; that still proves start-up works.
+        String out = s.optString("output");
+        if (!s.optBoolean("ok") && s.optInt("exitCode", -1) == 1 && out.contains("loggedIn")) {
+            s.put("ok", true);
+        }
+        stages.put(s);
+        appendStage(report, s);
+        return s.optBoolean("ok");
+    }
+
+    /** What every process this app started is doing right now (for hang reports). */
+    private String sandboxSnapshot() {
+        try {
+            return ProcSnapshot.ofDescendants(android.os.Process.myPid(), claudeRuntime.getRuntimeDir().getAbsolutePath());
+        } catch (Exception e) {
+            return "(снимок процессов недоступен: " + e.getMessage() + ")";
+        }
     }
 
     private void appendStage(StringBuilder report, JSONObject s) {
@@ -2764,10 +2932,23 @@ public class LocalBackendServer {
         if (!out.isEmpty()) report.append(out).append("\n");
         String verbose = s.optString("verbose").trim();
         if (!verbose.isEmpty()) report.append("--- verbose ---\n").append(verbose).append("\n");
+        String snapshot = s.optString("snapshot").trim();
+        if (!snapshot.isEmpty()) report.append("--- процессы в момент зависания ---\n").append(snapshot).append("\n");
     }
 
     /** Runs one diagnostic process with a timeout; ok = exit 0 (and expected text, if given). */
     private JSONObject runStage(String name, ProcessBuilder pb, long timeoutMs, String expect) throws Exception {
+        return runStage(name, pb, timeoutMs, timeoutMs, expect, false);
+    }
+
+    /**
+     * Same, but past {@code timeoutMs} it keeps waiting (up to {@code hardMaxMs})
+     * while the process still prints something new, so a slow start is not taken
+     * for a hang. A hung process is described from /proc before it is stopped.
+     * The output keeps its beginning and its latest part.
+     */
+    private JSONObject runStage(String name, ProcessBuilder pb, long timeoutMs, long hardMaxMs, String expect,
+                                boolean snapshotOnHang) throws Exception {
         JSONObject r = new JSONObject();
         r.put("name", name);
         long started = System.currentTimeMillis();
@@ -2777,6 +2958,7 @@ public class LocalBackendServer {
             proc = pb.start();
         } catch (Exception e) {
             r.put("ok", false);
+            r.put("finished", false);
             r.put("exitCode", -2);
             r.put("exit", "не запустился");
             r.put("seconds", "0.0");
@@ -2784,7 +2966,7 @@ public class LocalBackendServer {
             return r;
         }
         try { proc.getOutputStream().close(); } catch (Exception ignored) {}
-        final StringBuilder out = new StringBuilder();
+        final StageOutput out = new StageOutput();
         final Process p = proc;
         Thread t = new Thread(new Runnable() {
             @Override
@@ -2792,9 +2974,7 @@ public class LocalBackendServer {
                 try {
                     BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
                     String l;
-                    while ((l = br.readLine()) != null) {
-                        synchronized (out) { if (out.length() < 6000) out.append(stripAnsi(l)).append("\n"); }
-                    }
+                    while ((l = br.readLine()) != null) out.add(stripAnsi(l));
                 } catch (Exception ignored) {
                 }
             }
@@ -2802,24 +2982,74 @@ public class LocalBackendServer {
         t.setDaemon(true);
         t.start();
         boolean finished = false;
-        while (System.currentTimeMillis() - started < timeoutMs) {
+        while (true) {
             if (!isAlive(proc)) { finished = true; break; }
+            long now = System.currentTimeMillis();
+            long elapsed = now - started;
+            if (elapsed >= hardMaxMs) break;
+            if (elapsed >= timeoutMs && now - out.lastProgressAt() > 10000L) break;
             try { Thread.sleep(100); } catch (InterruptedException ignored) { break; }
         }
+        long seconds = (System.currentTimeMillis() - started) / 1000;
         if (!finished) {
+            if (snapshotOnHang) r.put("snapshot", sandboxSnapshot());
             try { proc.destroy(); } catch (Exception ignored) {}
+            long until = System.currentTimeMillis() + 2000L;
+            while (isAlive(proc) && System.currentTimeMillis() < until) {
+                try { Thread.sleep(100); } catch (InterruptedException ignored) { break; }
+            }
+            if (isAlive(proc)) {
+                try { proc.destroyForcibly(); } catch (Exception ignored) {}
+            }
         }
         try { t.join(1500); } catch (InterruptedException ignored) {}
         int code = finished ? proc.exitValue() : -1;
-        String text;
-        synchronized (out) { text = out.toString().trim(); }
+        String text = out.text();
         boolean ok = finished && code == 0 && (expect == null || text.contains(expect));
         r.put("ok", ok);
+        r.put("finished", finished);
         r.put("exitCode", code);
-        r.put("exit", finished ? describeExit(code) : "нет ответа за " + (timeoutMs / 1000) + " с");
+        r.put("exit", finished ? describeExit(code) : "нет ответа за " + seconds + " с");
         r.put("seconds", String.format(Locale.US, "%.1f", (System.currentTimeMillis() - started) / 1000.0));
         r.put("output", text);
         return r;
+    }
+
+    /** Output of a diagnostic run: the first lines and the latest ones. */
+    private static final class StageOutput {
+        private static final int HEAD_CHARS = 2500;
+        private static final int TAIL_CHARS = 7000;
+        private final StringBuilder head = new StringBuilder();
+        private final java.util.ArrayDeque<String> tail = new java.util.ArrayDeque<>();
+        private int tailChars = 0;
+        private int skipped = 0;
+        private volatile long lastProgressAt = System.currentTimeMillis();
+
+        synchronized void add(String line) {
+            // The trace's heartbeat shows the process is alive, not that it moves on.
+            if (!line.contains("] heartbeat ")) lastProgressAt = System.currentTimeMillis();
+            if (tail.isEmpty() && skipped == 0 && head.length() + line.length() < HEAD_CHARS) {
+                head.append(line).append('\n');
+                return;
+            }
+            tail.addLast(line);
+            tailChars += line.length() + 1;
+            while (tailChars > TAIL_CHARS && tail.size() > 1) {
+                tailChars -= tail.removeFirst().length() + 1;
+                skipped++;
+            }
+        }
+
+        long lastProgressAt() {
+            return lastProgressAt;
+        }
+
+        synchronized String text() {
+            StringBuilder sb = new StringBuilder(head);
+            if (skipped > 0) sb.append("… (пропущено строк: ").append(skipped).append(") …\n");
+            for (String l : tail) sb.append(l).append('\n');
+            return sb.toString().trim();
+        }
     }
 
     /** Exit code with the signal spelled out (Java reports 128 + signal for killed processes). */
@@ -2869,7 +3099,7 @@ public class LocalBackendServer {
     private String loginOutputTail() {
         String out;
         synchronized (claudeLoginOutput) { out = claudeLoginOutput.toString().trim(); }
-        return out.length() > 1200 ? "…" + out.substring(out.length() - 1200) : out;
+        return out.length() > 4000 ? "…" + out.substring(out.length() - 4000) : out;
     }
 
     private String readFirstUrl(File f) {

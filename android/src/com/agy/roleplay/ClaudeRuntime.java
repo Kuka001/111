@@ -47,6 +47,8 @@ import java.util.zip.GZIPInputStream;
  *   claude     Claude Code CLI (npm @anthropic-ai/claude-code-linux-arm64-musl)
  *   home/      HOME inside the sandbox (/root): credentials, generated prompts
  *   tmp/       /tmp inside the sandbox and PROOT_TMP_DIR
+ *   .engine    proot build that passed the self-test (android | static)
+ *   .compat    "safe" when Claude Code only starts with Bun's safe flags
  *
  * This class owns only the environment: download/verify/extract, readiness and
  * auth checks, and building a configured (unstarted) proot ProcessBuilder. The
@@ -138,6 +140,8 @@ final class ClaudeRuntime {
     private final File androidLibDir;
     private final File engineFile;
     private final File procFakeDir;
+    private final File compatFile;
+    private final File freshHomeDir;
 
     ClaudeRuntime(Context context) {
         this(context, context.getFilesDir());
@@ -164,6 +168,12 @@ final class ClaudeRuntime {
         this.androidLibDir = new File(androidDir, "lib");
         this.engineFile = new File(runtimeDir, ".engine");
         this.procFakeDir = new File(runtimeDir, "procfake");
+        this.compatFile = new File(runtimeDir, ".compat");
+        this.freshHomeDir = new File(runtimeDir, "home-check");
+    }
+
+    File getRuntimeDir() {
+        return runtimeDir;
     }
 
     File getHomeDir() {
@@ -399,7 +409,11 @@ final class ClaudeRuntime {
     }
 
     private void copyAsset(String name, File dest) throws Exception {
-        InputStream in = context.getAssets().open(ANDROID_ASSET_DIR + "/" + name);
+        copyAsset(ANDROID_ASSET_DIR, name, dest);
+    }
+
+    private void copyAsset(String dir, String name, File dest) throws Exception {
+        InputStream in = context.getAssets().open(dir + "/" + name);
         FileOutputStream out = new FileOutputStream(dest);
         try {
             byte[] buf = new byte[1 << 16];
@@ -442,6 +456,111 @@ final class ClaudeRuntime {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Bun compatibility mode and diagnostics
+    // -------------------------------------------------------------------------
+
+    /**
+     * Switches of Bun (the runtime inside the Claude Code binary) that turn off
+     * newer-kernel fast paths: epoll_pwait2, pidfd child waits, the spawnSync
+     * fast path, RWF_NOWAIT reads, memfd and madvise tricks. Older phone kernels
+     * and proot's ptrace emulation can stall on them; the fallbacks are slower
+     * but plain. Turned on when the self-test finds Claude Code only starts so.
+     */
+    static final String[][] BUN_SAFE_FLAGS = new String[][]{
+        {"BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2", "1"},
+        {"BUN_FEATURE_FLAG_FORCE_WAITER_THREAD", "1"},
+        {"BUN_FEATURE_FLAG_DISABLE_SPAWNSYNC_FAST_PATH", "1"},
+        {"BUN_FEATURE_FLAG_DISABLE_RWF_NONBLOCK", "1"},
+        {"BUN_FEATURE_FLAG_DISABLE_MEMFD", "1"},
+        {"BUN_FEATURE_FLAG_DISABLE_STANDALONE_MADVISE", "1"},
+    };
+
+    /** Guest paths of the self-test's preload scripts (from APK assets). */
+    static final String GUEST_PROBE = "/opt/agy/probe.mjs";
+    static final String GUEST_TRACE = "/opt/agy/trace.cjs";
+    static final String DIAG_ASSET_DIR = "claude-diag";
+
+    /** How one sandbox run is set up; the defaults are what sign-in and replies use. */
+    static final class RunOptions {
+        /** Bun safe flags (see {@link #BUN_SAFE_FLAGS}). */
+        boolean safe;
+        /** Bound as /root instead of home/, e.g. an empty profile for a check. */
+        File home;
+        final java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
+    }
+
+    /** Options matching the saved compatibility mode. */
+    RunOptions defaultOptions() {
+        RunOptions o = new RunOptions();
+        o.safe = isSafeMode();
+        return o;
+    }
+
+    boolean isSafeMode() {
+        try {
+            return compatFile.isFile()
+                && "safe".equals(new String(readAll(new FileInputStream(compatFile)), StandardCharsets.UTF_8).trim());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    void setSafeMode(boolean on) {
+        if (!on) {
+            compatFile.delete();
+            return;
+        }
+        try {
+            writeText(compatFile, "safe");
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Copies the probe/trace scripts into the rootfs (/opt/agy). */
+    void installDiagScripts() throws Exception {
+        if (context == null) return;
+        File dir = new File(rootfsDir, "opt/agy");
+        dir.mkdirs();
+        copyAsset(DIAG_ASSET_DIR, "probe.mjs", new File(dir, "probe.mjs"));
+        copyAsset(DIAG_ASSET_DIR, "trace.cjs", new File(dir, "trace.cjs"));
+    }
+
+    /** An empty HOME for a check run, recreated on every call. */
+    File freshHome() {
+        deleteRecursive(freshHomeDir);
+        freshHomeDir.mkdirs();
+        return freshHomeDir;
+    }
+
+    void discardFreshHome() {
+        deleteRecursive(freshHomeDir);
+    }
+
+    /**
+     * Starts Claude Code's profile over: the old HOME is kept aside as
+     * home.stale (replacing an older one), sign-in credentials are carried over.
+     */
+    void resetHome() throws Exception {
+        File stale = new File(runtimeDir, "home.stale");
+        deleteRecursive(stale);
+        File creds = new File(homeDir, ".claude/.credentials.json");
+        byte[] keep = creds.isFile() ? readAll(new FileInputStream(creds)) : null;
+        if (homeDir.exists() && !homeDir.renameTo(stale)) deleteRecursive(homeDir);
+        homeDir.mkdirs();
+        if (keep != null) {
+            File dest = new File(homeDir, ".claude/.credentials.json");
+            dest.getParentFile().mkdirs();
+            FileOutputStream out = new FileOutputStream(dest);
+            try {
+                out.write(keep);
+            } finally {
+                out.close();
+            }
+        }
+        deleteRecursive(freshHomeDir);
+    }
+
     /** `proot --version` only: shows whether the binary itself can execute. */
     ProcessBuilder newProotVersionProcess(Engine engine) {
         List<String> cmd = new ArrayList<>();
@@ -467,6 +586,11 @@ final class ClaudeRuntime {
 
     /** Runs an arbitrary guest command (e.g. /bin/busybox) under the given engine. */
     ProcessBuilder newGuestProcess(Engine engine, List<String> guestCmd, int verbose) {
+        return newGuestProcess(engine, guestCmd, verbose, defaultOptions());
+    }
+
+    /** Same, set up as described by {@code opts} (self-test variants). */
+    ProcessBuilder newGuestProcess(Engine engine, List<String> guestCmd, int verbose, RunOptions opts) {
         if (engine == Engine.ANDROID) {
             try {
                 ensureAndroidProot();
@@ -493,7 +617,7 @@ final class ClaudeRuntime {
         // Android denies apps several /proc files that runtimes read at start-up.
         for (String[] fake : procFakes()) bindTo(cmd, fake[0], fake[1]);
         bindTo(cmd, tmpDir.getAbsolutePath(), "/tmp");
-        bindTo(cmd, homeDir.getAbsolutePath(), GUEST_HOME);
+        bindTo(cmd, (opts.home != null ? opts.home : homeDir).getAbsolutePath(), GUEST_HOME);
         bindTo(cmd, claudeBin.getAbsolutePath(), GUEST_CLAUDE);
         cmd.add("-w");
         cmd.add(GUEST_HOME);
@@ -502,7 +626,12 @@ final class ClaudeRuntime {
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(runtimeDir);
         pb.redirectErrorStream(false);
-        applyEnv(pb.environment(), engine);
+        java.util.Map<String, String> env = pb.environment();
+        applyEnv(env, engine);
+        if (opts.safe) {
+            for (String[] flag : BUN_SAFE_FLAGS) env.put(flag[0], flag[1]);
+        }
+        env.putAll(opts.env);
         return pb;
     }
 

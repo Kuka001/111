@@ -1,12 +1,26 @@
 {
     "appName":  "AGY Roleplay Studio",
-    "version":  "1.6.4",
-    "build":  22,
-    "releaseDate":  "2026-10-25",
+    "version":  "1.6.5",
+    "build":  23,
+    "releaseDate":  "2026-10-26",
     "gitRepo":  "Kuka001/111",
     "gitBranch":  "main",
     "apkPath":  "agy-roleplay-android16.apk",
     "releases":  [
+                     {
+                         "version":  "1.6.5",
+                         "build":  23,
+                         "date":  "2026-10-26",
+                         "title":  "Claude Code: поиск причины зависания и автоподбор режима запуска",
+                         "ref":  "main",
+                         "changelog":  [
+                                           "«Проверить запуск» пошагово проверяет рантайм Bun внутри Claude Code (таймеры, файлы, запуск процессов, DNS, HTTPS) и показывает, на каком шаге он зависает",
+                                           "Если Claude Code зависает, проверка сама перебирает режимы: обычный, безопасный режим Bun, чистый профиль — рабочий режим сохраняется для входа и ответов",
+                                           "При зависании в отчёт попадает снимок процессов: состояние потоков, системные вызовы, открытые сокеты",
+                                           "Вход больше не крутится бесконечно: если за 75 секунд нет ссылки, он останавливается и показывает диагностику с кнопками «Проверить запуск» и «Скопировать»",
+                                           "Журнал отладки Claude Code приходит построчно во время входа, а не в конце"
+                                       ]
+                     },
                      {
                          "version":  "1.6.4",
                          "build":  22,
@@ -319,7 +333,7 @@
                                        ]
                      }
                  ],
-    "apkSha256":  "015a07b8e7e0f84a8291d82ec90307910e770f9cdc26d8235b3395a2df006a1b",
-    "apkSize":  312595,
-    "otaSignature":  "CI/VMKpUxZ/QWb2mlj8rJOTnbuWc/vVrHuQNDJq5rWPqUMeyms0BFKzVmSfHCKQdgisYE+zJp+x8P8NwfPlb1jED5a4rEl4d+2KzPEkv8mzhElSbd9tObQZAgnSMjG7VZ+YkywrXh4KVLifl/NOgRV9Xp7QW+5J2noa53TZLUlzgTwU4i9GyWDJ46k1vymkAlw8J9SNhJP4+Oam2gjLa4PfbZID21bSGA08gqz2gQg2aZMsWWtOrgr/268e8tP2CPaQ6ScpJDKcMwYOoaU/a7JhryXvA7nv6qa+DMqwfa+5OdfXyRMiO+nKOwtIowD80noY4aox5ZuXt3bhhodmsYg=="
+    "apkSha256":  "0636db6563d2401603459fbb695ab62392da03b5ccf58edef59e7002849d730e",
+    "apkSize":  325031,
+    "otaSignature":  "q2NNUlA1kP9+ik0oksOS7CvErb+YM/In/SkwN6bTSvjUHSwQnfqpwNpM4kdKLoEMnOCo89kD1fk4JxilTd62Q6NDcSnFQ7dJXPeJABTzratBrCaV/K4mO38yjhsQBr4b1sIshHNeU5mU9SGcwiiSA+k6cKtlXzMZVqLrh8rmFLM+gT+sEdPSAASFNJCDhlLfySE59LPrlWPaVauEDdBJkHybgVPnNwdCHT+Kr6BdWkQVVjtRhar0BKBJgwMEAhSBcbEccEIdSCfbg7ZsJJnxeIM4MOsGW833eJVKH4gq4n1Rx5uuKCcjc6CSL4Rrxs+wqa2UN6wfXWqpIA5aRmVuaw=="
 }

@@ -383,7 +383,13 @@
       claudeLoginElapsed: 0,
       claudeLoginOutput: '',
       claudeLoginDebug: '',
+      claudeLoginTimeout: 0,
+      claudeSelftestRunning: false,
+      claudeSelftestProgress: '',
+      claudeSafeMode: false,
     },
+    // Last Claude Code self-test result; survives closing the settings page.
+    claudeSelftest: null,
     models: [],
     characters: [],
     personas: [],
@@ -986,6 +992,10 @@
       state.settings.claudeLoginElapsed = Number(data.loginElapsed) || 0;
       state.settings.claudeLoginOutput = data.loginOutput || '';
       state.settings.claudeLoginDebug = data.loginDebug || '';
+      state.settings.claudeLoginTimeout = Number(data.loginTimeout) || 0;
+      state.settings.claudeSelftestRunning = Boolean(data.selftestRunning);
+      state.settings.claudeSelftestProgress = data.selftestProgress || '';
+      state.settings.claudeSafeMode = Boolean(data.safeMode);
       if (state.tab === 'settings') renderSettingsTab();
       refreshLayers();
     } catch (e) {
@@ -3255,7 +3265,9 @@
     let loginTimer = null;
     // Sign-in flow: idle -> waiting (CLI running; link shown when ready) -> done / error
     const login = { phase: 'idle', legacyUrl: '', error: '', submitting: false, codeDraft: '' };
-    let selftest = null; // { running } | { ok, output, exitCode, seconds }
+    let selftestTimer = null;
+    // The check also runs on when the page was closed and reopened meanwhile.
+    const selftestRunning = () => Boolean((state.claudeSelftest && state.claudeSelftest.running) || state.settings.claudeSelftestRunning);
 
     const outputBlock = (text) => `<div class="console" style="margin-top:10px;max-height:28vh">${escapeHtml(text)}</div>`;
 
@@ -3279,9 +3291,13 @@
         const live = [s.claudeLoginOutput, s.claudeLoginDebug ? '--- debug ---\n' + s.claudeLoginDebug : ''].filter(Boolean).join('\n');
         const cancel = '<button class="btn btn-ghost btn-sm" style="margin-top:10px;padding:0" data-act="cancel-login">Отменить вход</button>';
         if (!url && !autoUrl) {
-          const slow = s.claudeLoginElapsed >= 45;
-          return `<div class="install-progress"><span class="spinner"></span><span>Claude Code готовит ссылку для входа… ${s.claudeLoginElapsed} с</span></div>
-            ${slow ? '<p class="section-hint" style="margin:8px 0 0">Дольше обычного. Ниже — что сейчас делает Claude Code; если так и не появится ссылка, скопируйте этот текст и пришлите.</p>' : ''}
+          const slow = s.claudeLoginElapsed >= 30;
+          const limit = s.claudeLoginTimeout;
+          const hint = limit
+            ? `Дольше обычного. Если ссылка не появится за ${limit} с, вход остановится и покажет, на чём завис Claude Code.`
+            : 'Дольше обычного. Ниже — что сейчас делает Claude Code; если так и не появится ссылка, скопируйте этот текст и пришлите.';
+          return `<div class="install-progress"><span class="spinner"></span><span>Claude Code готовит ссылку для входа… ${s.claudeLoginElapsed}${limit ? ' из ' + limit : ''} с</span></div>
+            ${slow ? `<p class="section-hint" style="margin:8px 0 0">${hint}</p>` : ''}
             ${live ? `<details class="disclosure"${slow ? ' open' : ''}><summary>Что происходит ${ic('chevron-down', 'ic-sm')}</summary>${outputBlock(live)}<button class="btn btn-ghost btn-sm" style="padding:0;margin-top:6px" data-act="copy-live">${ic('copy', 'ic-sm')}Скопировать</button></details>` : ''}
             ${cancel}`;
         }
@@ -3299,9 +3315,47 @@
           <div class="install-progress" style="margin-top:14px"><span class="spinner"></span><span>Жду завершения входа…</span></div>
           ${cancel}`;
       }
-      return `<div class="step-text">Откроется браузер: войдите в аккаунт Claude с подпиской Pro, Max, Team или Enterprise.</div>
-        ${login.error ? `<div class="error-card" style="margin:0 0 12px"><div class="error-head">${ic('alert')}<div>Вход не удался. Подробности ниже — если ошибка повторяется, пришлите этот текст.</div></div>${outputBlock(login.error)}</div>` : ''}
-        <button class="btn btn-primary btn-sm" data-act="login">${ic('login')}${login.error ? 'Попробовать снова' : 'Войти'}</button>`;
+      const errorCard = login.error ? `<div class="error-card" style="margin:0 0 12px">
+          <div class="error-head">${ic('alert')}<div>Вход не удался. Подробности ниже — если ошибка повторяется, пришлите этот текст.</div></div>
+          ${outputBlock(login.error)}
+          <button class="btn btn-ghost btn-sm" style="padding:0;margin-top:6px" data-act="copy-error">${ic('copy', 'ic-sm')}Скопировать</button>
+        </div>` : '';
+      return `<div class="step-text">Приложение покажет ссылку: откройте её и войдите в аккаунт Claude с подпиской Pro, Max, Team или Enterprise.</div>
+        ${errorCard}
+        <div class="btn-row">
+          <button class="btn btn-primary btn-sm" data-act="login"${selftestRunning() ? ' disabled' : ''}>${ic('login')}${login.error ? 'Попробовать снова' : 'Войти'}</button>
+          ${login.error && can.claudeLogin() ? `<button class="btn btn-secondary btn-sm" data-act="selftest"${selftestRunning() ? ' disabled' : ''}>${ic('activity', 'ic-sm')}Проверить запуск</button>` : ''}
+        </div>`;
+    };
+
+    const selftestView = () => {
+      const st = state.claudeSelftest;
+      const s = state.settings;
+      if (selftestRunning()) {
+        const stage = s.claudeSelftestProgress ? `: ${s.claudeSelftestProgress}` : '';
+        return `<div class="install-progress" style="margin-top:10px"><span class="spinner"></span><span>Проверяю${escapeHtml(stage)}…</span></div>
+          <p class="section-hint" style="margin:8px 0 0">Если Claude Code зависает, проверка перебирает режимы запуска — это до 5 минут. Не закрывайте приложение.</p>`;
+      }
+      if (!st) return '';
+      if (!Array.isArray(st.stages)) {
+        return `<div style="margin-top:10px"><span class="pill ${st.ok ? 'ok' : 'err'}">${st.ok ? 'Работает' : 'Не запускается'}</span>${outputBlock(st.output || '(пустой вывод)')}</div>`;
+      }
+      const engine = st.engine === 'static' ? 'proot (static)' : 'proot (Termux)';
+      return `<div class="selftest">
+        <div class="selftest-summary"><span class="pill ${st.ok ? 'ok' : 'err'}">${st.ok ? 'Claude Code запускается' : 'Claude Code не запускается'}</span>
+          ${st.engine ? `<span class="faint">движок: ${engine}${st.safeMode ? ' · безопасный режим Bun' : ''}</span>` : ''}</div>
+        ${st.summary ? `<div class="step-text" style="margin-top:8px">${escapeHtml(st.summary)}</div>` : ''}
+        ${st.ok ? '' : `<button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="copy-report">${ic('copy', 'ic-sm')}Скопировать отчёт</button>`}
+        <details class="disclosure"${st.ok ? '' : ' open'}><summary>Этапы проверки ${ic('chevron-down', 'ic-sm')}</summary>
+          ${st.stages.map(stage => `<div class="selftest-stage">
+            <div class="selftest-head">${ic(stage.ok ? 'check-circle' : 'alert', 'ic-sm')}<span>${escapeHtml(stage.name)}</span><span class="faint">${escapeHtml(stage.exit || '')} · ${escapeHtml(stage.seconds || '0')} с</span></div>
+            ${stage.output ? outputBlock(stage.output) : (stage.ok ? '' : outputBlock('(пустой вывод)'))}
+            ${stage.verbose ? `<details class="disclosure"><summary>Подробный журнал ${ic('chevron-down', 'ic-sm')}</summary>${outputBlock(stage.verbose)}</details>` : ''}
+            ${stage.snapshot ? `<details class="disclosure"><summary>Процессы в момент зависания ${ic('chevron-down', 'ic-sm')}</summary>${outputBlock(stage.snapshot)}</details>` : ''}
+          </div>`).join('')}
+        </details>
+        ${st.ok ? `<button class="btn btn-ghost btn-sm" style="padding:0;margin-top:8px" data-act="copy-report">${ic('copy', 'ic-sm')}Скопировать отчёт</button>` : ''}
+      </div>`;
     };
 
     const render = () => {
@@ -3313,23 +3367,7 @@
       if (s.claudeRuntimeReady) runtimeText = 'Установлена. Новые чаты с моделями Claude Code работают в ней автоматически.';
       else if (!canInstall) runtimeText = 'Для установки среды обновите приложение (APK) до версии 1.6.1 или новее.';
       else runtimeText = `Разовая загрузка около ${sizeMb} МБ (после распаковки ~300 МБ), лучше по Wi-Fi. Компоненты берутся из официальных источников — Alpine Linux и npm — и проверяются по SHA-256.`;
-      let selftestHtml = '';
-      if (selftest && selftest.running) {
-        selftestHtml = `<div class="install-progress" style="margin-top:10px"><span class="spinner"></span><span>Проверяю proot, песочницу и Claude Code… до 2 минут</span></div>`;
-      } else if (selftest && Array.isArray(selftest.stages)) {
-        selftestHtml = `<div class="selftest">
-          <div class="selftest-summary"><span class="pill ${selftest.ok ? 'ok' : 'err'}">${selftest.ok ? 'Среда работает' : 'Среда не запускается'}</span>
-            ${selftest.ok ? `<span class="faint">движок: ${selftest.engine === 'static' ? 'proot (static)' : 'proot (Termux)'}</span>` : ''}</div>
-          ${selftest.stages.map(st => `<div class="selftest-stage">
-            <div class="selftest-head">${ic(st.ok ? 'check-circle' : 'alert', 'ic-sm')}<span>${escapeHtml(st.name)}</span><span class="faint">${escapeHtml(st.exit || '')} · ${escapeHtml(st.seconds || '0')} с</span></div>
-            ${st.output ? outputBlock(st.output) : (st.ok ? '' : outputBlock('(пустой вывод)'))}
-            ${st.verbose ? `<details class="disclosure"><summary>Подробный журнал proot ${ic('chevron-down', 'ic-sm')}</summary>${outputBlock(st.verbose)}</details>` : ''}
-          </div>`).join('')}
-          <button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="copy-report">${ic('copy', 'ic-sm')}Скопировать отчёт</button>
-        </div>`;
-      } else if (selftest) {
-        selftestHtml = `<div style="margin-top:10px"><span class="pill ${selftest.ok ? 'ok' : 'err'}">${selftest.ok ? 'Работает' : 'Не запускается'}</span>${outputBlock(selftest.output || '(пустой вывод)')}</div>`;
-      }
+      if (s.claudeRuntimeReady && s.claudeSafeMode) runtimeText += ' Включён безопасный режим Bun — его подобрала проверка запуска.';
       return `
         <p class="section-hint" style="margin:0 4px 14px">Claude Code работает прямо на телефоне — без ПК и без настройки папок. Системный промпт тот же, что и для Gemini.</p>
         <div class="card">
@@ -3339,9 +3377,9 @@
               <div class="step-text">${escapeHtml(runtimeText)}</div>
               ${busy ? `<div class="install-progress"><span class="spinner"></span><span>${escapeHtml(s.claudeInstallProgress || 'Подготовка…')}</span></div><p class="section-hint" style="margin:8px 0 0">Не закрывайте приложение до окончания установки.</p>`
                 : `<div class="btn-row">
-                    ${s.claudeRuntimeReady && can.claudeLogin() ? `<button class="btn btn-secondary btn-sm" data-act="selftest"${selftest && selftest.running ? ' disabled' : ''}>${ic('activity', 'ic-sm')}Проверить запуск</button>` : ''}
-                    <button class="btn ${s.claudeRuntimeReady ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="install"${canInstall ? '' : ' disabled'}>${s.claudeRuntimeReady ? `${ic('reroll')}Переустановить` : `${ic('download')}Скачать среду`}</button>
-                  </div>${selftestHtml}`}
+                    ${s.claudeRuntimeReady && can.claudeLogin() ? `<button class="btn btn-secondary btn-sm" data-act="selftest"${selftestRunning() ? ' disabled' : ''}>${ic('activity', 'ic-sm')}Проверить запуск</button>` : ''}
+                    <button class="btn ${s.claudeRuntimeReady ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="install"${canInstall && !selftestRunning() ? '' : ' disabled'}>${s.claudeRuntimeReady ? `${ic('reroll')}Переустановить` : `${ic('download')}Скачать среду`}</button>
+                  </div>${selftestView()}`}
             </div>
           </div>
           <div class="step${s.claudeAuthenticated ? ' done' : ''}">
@@ -3357,6 +3395,7 @@
       onClose: () => {
         clearInterval(progressTimer);
         clearInterval(loginTimer);
+        clearInterval(selftestTimer);
       },
     });
     layer.isClaudePage = true;
@@ -3405,8 +3444,18 @@
       }, 2000);
     };
 
+    // While a check runs, follow its current stage (the status refresh re-renders).
+    const watchSelftest = () => {
+      clearInterval(selftestTimer);
+      selftestTimer = setInterval(async () => {
+        await refreshClaudeStatus();
+        if (!selftestRunning()) clearInterval(selftestTimer);
+      }, 1500);
+    };
+
     refreshClaudeStatus().then(() => {
       if (state.settings.claudeInstalling) watchProgress();
+      if (selftestRunning()) watchSelftest();
       if (state.settings.claudeLoginPending && !state.settings.claudeAuthenticated) {
         login.phase = 'waiting';
         layer.refresh();
@@ -3423,7 +3472,7 @@
         });
         if (!ok) return;
         installing = true;
-        selftest = null;
+        state.claudeSelftest = null;
         state.settings.claudeInstallProgress = 'Подготовка…';
         layer.refresh();
         watchProgress();
@@ -3444,14 +3493,24 @@
         }
       },
       selftest: async () => {
-        selftest = { running: true };
+        if (selftestRunning()) return;
+        state.claudeSelftest = { running: true };
+        state.settings.claudeSelftestProgress = '';
         layer.refresh();
+        const body = $('.page-body', layer.el);
+        if (body) body.scrollTop = 0;
+        watchSelftest();
+        let result;
         try {
-          selftest = await api('/api/claude/selftest', { method: 'POST' });
+          result = await api('/api/claude/selftest', { method: 'POST' });
         } catch (e) {
-          selftest = { ok: false, output: e.message };
+          result = { ok: false, output: e.message };
         }
+        clearInterval(selftestTimer);
+        state.claudeSelftest = result;
+        await refreshClaudeStatus();
         layer.refresh();
+        if (result.ok && Array.isArray(result.stages)) toast(result.summary || 'Claude Code запускается', { type: 'success' });
       },
       login: async () => {
         login.phase = 'starting';
@@ -3480,7 +3539,11 @@
         }
       },
       'copy-report': () => {
-        if (selftest) copyText(selftest.report || selftest.output || '');
+        const st = state.claudeSelftest;
+        if (st) copyText(st.report || st.output || '');
+      },
+      'copy-error': () => {
+        if (login.error) copyText(login.error);
       },
       'open-link': () => {
         const link = state.settings.claudeLoginUrl || login.legacyUrl || state.settings.claudeLoginAutoUrl;

@@ -115,6 +115,7 @@ $JavaSources = @(
     "$AndroidDir\src\com\agy\roleplay\MainActivity.java",
     "$AndroidDir\src\com\agy\roleplay\LocalBackendServer.java",
     "$AndroidDir\src\com\agy\roleplay\ClaudeRuntime.java",
+    "$AndroidDir\src\com\agy\roleplay\ProcSnapshot.java",
     "$BuildDir\gen\com\agy\roleplay\R.java"
 )
 

@@ -16,7 +16,17 @@
   'use strict';
 
   const params = new URLSearchParams(location.search);
-  const ENGINE = Number(params.get('engine') || 22);
+  const ENGINE = Number(params.get('engine') || 23);
+  const LOGIN_HANG = params.get('loginhang') === '1';
+  const MOCK_SNAPSHOT = ['pid 4241 proot · S (sleeping) · потоков 1 · tracer 0',
+    '  $ proot … /opt/claude auth login --claudeai --debug-to-stderr',
+    '  · 4241 [proot] S ждёт · do_wait · wait4(0xffffffff, 0x7ffd, 0x40000000)',
+    '  pid 4242 claude · t (tracing stop) · потоков 9 · tracer 4241',
+    '    $ /opt/claude auth login --claudeai --debug-to-stderr',
+    '    · 4242 [claude] S ждёт · ep_poll · epoll_pwait(0x5, 0x7ffd, 0x400)',
+    '    · 4243 [Bun Pool 0] S ждёт · futex_wait_queue_me · futex(0x7f8a, 0x80, 0x0)',
+    '    fd: 0→pipe:[81234], 1→pipe:[81235], 2→pipe:[81236], 5→anon_inode:[eventpoll], 9→socket:[81240]',
+    '    tcp6 [0:0:0:0:0:ffff:c0a8:5]:41394 → [2607:6bc0:0:0:0:0:0:10]:443 · SYN_SENT (соединение не устанавливается)'].join('\n');
   const LEGACY = ENGINE < 18;
   const DELAY = Number(params.get('delay') || 120);
 
@@ -569,10 +579,12 @@
       return { runtimeReady: db.settings.claudeRuntimeReady, authenticated: db.settings.claudeAuthenticated, runtimeVersion: 'mock',
         runtimeUrlConfigured: ENGINE >= 19, downloadMb: 128, installing: !!db.claudeInstalling, installProgress: db.claudeInstallProgress || '',
         loginPending: !!db.claudeLoginPending, loginError: db.claudeLoginError || '',
-        loginUrl: db.claudeLoginStarted && Date.now() - db.claudeLoginStarted > 3000 ? 'https://claude.ai/oauth/authorize?code=true&client_id=mock&response_type=code&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&state=mockstate' : '',
-        loginAutoUrl: db.claudeLoginStarted && Date.now() - db.claudeLoginStarted > 3000 ? 'https://claude.ai/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback' : '',
+        loginTimeout: ENGINE >= 23 ? 75 : 0,
+        selftestRunning: !!db.claudeSelftestRunning, selftestProgress: db.claudeSelftestProgress || '', safeMode: !!db.claudeSafeMode,
+        loginUrl: !LOGIN_HANG && db.claudeLoginStarted && Date.now() - db.claudeLoginStarted > 3000 ? 'https://claude.ai/oauth/authorize?code=true&client_id=mock&response_type=code&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&state=mockstate' : '',
+        loginAutoUrl: !LOGIN_HANG && db.claudeLoginStarted && Date.now() - db.claudeLoginStarted > 3000 ? 'https://claude.ai/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback' : '',
         loginElapsed: db.claudeLoginStarted ? Math.round((Date.now() - db.claudeLoginStarted) / 1000) : 0,
-        loginOutput: db.claudeLoginPending ? 'Opening browser to sign in…' : '',
+        loginOutput: db.claudeLoginPending ? (LOGIN_HANG ? '' : 'Opening browser to sign in…') : '',
         loginDebug: db.claudeLoginPending ? '[DEBUG] OAuth callback listener on port 54545 (mock)' : '' };
     }
     if (path === '/api/claude/runtime/install') {
@@ -601,6 +613,14 @@
       db.claudeLoginStarted = Date.now();
       // Simulate the browser redirecting back to the CLI's localhost listener.
       if (params.get('autologin') === '1') setTimeout(() => { if (db.claudeLoginPending) { db.claudeLoginPending = false; db.settings.claudeAuthenticated = true; } }, 9000);
+      // ?loginhang=1: Claude Code never prints a link; the watchdog gives up (8 s here, 75 s on the phone).
+      if (LOGIN_HANG) {
+        setTimeout(() => {
+          if (!db.claudeLoginPending) return;
+          db.claudeLoginPending = false;
+          db.claudeLoginError = 'Claude Code не ответил за 75 с: завис при запуске, ещё до ссылки для входа. Нажмите «Проверить запуск» — проверка подберёт режим, в котором Claude Code запускается на этом телефоне.\n\n(Claude Code ничего не вывел)\n--- процессы ---\n' + MOCK_SNAPSHOT;
+        }, 8000);
+      }
       return { ok: true, pending: true };
     }
     if (path === '/api/claude/auth/exchange') {
@@ -609,20 +629,55 @@
     }
     if (path === '/api/claude/auth/logout') { db.claudeLoginPending = false; db.settings.claudeAuthenticated = false; return { ok: true }; }
     if (path === '/api/claude/selftest') {
-      await sleep(1200);
       const fail = params.get('loginfail') === '1';
-      const stages = fail ? [
-        { name: 'proot (Termux) · запуск', ok: true, exit: 'код 0', seconds: '0.1', output: 'proot 5.1.107-65 (mock)' },
-        { name: 'proot (Termux) · песочница Alpine', ok: false, exit: 'код 159 (SIGSYS — системный вызов запрещён Android (seccomp))', seconds: '0.2', output: '', verbose: 'proot info: vpid 1: terminated with signal 31 (mock)' },
-        { name: 'proot (static) · запуск', ok: true, exit: 'код 0', seconds: '0.1', output: 'proot v5.4.0 (mock)' },
-        { name: 'proot (static) · песочница Alpine', ok: false, exit: 'код 159 (SIGSYS — системный вызов запрещён Android (seccomp))', seconds: '0.2', output: '' },
-      ] : [
-        { name: 'proot (Termux) · запуск', ok: true, exit: 'код 0', seconds: '0.1', output: 'proot 5.1.107-65 (mock)' },
-        { name: 'proot (Termux) · песочница Alpine', ok: true, exit: 'код 0', seconds: '0.4', output: 'agy-sandbox-ok' },
-        { name: 'proot (Termux) · Claude Code', ok: true, exit: 'код 0', seconds: '3.2', output: '2.1.310 (Claude Code)' },
-      ];
-      const report = 'AGY Claude Code self-test (mock)\n' + stages.map(s => '[' + (s.ok ? 'OK' : 'FAIL') + '] ' + s.name + ' · ' + s.exit).join('\n');
-      return { ok: !fail, engine: fail ? '' : 'android', stages, output: report, report };
+      // ?hang=1: plain start hangs, the safe Bun mode works. ?hang=2: every mode hangs.
+      const hang = Number(params.get('hang') || 0);
+      const stages = [];
+      db.claudeSelftestRunning = true;
+      const stage = async (s, ms) => { db.claudeSelftestProgress = s.name; await sleep(ms); stages.push(s); };
+      try {
+        await stage({ name: 'proot (Termux) · запуск', ok: true, exit: 'код 0', seconds: '0.1', output: 'proot 5.1.107-65 (mock)' }, 500);
+        if (fail) {
+          await stage({ name: 'proot (Termux) · песочница Alpine', ok: false, exit: 'код 159 (SIGSYS — системный вызов запрещён Android (seccomp))', seconds: '0.2', output: '', verbose: 'proot info: vpid 1: terminated with signal 31 (mock)' }, 500);
+          const report = 'AGY Claude Code self-test (mock)\nИтог: proot или Claude Code не запускаются на этом телефоне.';
+          return { ok: false, engine: '', summary: 'proot или Claude Code не запускаются на этом телефоне.', stages, output: report, report };
+        }
+        await stage({ name: 'proot (Termux) · песочница Alpine', ok: true, exit: 'код 0', seconds: '0.4', output: 'agy-sandbox-ok' }, 500);
+        await stage({ name: 'proot (Termux) · Claude Code', ok: true, exit: 'код 0', seconds: '0.7', output: '2.1.310 (Claude Code)' }, 700);
+        await stage({ name: 'proot (Termux) · сеть (DNS)', ok: true, exit: 'код 0', seconds: '0.1', output: 'Name: api.anthropic.com\nAddress: 160.79.104.10' }, 400);
+        const probeOut = (safe) => ['[probe +0.0s] bun 1.4.4 · linux/arm64 · ядро 4.14.356-perf · pid 4242',
+          '[probe +0.0s] флаги Bun: ' + (safe ? 'BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2, …' : 'нет') + ' · stdin TTY: false',
+          '[probe +0.0s] ok микрозадачи · 0 мс · да', '[probe +0.0s] … таймер 0 мс',
+          ...(hang && !safe ? [] : ['[probe +0.1s] ok таймер 0 мс · 3 мс', '[probe +0.4s] ok таймер 300 мс · 305 мс · 305 мс', '[probe +6.2s] done · всё в порядке'])].join('\n');
+        await stage(hang
+          ? { name: 'proot (Termux) · проверка рантайма Bun', ok: false, exit: 'нет ответа за 45 с', seconds: '45.0', output: probeOut(false), snapshot: MOCK_SNAPSHOT }
+          : { name: 'proot (Termux) · проверка рантайма Bun', ok: true, exit: 'код 0', seconds: '6.3', output: probeOut(false) }, 900);
+        if (hang) await stage({ name: 'proot (Termux) · проверка рантайма Bun (безопасный режим)', ok: hang === 1, exit: hang === 1 ? 'код 0' : 'нет ответа за 45 с', seconds: hang === 1 ? '6.8' : '45.0', output: probeOut(hang === 1), snapshot: hang === 1 ? '' : MOCK_SNAPSHOT }, 900);
+        const trace = '[agy +0.0s] trace · pid 4250 · bun 1.4.4\n2026-10-26T10:00:00.120Z [DEBUG] Loading settings';
+        let summary;
+        if (!hang) {
+          await stage({ name: 'proot (Termux) · полный запуск Claude Code', ok: true, exit: 'код 1', seconds: '4.1', output: trace + '\n{"loggedIn": false}' }, 900);
+          summary = 'Claude Code запускается в обычном режиме.';
+          db.claudeSafeMode = false;
+        } else {
+          await stage({ name: 'proot (Termux) · полный запуск Claude Code', ok: false, exit: 'нет ответа за 40 с', seconds: '50.2', output: trace, snapshot: MOCK_SNAPSHOT }, 900);
+          if (hang === 1) {
+            await stage({ name: 'proot (Termux) · полный запуск (безопасный режим Bun)', ok: true, exit: 'код 1', seconds: '5.0', output: trace + '\n{"loggedIn": false}' }, 900);
+            summary = 'Claude Code запускается только в безопасном режиме Bun — он включён для входа и ответов.';
+            db.claudeSafeMode = true;
+          } else {
+            await stage({ name: 'proot (Termux) · полный запуск (безопасный режим Bun)', ok: false, exit: 'нет ответа за 40 с', seconds: '50.0', output: trace, snapshot: MOCK_SNAPSHOT }, 700);
+            await stage({ name: 'proot (Termux) · полный запуск (чистый профиль)', ok: false, exit: 'нет ответа за 40 с', seconds: '50.0', output: trace, snapshot: MOCK_SNAPSHOT }, 700);
+            summary = 'Claude Code зависает при запуске во всех режимах. Скопируйте отчёт и пришлите его: в нём видно, на чём именно.';
+          }
+        }
+        const ok = stages.every((s, i) => s.ok || i >= 4) && stages[stages.length - 1].ok;
+        const report = 'AGY Claude Code self-test (mock)\nИтог: ' + summary + '\n' + stages.map(s => '[' + (s.ok ? 'OK' : 'FAIL') + '] ' + s.name + ' · ' + s.exit).join('\n');
+        return { ok, engine: 'android', summary, safeMode: !!db.claudeSafeMode, stages, output: report, report };
+      } finally {
+        db.claudeSelftestRunning = false;
+        db.claudeSelftestProgress = '';
+      }
     }
 
     if (path === '/api/updates/check') {
