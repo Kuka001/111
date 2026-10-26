@@ -362,6 +362,20 @@ public class MainActivity extends Activity {
         );
     }
 
+    // Android 15+ cuts an app in the background off the network: the backend
+    // talks to the cloud only while this Activity is in the foreground.
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (localBackendServer != null) localBackendServer.onAppForeground(true);
+    }
+
+    @Override
+    protected void onPause() {
+        if (localBackendServer != null) localBackendServer.onAppForeground(false);
+        super.onPause();
+    }
+
     @Override
     protected void onDestroy() {
         if (localBackendServer != null) localBackendServer.detach(this);

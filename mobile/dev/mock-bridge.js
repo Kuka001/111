@@ -16,14 +16,18 @@
 //   ?hang=1       self-test: plain start hangs, the safe Bun mode works
 //   ?hang=2       self-test: every mode hangs
 //   ?engine=N     report another native engine build (older ones get a warning)
+//   ?cloud=…      cloud page state: none (default, not set up) | signedout |
+//                 novault | locked | ready | quota | error. Mock encryption
+//                 password: "мой кот любит зимний чай"; recovery code:
+//                 000G-40R4-0M30-E209-185G-R38E-1W81-24GK
 (function () {
   'use strict';
 
   const params = new URLSearchParams(location.search);
-  const ENGINE = Number(params.get('engine') || 25);
+  const ENGINE = Number(params.get('engine') || 26);
   const LOGIN_HANG = params.get('loginhang') === '1';
   const DELAY = Number(params.get('delay') || 120);
-  const APP_VERSION = '1.7.0';
+  const APP_VERSION = '1.8.0';
   const MOCK_SNAPSHOT = ['pid 4242 ld-musl-agy.so.1 · S (sleeping) · потоков 9 · tracer 0',
     '  $ …/ld-musl-agy.so.1 …/claude --debug-to-stderr auth login --claudeai',
     '  · 4242 [claude] S ждёт · ep_poll · epoll_pwait(0x5, 0x7ffd, 0x400)',
@@ -37,7 +41,8 @@
   // A stand-in for a picked photo: a real data:image URI, as the card editor produces.
   function photoAvatar(letter, bg, fg) {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 160"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${bg}"/><stop offset="1" stop-color="#0c0e12"/></linearGradient></defs><rect width="120" height="160" fill="url(#g)"/><text x="60" y="96" font-size="56" text-anchor="middle" fill="${fg}" font-family="sans-serif">${letter}</text></svg>`;
-    return 'data:image/svg+xml;base64,' + btoa(svg);
+    // btoa takes Latin-1 only: encode the UTF-8 bytes (the letters are Cyrillic).
+    return 'data:image/svg+xml;base64,' + btoa(String.fromCharCode(...new TextEncoder().encode(svg)));
   }
 
   const db = {
@@ -679,7 +684,163 @@
     }
     if (path === '/api/backup/import') { await sleep(400); return ok({ restoredRows: 0, restoredFiles: 0, message: 'Данные восстановлены (mock)' }); }
 
+    if (path.startsWith('/api/cloud/')) return cloudRoute(method, path.slice('/api/cloud/'.length), body);
+
     return err(404, 'Неизвестный маршрут APK-сервера: ' + method + ' ' + path);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cloud (CloudSync in the engine): account, vault and sync, in memory.
+  const CLOUD = params.get('cloud') || 'none';
+  const MOCK_PASSWORD = 'мой кот любит зимний чай';
+  const MOCK_CODE = '000G40R40M30E209185GR38E1W8124GK';
+  const cloud = {
+    configured: CLOUD !== 'none',
+    signedIn: ['novault', 'locked', 'ready', 'quota', 'error'].includes(CLOUD),
+    vault: { novault: 'none', locked: 'locked', ready: 'ready', quota: 'ready', error: 'ready' }[CLOUD] || 'unknown',
+    linked: ['ready', 'quota', 'error'].includes(CLOUD),
+    loginPending: false,
+    loginError: '',
+    phase: 'idle',
+    done: 0,
+    total: 0,
+    lastSyncAt: ['ready', 'error'].includes(CLOUD) ? Date.now() - 4 * 60000 : 0,
+    lastError: CLOUD === 'error' ? 'Firestore отказал в доступе. Проверьте, что правила из firebase/firestore.rules опубликованы и в них указан ваш email (player@gmail.com).' : '',
+    errorKind: CLOUD === 'error' ? 'permission' : '',
+    quotaUntil: CLOUD === 'quota' ? Date.now() + 5 * 3600 * 1000 : 0,
+    records: ['ready', 'quota', 'error'].includes(CLOUD) ? 412 : 0,
+    reads: CLOUD === 'quota' ? 50000 : 1240,
+    writes: CLOUD === 'quota' ? 20000 : 318,
+  };
+  const hasLocalData = () => db.characters.length + db.personas.length + db.chats.length > 0;
+  const normCode = (s) => String(s || '').toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+
+  function cloudStatus() {
+    return {
+      configured: cloud.configured, projectId: cloud.configured ? 'agy-roleplay-cloud' : '', signedIn: cloud.signedIn,
+      email: cloud.signedIn || cloud.linked ? 'player@gmail.com' : '', loginPending: cloud.loginPending, loginCaptured: false, loginError: cloud.loginError,
+      vault: cloud.signedIn ? cloud.vault : 'unknown', linked: cloud.linked, busy: cloud.phase !== 'idle', phase: cloud.phase,
+      done: cloud.done, total: cloud.total, pending: cloud.phase === 'upload' ? cloud.total - cloud.done : 0, parked: 0, skipped: 0,
+      lastSyncAt: cloud.lastSyncAt, lastError: cloud.lastError, errorKind: cloud.errorKind, quotaUntil: cloud.quotaUntil,
+      usage: { day: '2026-10-26', reads: cloud.reads, writes: cloud.writes, deletes: 0, limits: { reads: 50000, writes: 20000, deletes: 20000 } },
+      cloudRecords: cloud.records, cloudBytes: cloud.records * 5300, minPasswordChars: 10, hasLocalData: hasLocalData(),
+      certSha1: '3A:1F:C4:92:0B:77:D8:5E:61:AA:09:3C:E2:5B:14:8F:70:C6:D3:21', keystoreUnavailable: false,
+    };
+  }
+
+  /** Pretends to upload (or download) every record, with progress. */
+  function simulateTransfer(phase) {
+    const total = phase === 'sync' ? 0 : db.messages.length + db.chats.length * 2 + db.characters.length + db.personas.length + 2;
+    cloud.phase = phase;
+    cloud.done = 0;
+    cloud.total = total;
+    const timer = setInterval(() => {
+      cloud.done = Math.min(total, cloud.done + Math.max(1, Math.ceil(total / 8)));
+      if (cloud.done >= total) {
+        clearInterval(timer);
+        cloud.phase = 'idle';
+        cloud.done = 0;
+        cloud.total = 0;
+        cloud.records = Math.max(cloud.records, total);
+        cloud.writes += total;
+        cloud.reads += 1;
+        cloud.lastSyncAt = Date.now();
+      }
+    }, 450);
+  }
+
+  async function cloudRoute(method, action, body) {
+    if (action === 'status' && method === 'GET') return cloudStatus();
+    if (method !== 'POST') return err(404, 'Неизвестный маршрут облака: ' + action);
+    await sleep(250);
+    switch (action) {
+      case 'config': {
+        if (cloud.signedIn || cloud.linked) return err(409, 'Сначала выйдите из облака, потом меняйте проект.');
+        if (body.clear) {
+          cloud.configured = false;
+          break;
+        }
+        const text = String(body.config || '');
+        for (const key of ['projectId', 'apiKey', 'clientId', 'clientSecret']) {
+          if (!new RegExp(key + '["\']?\\s*[:=]\\s*["\'][^"\']+').test(text)) {
+            return err(400, `В конфигурации нет правильного значения ${key}. Скопируйте его из консоли Firebase / Google Cloud — см. firebase/README.md.`);
+          }
+        }
+        cloud.configured = true;
+        break;
+      }
+      case 'auth/start':
+        cloud.loginPending = true;
+        cloud.loginError = '';
+        setTimeout(() => {
+          cloud.loginPending = false;
+          cloud.signedIn = true;
+          if (cloud.vault === 'unknown') cloud.vault = params.get('vault') === '1' ? 'locked' : 'none';
+          window.__onCloudAuthDone && window.__onCloudAuthDone(true);
+        }, 1800);
+        return Object.assign(cloudStatus(), { authUrl: '' });
+      case 'auth/exchange':
+        if (!/code=/.test(body.codeOrUrl || '')) return err(401, 'Вставьте адрес целиком: http://127.0.0.1:…/cloud-callback?state=…&code=…');
+        cloud.signedIn = true;
+        cloud.loginPending = false;
+        if (cloud.vault === 'unknown') cloud.vault = 'none';
+        break;
+      case 'vault/create': {
+        if (Array.from(String(body.password || '')).length < 10) return err(400, 'Пароль шифрования — не короче 10 символов.');
+        await sleep(900);
+        cloud.vault = 'ready';
+        cloud.linked = true;
+        simulateTransfer('upload');
+        return Object.assign(cloudStatus(), { recoveryCode: '7KQ2-M9XA-4T1C-ZP8R-2WVN-6HJD-0BQE-5YRS' });
+      }
+      case 'vault/unlock': {
+        await sleep(900);
+        const byCode = Boolean(body.recoveryCode);
+        if (byCode ? normCode(body.recoveryCode) !== MOCK_CODE : body.password !== MOCK_PASSWORD) {
+          return err(403, byCode ? 'Неверный код восстановления.' : 'Неверный пароль шифрования.');
+        }
+        if (hasLocalData() && !cloud.linked && !['merge', 'replace'].includes(body.mode)) {
+          return err(409, 'На телефоне уже есть данные: выберите «Объединить» или «Заменить данными из облака».');
+        }
+        cloud.vault = 'ready';
+        cloud.linked = true;
+        cloud.records = 412;
+        simulateTransfer(body.mode === 'replace' ? 'download' : 'upload');
+        break;
+      }
+      case 'vault/password':
+        await sleep(900);
+        if (body.recoveryCode ? normCode(body.recoveryCode) !== MOCK_CODE : body.password !== MOCK_PASSWORD) {
+          return err(403, body.recoveryCode ? 'Неверный код восстановления.' : 'Неверный пароль шифрования.');
+        }
+        break;
+      case 'vault/recovery':
+        await sleep(900);
+        if (body.password !== MOCK_PASSWORD) return err(403, 'Неверный пароль шифрования.');
+        return Object.assign(cloudStatus(), { recoveryCode: 'R2D2-C3P0-BB8K-YW1N-G7XZ-0Q4M-HTV6-PJ9S' });
+      case 'sync':
+        if (body.reason === 'resume') break;
+        if (cloud.vault !== 'ready' || !cloud.signedIn) return err(409, 'Сначала разблокируйте хранилище паролем.');
+        if (cloud.phase === 'idle') simulateTransfer('sync');
+        break;
+      case 'signout':
+        Object.assign(cloud, { signedIn: false, vault: 'unknown', linked: false, phase: 'idle', lastError: '', errorKind: '', lastSyncAt: 0, quotaUntil: 0 });
+        if (body.wipeLocal) {
+          db.characters = [];
+          db.personas = [];
+          db.chats = [];
+          db.messages = [];
+        }
+        break;
+      case 'wipe':
+        if (String(body.confirm || '').trim() !== 'УДАЛИТЬ') return err(400, 'Для подтверждения введите слово УДАЛИТЬ.');
+        await sleep(1200);
+        Object.assign(cloud, { signedIn: false, vault: 'unknown', linked: false, records: 0, lastSyncAt: 0, lastError: '', errorKind: '' });
+        break;
+      default:
+        return err(404, 'Неизвестный маршрут облака: ' + action);
+    }
+    return cloudStatus();
   }
 
   window.AndroidServer = {

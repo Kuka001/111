@@ -123,6 +123,8 @@ public class LocalBackendServer {
     private final File otaWwwDir;
     private final ClaudeRuntime claudeRuntime;
     private SQLiteDatabase db;
+    /** The end-to-end encrypted cloud copy; null if the database did not open. */
+    private CloudSync cloudSync;
 
     // Claude runtime install runs for minutes on the bridge thread; the UI polls
     // /api/claude/status for these while it waits.
@@ -257,6 +259,15 @@ public class LocalBackendServer {
         return instance;
     }
 
+    /**
+     * MainActivity resumed (true) or paused (false). Android 15+ blocks the
+     * network of an app in the background, so the cloud waits for the foreground.
+     */
+    void onAppForeground(boolean foreground) {
+        CloudSync cs = cloudSync;
+        if (cs != null) cs.setForeground(foreground);
+    }
+
     /** Called when {@code activity} is destroyed; a newer Activity may already be attached. */
     synchronized void detach(MainActivity activity) {
         if (this.activity == activity) {
@@ -273,6 +284,10 @@ public class LocalBackendServer {
         this.otaWwwDir = new File(this.context.getFilesDir(), "ota_www");
         this.claudeRuntime = new ClaudeRuntime(this.context);
         initWorkspaceAndDatabase();
+        if (db != null && cloudSchemaReady) {
+            cloudSync = new CloudSync(this, this.context, db);
+            cloudSync.start();
+        }
         executor.execute(new Runnable() {
             @Override
             public void run() {
@@ -447,8 +462,11 @@ public class LocalBackendServer {
             public void run() {
                 int status = 200;
                 String responseJson;
+                String verb = method != null ? method.toUpperCase(Locale.ROOT) : "GET";
                 try {
-                    JSONObject result = routeRequest(method != null ? method.toUpperCase(Locale.ROOT) : "GET", endpoint, bodyStr);
+                    JSONObject result = routeRequest(verb, endpoint, bodyStr);
+                    // Whatever this request changed is now queued: upload it shortly.
+                    if (!"GET".equals(verb) && cloudSync != null) cloudSync.onLocalChange();
                     if (result.has("__status")) {
                         status = result.optInt("__status", 200);
                         result.remove("__status");
@@ -552,6 +570,15 @@ public class LocalBackendServer {
             addColumnIfMissing("messages", "thought_swipes_json", "TEXT DEFAULT '[]'");
             // Every chat read (list, open, history for a reply) filters by chat.
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, id)");
+            // Cloud sync: a row's sync_id is the same on every device (local
+            // integer ids are not). A chat can arrive from the cloud before its
+            // cards, so it keeps their sync_ids until they do. sort_key orders
+            // messages the same way everywhere (local ids follow arrival order).
+            for (String t : SYNCED_TABLES) addColumnIfMissing(t, "sync_id", "TEXT");
+            addColumnIfMissing("chats", "character_sid", "TEXT DEFAULT ''");
+            addColumnIfMissing("chats", "persona_sid", "TEXT DEFAULT ''");
+            addColumnIfMissing("messages", "sort_key", "INTEGER");
+            initCloudSchema();
 
             JSONObject bundled = readBundledVersionManifest();
             String bundledVer = bundled.optString("version", "");
@@ -694,8 +721,23 @@ public class LocalBackendServer {
         new java.util.HashSet<>(Arrays.asList(
             "agy_access_token",
             "agy_refresh_token",
-            "google_auth_token"
+            "google_auth_token",
+            "cloud_client_secret",
+            "cloud_refresh_token",
+            "cloud_dek",
+            "cloud_oauth_pending"
         ));
+
+    /**
+     * Cloud secrets (the data key above all) are never written in plaintext:
+     * without the Keystore they live in memory only, and after a restart the
+     * app asks for the password again.
+     */
+    private static final java.util.Set<String> STRICT_SECRET_KEYS =
+        new java.util.HashSet<>(Arrays.asList("cloud_refresh_token", "cloud_dek", "cloud_oauth_pending"));
+
+    /** Set when a strict secret could not be encrypted, so it was kept in memory only. */
+    private volatile boolean keystoreUnavailable = false;
 
     private javax.crypto.SecretKey getOrCreateSecretKey() throws Exception {
         java.security.KeyStore ks = java.security.KeyStore.getInstance(KEYSTORE_PROVIDER);
@@ -733,6 +775,16 @@ public class LocalBackendServer {
             // Never lose the user's session because crypto is unavailable.
             return plain;
         }
+    }
+
+    /** As encryptSecret, but null instead of the plain value when the Keystore cannot encrypt. */
+    private String encryptSecretStrict(String plain) {
+        String enc = encryptSecret(plain);
+        return enc.startsWith(ENC_PREFIX) ? enc : null;
+    }
+
+    boolean cloudKeystoreUnavailable() {
+        return keystoreUnavailable;
     }
 
     /** Decrypts a stored secret. Plaintext values (pre-upgrade rows) pass through. */
@@ -812,7 +864,13 @@ public class LocalBackendServer {
         try {
             String toStore = value != null ? value : "";
             if (SECRET_SETTING_KEYS.contains(key) && !toStore.isEmpty()) {
-                toStore = encryptSecret(toStore);
+                if (STRICT_SECRET_KEYS.contains(key)) {
+                    String enc = encryptSecretStrict(toStore);
+                    keystoreUnavailable = enc == null;
+                    toStore = enc != null ? enc : "";
+                } else {
+                    toStore = encryptSecret(toStore);
+                }
             }
             ContentValues cv = new ContentValues();
             cv.put("key", key);
@@ -1124,6 +1182,7 @@ public class LocalBackendServer {
             String rel = sanitizeRelPath(body.optString("filePath", body.optString("path", "")));
             if (!isEditableWorkspaceFile(rel)) return errorJson(400, "Этот файл нельзя изменить: " + rel);
             writeTextFile(new File(workspaceDir, rel), body.optString("content", ""));
+            cloudQueueFile(rel);
             JSONObject res = okJson();
             res.put("path", rel);
             return res;
@@ -1246,12 +1305,21 @@ public class LocalBackendServer {
             } else if (parts.length == 2 && parts[1].equals("messages") && method.equals("POST")) {
                 return handleSendChatMessage(chatId, body);
             } else if (parts.length == 2 && parts[1].equals("messages") && method.equals("DELETE")) {
-                // Rewind: every message after the given one goes, in one statement.
+                // Rewind: every message after the given one (in display order) goes, in one statement.
                 if (activeGenerations.containsKey(chatId)) return errorJson(409, "Сначала остановите генерацию.");
                 int after = parseIntOr(queryParams.get("after"), 0);
                 if (after <= 0) return errorJson(400, "Не указано, после какого сообщения удалять.");
-                int removed = db.delete("messages", "chat_id = ? AND id > ?",
-                    new String[]{String.valueOf(chatId), String.valueOf(after)});
+                Cursor ac = db.rawQuery("SELECT sort_key FROM messages WHERE id = ? AND chat_id = ?",
+                    new String[]{String.valueOf(after), String.valueOf(chatId)});
+                String afterKey;
+                try {
+                    if (!ac.moveToFirst()) return errorJson(404, "Сообщение не найдено");
+                    afterKey = String.valueOf(ac.getLong(0));
+                } finally {
+                    ac.close();
+                }
+                int removed = db.delete("messages", "chat_id = ? AND (sort_key > ? OR (sort_key = ? AND id > ?))",
+                    new String[]{String.valueOf(chatId), afterKey, afterKey, String.valueOf(after)});
                 JSONObject res = okJson();
                 res.put("removed", removed);
                 return res;
@@ -1384,7 +1452,101 @@ public class LocalBackendServer {
             return handleDevExec(body);
         }
 
+        // 12. /api/cloud/* (end-to-end encrypted cloud copy, Google sign-in)
+        if (path.startsWith("/api/cloud/")) {
+            return handleCloud(method, path.substring("/api/cloud/".length()), body);
+        }
+
         return errorJson(404, "Неизвестный маршрут APK-сервера: " + method + " " + path);
+    }
+
+    /**
+     * The cloud page's endpoints (CloudSync does the work). Responses carry the
+     * cloud status; nothing secret (tokens, keys) ever crosses the bridge, the
+     * recovery code only once, right after it is made.
+     */
+    private JSONObject handleCloud(String method, String action, JSONObject body) throws Exception {
+        if (cloudSync == null) return errorJson(503, "Облако недоступно: база данных не открылась.");
+        try {
+            if (method.equals("GET") && action.equals("status")) return cloudSync.status();
+            if (!method.equals("POST")) return errorJson(404, "Неизвестный маршрут облака: " + method + " " + action);
+            String recoveryCode = null;
+            switch (action) {
+                case "config":
+                    if (body.optBoolean("clear", false)) {
+                        cloudSync.clearConfig();
+                    } else {
+                        cloudSync.configure(body.optString("config", ""));
+                    }
+                    break;
+                case "auth/start": {
+                    String url = cloudSync.beginSignIn();
+                    openExternalUrl(url);
+                    return cloudSync.status().put("authUrl", url);
+                }
+                case "auth/exchange":
+                    cloudSync.exchangeManually(body.optString("codeOrUrl", ""));
+                    break;
+                case "vault/create":
+                    recoveryCode = cloudSync.createVault(body.optString("password", ""));
+                    break;
+                case "vault/unlock":
+                    cloudSync.unlock(body.optString("password", ""), body.optString("recoveryCode", ""), body.optString("mode", ""));
+                    break;
+                case "vault/password":
+                    cloudSync.changePassword(body.optString("password", ""), body.optString("recoveryCode", ""),
+                        body.optString("newPassword", ""));
+                    break;
+                case "vault/recovery":
+                    recoveryCode = cloudSync.newRecoveryCode(body.optString("password", ""));
+                    break;
+                case "sync":
+                    if ("resume".equals(body.optString("reason", ""))) {
+                        cloudSync.onResume();
+                    } else {
+                        cloudSync.syncNow();
+                    }
+                    break;
+                case "signout":
+                    cloudSync.signOut(body.optBoolean("wipeLocal", false));
+                    break;
+                case "wipe":
+                    if (!"УДАЛИТЬ".equals(body.optString("confirm", "").trim())) {
+                        return errorJson(400, "Для подтверждения введите слово УДАЛИТЬ.");
+                    }
+                    cloudSync.wipeCloud(body.optBoolean("deleteAccount", false));
+                    break;
+                default:
+                    return errorJson(404, "Неизвестный маршрут облака: " + action);
+            }
+            JSONObject res = cloudSync.status();
+            if (recoveryCode != null) res.put("recoveryCode", recoveryCode);
+            return res;
+        } catch (CloudStore.CloudException e) {
+            int status = e.httpStatus >= 400 && e.httpStatus < 600 ? e.httpStatus : cloudErrorStatus(e.kind);
+            return errorJson(status, e.getMessage());
+        }
+    }
+
+    private static int cloudErrorStatus(int kind) {
+        switch (kind) {
+            case CloudStore.ERR_CONFIG:
+                return 400;
+            case CloudStore.ERR_AUTH:
+                return 401;
+            case CloudStore.ERR_PERMISSION:
+                return 403;
+            case CloudStore.ERR_NOT_FOUND:
+                return 404;
+            case CloudStore.ERR_CONFLICT:
+                return 409;
+            case CloudStore.ERR_QUOTA:
+                return 429;
+            case CloudStore.ERR_NETWORK:
+                return 503;
+            default:
+                return 500;
+        }
     }
 
     private static JSONObject okJson() throws Exception {
@@ -1526,7 +1688,8 @@ public class LocalBackendServer {
         try {
             while (c.moveToNext()) {
                 String key = c.getString(0);
-                if (SECRET_SETTING_KEYS.contains(key)) continue;
+                // Nothing about the cloud account goes into a file that may be shared.
+                if (SECRET_SETTING_KEYS.contains(key) || key.startsWith("cloud_")) continue;
                 settings.put(key, c.getString(1));
             }
         } finally {
@@ -1589,6 +1752,11 @@ public class LocalBackendServer {
         if (!activeGenerations.isEmpty()) {
             return errorJson(409, "Дождитесь окончания генерации или остановите её.");
         }
+        // With the cloud linked the restore replaces the data there too (the
+        // triggers queue every deleted and restored row): first take in what
+        // other devices uploaded, so none of it survives by being unknown here.
+        boolean cloudLinked = cloudSync != null && cloudIsTracking();
+        if (cloudLinked) cloudSync.pullBeforeRestore();
 
         // Destructive replace, wrapped in a transaction so a failure cannot leave
         // the database half-wiped.
@@ -1670,13 +1838,614 @@ public class LocalBackendServer {
         }
         syncWorkspaceFilesWithDb();
         tidyChatFiles();
+        cloudQueueRestoredFiles();
 
         JSONObject res = okJson();
         res.put("restoredRows", restoredRows);
         res.put("restoredFiles", restoredFiles);
         res.put("message", "Восстановлено записей: " + restoredRows + ", файлов: " + restoredFiles
-            + ". Входы в Google и Claude не восстанавливаются из копии — при необходимости войдите заново.");
+            + ". Входы в Google и Claude не восстанавливаются из копии — при необходимости войдите заново."
+            + (cloudLinked ? " Облако обновится по этой копии в фоне." : ""));
         return res;
+    }
+
+    // =========================================================================
+    // CLOUD SYNC: LOCAL RECORDS
+    // =========================================================================
+    // CloudSync keeps an end-to-end encrypted copy of the user's data in
+    // Firebase (CloudSync, CloudStore, CloudCrypto). This is the local side:
+    //   * Which rows sync: each carries a random sync_id that is the same on
+    //     every device (local ids are not); messages also carry sort_key, their
+    //     order on every device.
+    //   * How changes are noticed: SQLite triggers write cloud_outbox on every
+    //     insert, relevant update and delete, so no write path can be missed.
+    //     Workspace files the triggers cannot see (the system prompt, chat
+    //     memories) are queued by the one endpoint that writes them.
+    //   * How one record is exported and applied. Applying runs with
+    //     cloud_ctl.applying = 1, which silences the triggers: a change that
+    //     came from the cloud is not sent back.
+    static final String[] SYNCED_TABLES = new String[]{"characters", "personas", "chats", "messages"};
+    /** Sync is on (an account is linked) and the change did not come from the cloud. */
+    private static final String SQL_TRACKING = "(SELECT tracking = 1 AND applying = 0 FROM cloud_ctl WHERE id = 1)";
+    private static final Pattern SYNC_ID = Pattern.compile("^[0-9a-f]{32}$");
+    private static final Pattern SQL_TIMESTAMP = Pattern.compile("^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$");
+    /** Set once the bookkeeping tables and triggers exist; without them the cloud stays off. */
+    private boolean cloudSchemaReady = false;
+
+    /**
+     * Runs android/assets/cloud-schema.sql: sync_ids for old rows, the
+     * bookkeeping tables and the outbox triggers. One statement per "--;;"
+     * section; mobile/tests/cloud-schema.test.js runs the same file.
+     */
+    private void initCloudSchema() {
+        try {
+            InputStream is = context.getAssets().open("cloud-schema.sql");
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+            is.close();
+            String sql = new String(bos.toByteArray(), StandardCharsets.UTF_8).replace("\r\n", "\n");
+            db.beginTransaction();
+            try {
+                for (String section : sql.split("\n--;;\n")) {
+                    // Whole-line comments go: Android picks a statement's kind from its first word.
+                    StringBuilder statement = new StringBuilder();
+                    for (String line : section.split("\n")) {
+                        if (!line.trim().startsWith("--")) statement.append(line).append('\n');
+                    }
+                    if (statement.toString().trim().length() > 0) db.execSQL(statement.toString().trim());
+                }
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
+            cloudSchemaReady = true;
+        } catch (Exception e) {
+            android.util.Log.e("LocalBackendServer", "cloud schema failed", e);
+        }
+    }
+
+    /** Turns change tracking on (an account is linked) or off. */
+    void cloudSetTracking(boolean on) {
+        db.execSQL("UPDATE cloud_ctl SET tracking = ? WHERE id = 1", new Object[]{on ? 1 : 0});
+    }
+
+    /** Queues a workspace file the triggers cannot see: the system prompt or a chat's memory. */
+    private void cloudQueueFile(String rel) {
+        String kind = "prompt";
+        String sid = "prompt";
+        String parent = "";
+        if (!"GEMINI.md".equals(rel)) {
+            Cursor c = db.rawQuery("SELECT sync_id FROM chats WHERE memory_file_path = ?", new String[]{rel});
+            try {
+                if (!c.moveToFirst() || c.isNull(0)) return;
+                sid = c.getString(0);
+            } finally {
+                c.close();
+            }
+            kind = "memory";
+            parent = sid;
+        }
+        db.execSQL("INSERT OR REPLACE INTO cloud_outbox (kind, sid, parent, queued_at) SELECT ?, ?, ?, ? WHERE " + SQL_TRACKING,
+            new Object[]{kind, sid, parent, System.currentTimeMillis()});
+    }
+
+    /** Queues every local record: linking an account uploads everything once. */
+    void cloudQueueAll() {
+        Object[] now = new Object[]{System.currentTimeMillis()};
+        String insert = "INSERT OR REPLACE INTO cloud_outbox (kind, sid, parent, queued_at) ";
+        db.beginTransaction();
+        try {
+            db.execSQL(insert + "SELECT 'character', sync_id, '', ? FROM characters WHERE sync_id IS NOT NULL", now);
+            db.execSQL(insert + "SELECT 'persona', sync_id, '', ? FROM personas WHERE sync_id IS NOT NULL", now);
+            db.execSQL(insert + "SELECT 'chat', sync_id, '', ? FROM chats WHERE sync_id IS NOT NULL", now);
+            db.execSQL(insert + "SELECT 'memory', sync_id, sync_id, ? FROM chats WHERE sync_id IS NOT NULL", now);
+            db.execSQL(insert + "SELECT 'message', m.sync_id, c.sync_id, ? FROM messages m JOIN chats c ON c.id = m.chat_id "
+                + "WHERE m.sync_id IS NOT NULL AND c.sync_id IS NOT NULL", now);
+            db.execSQL(insert + "VALUES ('prompt', 'prompt', '', ?)", now);
+            db.execSQL(insert + "VALUES ('settings', 'settings', '', ?)", now);
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    /** The workspace files a backup restore replaced (cards and settings are queued by the triggers). */
+    private void cloudQueueRestoredFiles() {
+        cloudQueueFile("GEMINI.md");
+        Cursor c = db.rawQuery("SELECT memory_file_path FROM chats", null);
+        try {
+            while (c.moveToNext()) {
+                if (!c.isNull(0)) cloudQueueFile(c.getString(0));
+            }
+        } finally {
+            c.close();
+        }
+    }
+
+    private static String str(Cursor c, int i) {
+        return c.isNull(i) ? "" : c.getString(i);
+    }
+
+    private static String clip(String s, int max) {
+        String v = s != null ? s : "";
+        return v.length() > max ? v.substring(0, max) : v;
+    }
+
+    private static JSONArray jsonArrayOr(String raw) {
+        try {
+            return new JSONArray(raw != null && !raw.isEmpty() ? raw : "[]");
+        } catch (Exception e) {
+            return new JSONArray();
+        }
+    }
+
+    /** A JSON array of strings at most: anything else from the cloud is coerced or dropped. */
+    private static JSONArray stringArray(JSONArray src) {
+        JSONArray out = new JSONArray();
+        if (src == null) return out;
+        for (int i = 0; i < src.length() && i < 1000; i++) out.put(clip(src.optString(i, ""), 4_000_000));
+        return out;
+    }
+
+    private static String sidOrEmpty(String sid) {
+        return sid != null && SYNC_ID.matcher(sid).matches() ? sid : "";
+    }
+
+    private static void putTimestamp(ContentValues cv, String column, String value) {
+        if (value != null && SQL_TIMESTAMP.matcher(value).matches()) cv.put(column, value);
+    }
+
+    private String syncIdOf(String table, int id) {
+        Cursor c = db.rawQuery("SELECT sync_id FROM " + table + " WHERE id = ?", new String[]{String.valueOf(id)});
+        try {
+            return c.moveToFirst() ? str(c, 0) : "";
+        } finally {
+            c.close();
+        }
+    }
+
+    /** Local id of the row with this sync_id, or 0. */
+    private int idBySyncId(String table, String sid) {
+        if (sid == null || sid.isEmpty()) return 0;
+        Cursor c = db.rawQuery("SELECT id FROM " + table + " WHERE sync_id = ?", new String[]{sid});
+        try {
+            return c.moveToFirst() ? c.getInt(0) : 0;
+        } finally {
+            c.close();
+        }
+    }
+
+    /** Memory text without the "# Память чата #N" heading: N is a local id, different on every device. */
+    private static String stripMemoryHeading(String text) {
+        String t = text != null ? text : "";
+        if (t.startsWith("# Память чата")) {
+            int nl = t.indexOf('\n');
+            t = nl >= 0 ? t.substring(nl + 1) : "";
+        }
+        return t.replaceFirst("^\\s+", "");
+    }
+
+    private JSONObject cardPayload(String name, String filePath, String avatar) throws Exception {
+        String fp = filePath != null ? filePath : "";
+        return new JSONObject()
+            .put("name", name != null ? name : "")
+            .put("fileName", new File(fp).getName())
+            .put("text", fp.isEmpty() ? "" : readTextFile(new File(workspaceDir, sanitizeRelPath(fp))))
+            .put("avatar", avatar != null ? avatar : "");
+    }
+
+    /**
+     * A record as it is now, without the k/sid/mt envelope CloudSync adds; null
+     * when it no longer exists here (it is then deleted in the cloud).
+     */
+    JSONObject cloudExportRecord(String kind, String sid) throws Exception {
+        Cursor c = null;
+        try {
+            switch (kind) {
+                case "character":
+                    c = db.rawQuery("SELECT name, file_path, avatar_url, first_message, created_at, updated_at "
+                        + "FROM characters WHERE sync_id = ?", new String[]{sid});
+                    if (!c.moveToFirst()) return null;
+                    return cardPayload(str(c, 0), str(c, 1), str(c, 2)).put("firstMessage", str(c, 3))
+                        .put("createdAt", str(c, 4)).put("updatedAt", str(c, 5));
+                case "persona":
+                    c = db.rawQuery("SELECT name, file_path, avatar_url, is_default, created_at FROM personas WHERE sync_id = ?",
+                        new String[]{sid});
+                    if (!c.moveToFirst()) return null;
+                    return cardPayload(str(c, 0), str(c, 1), str(c, 2)).put("isDefault", c.getInt(3))
+                        .put("createdAt", str(c, 4));
+                case "chat":
+                    // A card this chat waits for (it came from the cloud first) is still referenced by sync_id.
+                    c = db.rawQuery("SELECT c.title, c.model_id, c.effort, c.provider, c.created_at, c.updated_at, "
+                        + "COALESCE(ch.sync_id, c.character_sid, ''), COALESCE(p.sync_id, c.persona_sid, '') FROM chats c "
+                        + "LEFT JOIN characters ch ON ch.id = c.character_id LEFT JOIN personas p ON p.id = c.persona_id "
+                        + "WHERE c.sync_id = ?", new String[]{sid});
+                    if (!c.moveToFirst()) return null;
+                    return new JSONObject().put("title", str(c, 0)).put("modelId", str(c, 1)).put("effort", str(c, 2))
+                        .put("provider", str(c, 3)).put("createdAt", str(c, 4)).put("updatedAt", str(c, 5))
+                        .put("characterSid", str(c, 6)).put("personaSid", str(c, 7));
+                case "message":
+                    c = db.rawQuery("SELECT m.role, m.content, m.thoughts, m.swipes_json, m.swipe_index, "
+                        + "m.thought_swipes_json, m.sort_key, m.created_at, ch.sync_id FROM messages m "
+                        + "JOIN chats ch ON ch.id = m.chat_id WHERE m.sync_id = ?", new String[]{sid});
+                    if (!c.moveToFirst()) return null;
+                    return new JSONObject().put("chatSid", str(c, 8)).put("role", str(c, 0)).put("content", str(c, 1))
+                        .put("thoughts", str(c, 2)).put("swipes", jsonArrayOr(str(c, 3))).put("swipeIndex", c.getInt(4))
+                        .put("thoughtSwipes", jsonArrayOr(str(c, 5))).put("sortKey", c.getLong(6))
+                        .put("createdAt", str(c, 7));
+                case "memory": {
+                    c = db.rawQuery("SELECT memory_file_path FROM chats WHERE sync_id = ?", new String[]{sid});
+                    if (!c.moveToFirst()) return null;
+                    String rel = str(c, 0);
+                    String text = rel.isEmpty() ? "" : readTextFile(new File(workspaceDir, sanitizeRelPath(rel)));
+                    return new JSONObject().put("text", stripMemoryHeading(text));
+                }
+                case "prompt":
+                    return new JSONObject().put("text", readTextFile(new File(workspaceDir, "GEMINI.md")));
+                case "settings":
+                    return new JSONObject()
+                        .put("selectedModel", getSetting("selected_model", "gemini-4-argon"))
+                        .put("selectedEffort", getSetting("selected_effort", "high"))
+                        .put("safetyThreshold", getSetting("safety_threshold", "OFF"))
+                        .put("projectId", getSetting("project_id", ""))
+                        .put("activePersonaSid", syncIdOf("personas", parseIntOr(getSetting("active_persona_id", "0"), 0)));
+                default:
+                    return null;
+            }
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    /** What applying records changed, for the page (window.__onCloudSyncChanged). */
+    static final class CloudApplied {
+        boolean cards;
+        boolean chats;
+        boolean settings;
+        boolean prompt;
+        final java.util.Set<Integer> chatIds = new java.util.HashSet<>();
+        final java.util.Set<Integer> deletedChatIds = new java.util.HashSet<>();
+        /** The default persona arrived before its card. */
+        String pendingPersonaSid = "";
+
+        boolean any() {
+            return cards || chats || settings || prompt || !chatIds.isEmpty() || !deletedChatIds.isEmpty();
+        }
+
+        JSONObject toJson() throws Exception {
+            return new JSONObject().put("cards", cards).put("chats", chats).put("settings", settings)
+                .put("prompt", prompt).put("chatIds", new JSONArray(chatIds)).put("deletedChatIds", new JSONArray(deletedChatIds));
+        }
+    }
+
+    interface CloudWork {
+        void run() throws Exception;
+    }
+
+    /**
+     * Runs CloudSync's apply step in one transaction with the outbox triggers
+     * silenced. chatWriteLock is taken before the database, in the same order
+     * as a reply being saved, so the two cannot deadlock.
+     */
+    void cloudApplying(CloudWork work) throws Exception {
+        synchronized (chatWriteLock) {
+            db.beginTransaction();
+            try {
+                db.execSQL("UPDATE cloud_ctl SET applying = 1 WHERE id = 1");
+                work.run();
+                db.execSQL("UPDATE cloud_ctl SET applying = 0 WHERE id = 1");
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
+        }
+    }
+
+    /**
+     * Applies one decrypted record (inside cloudApplying). Returns false when a
+     * message or memory has to wait for its chat. The data is end-to-end
+     * encrypted, yet every field is still checked: it is input from outside.
+     */
+    boolean cloudApplyRecord(JSONObject p, CloudApplied out) throws Exception {
+        String kind = p.optString("k", "");
+        String sid = p.optString("sid", "");
+        boolean deleted = p.optBoolean("deleted", false);
+        switch (kind) {
+            case "character":
+            case "persona":
+                if (SYNC_ID.matcher(sid).matches()) {
+                    applyCloudCard("character".equals(kind) ? "characters" : "personas", sid, p, deleted, out);
+                }
+                return true;
+            case "chat":
+                if (SYNC_ID.matcher(sid).matches()) applyCloudChat(sid, p, deleted, out);
+                return true;
+            case "memory":
+                return !SYNC_ID.matcher(sid).matches() || applyCloudMemory(sid, p, deleted, out);
+            case "message":
+                return !SYNC_ID.matcher(sid).matches() || applyCloudMessage(sid, p, deleted, out);
+            case "prompt":
+                if (!deleted) {
+                    writeTextFile(new File(workspaceDir, "GEMINI.md"), clip(p.optString("text", ""), 2_000_000));
+                    out.prompt = true;
+                }
+                return true;
+            case "settings":
+                if (!deleted) applyCloudSettings(p, out);
+                return true;
+            default:
+                // A kind from a newer version: skipped.
+                return true;
+        }
+    }
+
+    private void applyCloudCard(String table, String sid, JSONObject p, boolean deleted, CloudApplied out) throws Exception {
+        boolean isChar = "characters".equals(table);
+        int id = idBySyncId(table, sid);
+        out.cards = true;
+        if (deleted) {
+            if (id > 0) {
+                deleteCard(table, id);
+                if (!isChar && parseIntOr(getSetting("active_persona_id", "0"), 0) == id) {
+                    setSetting("active_persona_id", String.valueOf(firstId("personas")));
+                }
+            }
+            return;
+        }
+        String name = clip(p.optString("name", "").trim(), 200);
+        if (name.isEmpty()) name = isChar ? "Персонаж" : "Игрок";
+        String text = clip(p.optString("text", ""), 2_000_000);
+        String relPath = id > 0 ? lookupFilePath(table, id) : "";
+        if (relPath.isEmpty()) {
+            // The name only: a path never comes from the cloud.
+            String wanted = p.optString("fileName", "").replaceAll("[\\p{Cntrl}/\\\\:*?\"<>|]", "_");
+            relPath = uniqueCardPath(table, table + "/" + cardFileName(wanted, name, isChar ? "char" : "persona"),
+                id > 0 ? id : null);
+        }
+        writeTextFile(new File(workspaceDir, sanitizeRelPath(relPath)), text);
+        ContentValues cv = new ContentValues();
+        cv.put("name", name);
+        cv.put("file_path", relPath);
+        cv.put("avatar_url", cleanAvatarUrl(p.optString("avatar", "")));
+        cv.put("description_preview", parsePreview(text));
+        if (isChar) {
+            cv.put("first_message", clip(p.optString("firstMessage", ""), 200_000));
+            putTimestamp(cv, "updated_at", p.optString("updatedAt", ""));
+        } else {
+            cv.put("is_default", p.optInt("isDefault", 0) != 0 ? 1 : 0);
+        }
+        putTimestamp(cv, "created_at", p.optString("createdAt", ""));
+        if (id > 0) {
+            db.update(table, cv, "id = ?", new String[]{String.valueOf(id)});
+            return;
+        }
+        cv.put("sync_id", sid);
+        id = (int) db.insert(table, null, cv);
+        if (id <= 0) throw new Exception("Не удалось сохранить карточку из облака");
+        // Chats that came before this card now find it.
+        String ref = isChar ? "character" : "persona";
+        db.execSQL("UPDATE chats SET " + ref + "_id = ? WHERE " + ref + "_sid = ? AND " + ref + "_id NOT IN (SELECT id FROM "
+            + table + ")", new Object[]{id, sid});
+    }
+
+    private void applyCloudChat(String sid, JSONObject p, boolean deleted, CloudApplied out) throws Exception {
+        int id = idBySyncId("chats", sid);
+        out.chats = true;
+        if (deleted) {
+            if (id > 0) {
+                // Also stops a reply being generated in it, as a local delete does.
+                deleteChat(id);
+                out.deletedChatIds.add(id);
+            }
+            return;
+        }
+        String characterSid = sidOrEmpty(p.optString("characterSid", ""));
+        String personaSid = sidOrEmpty(p.optString("personaSid", ""));
+        String title = clip(p.optString("title", "").trim(), 120);
+        ContentValues cv = new ContentValues();
+        cv.put("title", title.isEmpty() ? "Чат" : title);
+        cv.put("character_id", idBySyncId("characters", characterSid));
+        cv.put("persona_id", idBySyncId("personas", personaSid));
+        cv.put("character_sid", characterSid);
+        cv.put("persona_sid", personaSid);
+        cv.put("model_id", normalizeBaseModelId(p.optString("modelId", "")));
+        cv.put("effort", normalizeEffort(p.optString("effort", "")));
+        cv.put("provider", clip(p.optString("provider", ""), 40));
+        putTimestamp(cv, "created_at", p.optString("createdAt", ""));
+        putTimestamp(cv, "updated_at", p.optString("updatedAt", ""));
+        if (id > 0) {
+            db.update("chats", cv, "id = ?", new String[]{String.valueOf(id)});
+        } else {
+            cv.put("sync_id", sid);
+            id = (int) db.insert("chats", null, cv);
+            if (id <= 0) throw new Exception("Не удалось сохранить чат из облака");
+            String memRel = "memories/chat_" + id + ".md";
+            ContentValues mem = new ContentValues();
+            mem.put("memory_file_path", memRel);
+            db.update("chats", mem, "id = ?", new String[]{String.valueOf(id)});
+            writeTextFile(new File(workspaceDir, memRel), "# Память чата #" + id + "\n\n");
+        }
+        out.chatIds.add(id);
+    }
+
+    private boolean applyCloudMemory(String chatSid, JSONObject p, boolean deleted, CloudApplied out) throws Exception {
+        int chatId = idBySyncId("chats", chatSid);
+        // No chat: it is gone (nothing to do), or it has not arrived yet (wait for it).
+        if (chatId <= 0) return deleted;
+        String rel = "";
+        Cursor c = db.rawQuery("SELECT memory_file_path FROM chats WHERE id = ?", new String[]{String.valueOf(chatId)});
+        try {
+            if (c.moveToFirst()) rel = str(c, 0);
+        } finally {
+            c.close();
+        }
+        if (rel.isEmpty() || !isEditableWorkspaceFile(rel)) {
+            rel = "memories/chat_" + chatId + ".md";
+            ContentValues mem = new ContentValues();
+            mem.put("memory_file_path", rel);
+            db.update("chats", mem, "id = ?", new String[]{String.valueOf(chatId)});
+        }
+        String text = deleted ? "" : clip(p.optString("text", ""), 2_000_000);
+        writeTextFile(new File(workspaceDir, rel), "# Память чата #" + chatId + "\n\n" + text);
+        out.chatIds.add(chatId);
+        return true;
+    }
+
+    private boolean applyCloudMessage(String sid, JSONObject p, boolean deleted, CloudApplied out) throws Exception {
+        int id = idBySyncId("messages", sid);
+        if (deleted) {
+            if (id > 0) {
+                Cursor c = db.rawQuery("SELECT chat_id FROM messages WHERE id = ?", new String[]{String.valueOf(id)});
+                try {
+                    if (c.moveToFirst()) out.chatIds.add(c.getInt(0));
+                } finally {
+                    c.close();
+                }
+                db.delete("messages", "id = ?", new String[]{String.valueOf(id)});
+            }
+            return true;
+        }
+        int chatId = idBySyncId("chats", sidOrEmpty(p.optString("chatSid", "")));
+        if (chatId <= 0) return false;
+        String role = p.optString("role", "");
+        if (!"user".equals(role) && !"assistant".equals(role)) return true;
+        String content = clip(p.optString("content", ""), 4_000_000);
+        JSONArray swipes = stringArray(p.optJSONArray("swipes"));
+        if (swipes.length() == 0) swipes.put(content);
+        ContentValues cv = new ContentValues();
+        cv.put("chat_id", chatId);
+        cv.put("role", role);
+        cv.put("content", content);
+        cv.put("thoughts", clip(p.optString("thoughts", ""), 4_000_000));
+        cv.put("swipes_json", swipes.toString());
+        cv.put("thought_swipes_json", stringArray(p.optJSONArray("thoughtSwipes")).toString());
+        cv.put("swipe_index", Math.max(0, Math.min(p.optInt("swipeIndex", 0), swipes.length() - 1)));
+        long sortKey = p.optLong("sortKey", 0L);
+        // Without a key the insert trigger puts the message last.
+        if (sortKey > 0) cv.put("sort_key", sortKey);
+        putTimestamp(cv, "created_at", p.optString("createdAt", ""));
+        if (id > 0) {
+            db.update("messages", cv, "id = ?", new String[]{String.valueOf(id)});
+        } else {
+            cv.put("sync_id", sid);
+            if (db.insert("messages", null, cv) <= 0) throw new Exception("Не удалось сохранить сообщение из облака");
+        }
+        out.chatIds.add(chatId);
+        return true;
+    }
+
+    private void applyCloudSettings(JSONObject p, CloudApplied out) {
+        if (p.has("selectedModel")) setSetting("selected_model", normalizeBaseModelId(p.optString("selectedModel")));
+        if (p.has("selectedEffort")) setSetting("selected_effort", normalizeEffort(p.optString("selectedEffort")));
+        if (p.has("safetyThreshold")) setSetting("safety_threshold", normalizeSafetyThreshold(p.optString("safetyThreshold")));
+        // It becomes part of the Vertex URL: plain project ids only.
+        String project = p.optString("projectId", "").trim();
+        if (project.matches("[a-z][a-z0-9.:-]{2,99}")) setSetting("project_id", project);
+        String personaSid = sidOrEmpty(p.optString("activePersonaSid", ""));
+        if (!personaSid.isEmpty()) {
+            int pid = idBySyncId("personas", personaSid);
+            if (pid > 0) {
+                setSetting("active_persona_id", String.valueOf(pid));
+            } else {
+                out.pendingPersonaSid = personaSid;
+            }
+        }
+        out.settings = true;
+    }
+
+    /** Sets the default persona once its card has arrived (inside cloudApplying). */
+    boolean cloudResolvePersona(String personaSid) {
+        int pid = idBySyncId("personas", personaSid);
+        if (pid <= 0) return false;
+        setSetting("active_persona_id", String.valueOf(pid));
+        return true;
+    }
+
+    /**
+     * Erases every card, chat and message with the workspace texts: signing out
+     * with "erase from this phone", or replacing local data with the cloud's.
+     * Tracking must already be off.
+     */
+    void cloudWipeLocalData() throws Exception {
+        for (GenerationProgress prog : activeGenerations.values()) prog.cancel();
+        cloudApplying(new CloudWork() {
+            @Override
+            public void run() {
+                for (int i = SYNCED_TABLES.length - 1; i >= 0; i--) db.execSQL("DELETE FROM " + SYNCED_TABLES[i]);
+            }
+        });
+        lastGenerations.clear();
+        for (String dir : new String[]{"characters", "personas", "memories", "exports"}) {
+            File d = new File(workspaceDir, dir);
+            deleteRecursive(d);
+            if (!"exports".equals(dir)) d.mkdirs();
+        }
+        writeTextFile(new File(workspaceDir, "GEMINI.md"), "");
+        setSetting("active_persona_id", "0");
+        tidyChatFiles();
+    }
+
+    boolean cloudGenerationRunning() {
+        return !activeGenerations.isEmpty();
+    }
+
+    boolean cloudIsTracking() {
+        Cursor c = db.rawQuery("SELECT tracking FROM cloud_ctl WHERE id = 1", null);
+        try {
+            return c.moveToFirst() && c.getInt(0) == 1;
+        } finally {
+            c.close();
+        }
+    }
+
+    boolean cloudRowExists(String table, String sid) {
+        return idBySyncId(table, sid) > 0;
+    }
+
+    /** Whether linking an account has anything local to merge or replace. */
+    boolean cloudHasLocalData() {
+        Cursor c = db.rawQuery("SELECT (SELECT COUNT(*) FROM characters) + (SELECT COUNT(*) FROM personas) "
+            + "+ (SELECT COUNT(*) FROM chats)", null);
+        try {
+            if (c.moveToFirst() && c.getLong(0) > 0) return true;
+        } finally {
+            c.close();
+        }
+        return !readTextFile(new File(workspaceDir, "GEMINI.md")).trim().isEmpty();
+    }
+
+    /** Tells the page what changed from the cloud (window.__onCloudSyncChanged). */
+    void cloudNotifyChanged(JSONObject info) {
+        final String js = "window.__onCloudSyncChanged && window.__onCloudSyncChanged(" + info + ");";
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                WebView wv = webView;
+                if (wv != null) wv.evaluateJavascript(js, null);
+            }
+        });
+    }
+
+    /** The cloud sign-in in the browser finished (window.__onCloudAuthDone). */
+    void cloudNotifyAuth(boolean ok) {
+        final String js = "window.__onCloudAuthDone && window.__onCloudAuthDone(" + ok + ");";
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                WebView wv = webView;
+                if (wv != null) wv.evaluateJavascript(js, null);
+            }
+        });
+    }
+
+    String cloudGetSetting(String key) {
+        return getSetting(key, "");
+    }
+
+    void cloudSetSetting(String key, String value) {
+        setSetting(key, value);
     }
 
     // =========================================================================
@@ -1920,10 +2689,10 @@ public class LocalBackendServer {
     private JSONArray queryChatsListArray() throws Exception {
         JSONArray arr = new JSONArray();
         String sql = "SELECT c.id, c.title, c.character_id, c.persona_id, c.model_id, c.effort, ch.name, p.name, " +
-            "(SELECT substr(m.content, 1, 300) FROM messages m WHERE m.chat_id = c.id ORDER BY m.id DESC LIMIT 1), " +
+            "(SELECT substr(m.content, 1, 300) FROM messages m WHERE m.chat_id = c.id ORDER BY m.sort_key DESC, m.id DESC LIMIT 1), " +
             "(SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id), " +
             "MAX(COALESCE(c.updated_at, c.created_at, ''), " +
-            "COALESCE((SELECT m.created_at FROM messages m WHERE m.chat_id = c.id ORDER BY m.id DESC LIMIT 1), '')) AS last_activity, " +
+            "COALESCE((SELECT m.created_at FROM messages m WHERE m.chat_id = c.id ORDER BY m.sort_key DESC, m.id DESC LIMIT 1), '')) AS last_activity, " +
             "c.created_at " +
             "FROM chats c " +
             "LEFT JOIN characters ch ON ch.id = c.character_id " +
@@ -2069,7 +2838,8 @@ public class LocalBackendServer {
 
     private JSONArray getChatMessagesArray(int chatId) throws Exception {
         JSONArray arr = new JSONArray();
-        Cursor c = db.rawQuery("SELECT id, chat_id, role, content, thoughts, swipes_json, swipe_index, created_at, thought_swipes_json FROM messages WHERE chat_id = ? ORDER BY id ASC", new String[]{String.valueOf(chatId)});
+        // sort_key, not id: messages that came from the cloud got local ids in arrival order.
+        Cursor c = db.rawQuery("SELECT id, chat_id, role, content, thoughts, swipes_json, swipe_index, created_at, thought_swipes_json FROM messages WHERE chat_id = ? ORDER BY sort_key ASC, id ASC", new String[]{String.valueOf(chatId)});
         while (c.moveToNext()) {
             arr.put(cursorToMessageJson(c));
         }
@@ -2294,12 +3064,12 @@ public class LocalBackendServer {
                 JSONObject character = chatDetails.getJSONObject("character");
                 JSONObject persona = chatDetails.getJSONObject("persona");
                 JSONArray allMsgs = chatDetails.getJSONArray("messages");
+                // Everything shown above this message (display order, not id order).
                 JSONArray historyBefore = new JSONArray();
                 for (int i = 0; i < allMsgs.length(); i++) {
                     JSONObject m = allMsgs.getJSONObject(i);
-                    if (m.getInt("id") < msgId) {
-                        historyBefore.put(m);
-                    }
+                    if (m.getInt("id") == msgId) break;
+                    historyBefore.put(m);
                 }
 
                 baseModel = normalizeBaseModelId(chat.optString("model_id", getSetting("selected_model", "gemini-4-argon")));

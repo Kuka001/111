@@ -81,6 +81,19 @@ if ($env:AGY_SKIP_TESTS -ne "1") {
     } else {
         Write-Host "WARNING: node not found - skipping web unit tests." -ForegroundColor Yellow
     }
+
+    # The cloud encryption on the JVM (android/tests): the same vectors as
+    # mobile/tests/cloud-format.test.js, so the Java and Node sides agree.
+    Write-Host "Running cloud crypto tests (JVM)..."
+    $JvmTestDir = "$BuildDir\jvmtest"
+    if (Test-Path $JvmTestDir) { Remove-Item -Recurse -Force $JvmTestDir }
+    New-Item -ItemType Directory -Force -Path $JvmTestDir | Out-Null
+    & $Javac -encoding UTF-8 -d $JvmTestDir "$AndroidDir\src\com\agy\roleplay\CloudCrypto.java" "$AndroidDir\tests\CloudCryptoTest.java"
+    if ($LASTEXITCODE -ne 0) { throw "javac failed on the cloud crypto tests" }
+    & $Java "-Dfile.encoding=UTF-8" -cp $JvmTestDir com.agy.roleplay.CloudCryptoTest
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cloud crypto tests failed - aborting build. Fix them or set AGY_SKIP_TESTS=1 to override."
+    }
 }
 
 # Byte copy with a fresh timestamp: Copy-Item keeps the source mtime, and a
@@ -135,6 +148,9 @@ $JavaSources = @(
     "$AndroidDir\src\com\agy\roleplay\LocalBackendServer.java",
     "$AndroidDir\src\com\agy\roleplay\ClaudeRuntime.java",
     "$AndroidDir\src\com\agy\roleplay\ProcSnapshot.java",
+    "$AndroidDir\src\com\agy\roleplay\CloudCrypto.java",
+    "$AndroidDir\src\com\agy\roleplay\CloudStore.java",
+    "$AndroidDir\src\com\agy\roleplay\CloudSync.java",
     "$BuildDir\gen\com\agy\roleplay\R.java"
 )
 

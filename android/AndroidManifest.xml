@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.agy.roleplay"
-    android:versionCode="25"
-    android:versionName="1.7.0">
+    android:versionCode="26"
+    android:versionName="1.8.0">
 
     <!--
       targetSdk is intentionally pinned to 28. The on-device Claude Code CLI is a
@@ -37,6 +37,17 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!--
+              The "back to the app" button on the cloud sign-in page in the
+              browser (agyroleplay://cloud-signin). It only brings the app to
+              the front, where the sign-in finishes; the link carries no data.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="agyroleplay" android:host="cloud-signin" />
             </intent-filter>
         </activity>
     </application>

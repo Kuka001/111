@@ -366,6 +366,73 @@
     return !t || t === 'Чат: ' + String(characterName || '').trim();
   }
 
+  /**
+   * How strong an encryption password looks: a rough estimate from its length
+   * and character sets, with obvious patterns marked down. The engine only
+   * enforces the minimum length; the meter steers towards a passphrase.
+   */
+  function passwordStrength(pw, minChars) {
+    const s = String(pw || '');
+    const chars = Array.from(s);
+    const min = minChars || 10;
+    if (!chars.length) return { score: 0, label: '', ok: false, hint: `Не короче ${min} символов. Лучше фраза из нескольких слов.` };
+    let pool = 0;
+    if (/[a-z]/.test(s)) pool += 26;
+    if (/[A-Z]/.test(s)) pool += 26;
+    if (/[а-яё]/.test(s)) pool += 33;
+    if (/[А-ЯЁ]/.test(s)) pool += 33;
+    if (/[0-9]/.test(s)) pool += 10;
+    if (/[^a-zA-Zа-яёА-ЯЁ0-9]/.test(s)) pool += 20;
+    let bits = chars.length * Math.log2(Math.max(pool, 2));
+    if (new Set(chars.map(c => c.toLowerCase())).size <= 3) bits = Math.min(bits, 20);
+    if (/^(?:0123456789|1234567890|qwerty|йцукен|password|пароль|abcdef)/i.test(s)) bits = Math.min(bits, 25);
+    const score = bits < 40 ? 1 : bits < 60 ? 2 : bits < 80 ? 3 : 4;
+    const missing = min - chars.length;
+    let hint = '';
+    if (missing > 0) hint = `Ещё ${missing} ${pluralRu(missing, 'символ', 'символа', 'символов')}`;
+    else if (score < 2) hint = 'Слишком простой: добавьте слов, цифр или знаков';
+    else if (score === 2) hint = 'Можно надёжнее: фраза из 4–5 слов';
+    return { score, label: ['', 'Слабый', 'Средний', 'Хороший', 'Сильный'][score], ok: missing <= 0 && score >= 2, hint };
+  }
+
+  function formatBytes(n) {
+    const v = Number(n) || 0;
+    if (v < 1024) return v + ' Б';
+    if (v < 1024 * 1024) return Math.round(v / 1024) + ' КБ';
+    return (v / 1024 / 1024).toFixed(1).replace('.', ',') + ' МБ';
+  }
+
+  /** "только что", "5 мин назад", "21:04", "вчера"… */
+  function agoText(ts, now) {
+    if (!ts) return '';
+    const t = formatRelativeTime(new Date(Number(ts)), now);
+    return /мин$/.test(t) ? t + ' назад' : t;
+  }
+
+  /** The cloud's state in one line (settings list, page header) from /api/cloud/status. */
+  function cloudSummary(c, now) {
+    if (!c || !c.configured) return { tone: 'warn', label: 'Настроить', text: 'Не подключено — данные только на этом телефоне' };
+    if (!c.signedIn) {
+      return { tone: 'warn', label: 'Войти', text: c.linked ? 'Вход в облако истёк — войдите снова' : 'Войдите через Google' };
+    }
+    if (c.vault === 'none') {
+      return { tone: 'warn', label: 'Настроить', text: c.linked ? 'Хранилище в облаке удалено — создайте его заново' : 'Создайте пароль шифрования' };
+    }
+    if (c.vault === 'locked') return { tone: 'warn', label: 'Пароль', text: 'Введите пароль шифрования' };
+    if (c.vault !== 'ready') return { tone: '', label: '…', text: 'Проверяю хранилище…' };
+    const who = c.email || 'Аккаунт Google';
+    if (c.busy) {
+      const phases = { upload: 'загрузка в облако', download: 'загрузка из облака', wipe: 'удаление', sync: 'синхронизация' };
+      const n = c.total ? ` ${formatCount(c.done)} из ${formatCount(c.total)}` : (c.done ? ` ${formatCount(c.done)}` : '');
+      return { tone: 'ok', label: 'Синхр.', text: `${who} · ${phases[c.phase] || 'синхронизация'}${n}…` };
+    }
+    if (c.quotaUntil) return { tone: 'warn', label: 'Лимит', text: 'Бесплатный лимит на сегодня исчерпан — данные на телефоне в порядке' };
+    if (c.lastError && c.errorKind !== 'skipped') return { tone: 'err', label: 'Ошибка', text: c.lastError };
+    const last = agoText(c.lastSyncAt, now);
+    const queue = c.pending ? ` · в очереди ${formatCount(c.pending)}` : '';
+    return { tone: 'ok', label: 'Готово', text: `${who} · ${last ? 'синхронизировано ' + last : 'ещё не синхронизировано'}${queue}` };
+  }
+
   // ==========================================================================
   // STATE, PREFERENCES, FEATURES
   // ==========================================================================
@@ -399,6 +466,8 @@
     },
     // Last Claude Code self-test result; survives closing the settings page.
     claudeSelftest: null,
+    // /api/cloud/status (account, vault, sync); null until the engine answers.
+    cloud: null,
     models: [],
     characters: [],
     personas: [],
@@ -455,7 +524,7 @@
   // The native engine (APK build) this web layer is made for. The engine only
   // installs an OTA web layer of its own build; this guards against an older
   // engine that still accepts any build.
-  const MIN_ENGINE_BUILD = 25;
+  const MIN_ENGINE_BUILD = 26;
 
   const THEMES = {
     dark: { label: 'Тёмная', bg: '#0f1115', nav: '#13161c', light: false, swatch: ['#0f1115', '#1c2029', '#a4abbb'] },
@@ -1041,6 +1110,55 @@
     });
   };
 
+  async function refreshCloudStatus() {
+    try {
+      state.cloud = await api('/api/cloud/status');
+    } catch (e) {
+      // keep the last known state
+      return state.cloud;
+    }
+    if (state.tab === 'settings') renderSettingsTab();
+    refreshLayers();
+    return state.cloud;
+  }
+
+  // The browser came back from the cloud's Google sign-in (CloudSync.onBrowserSignIn).
+  window.__onCloudAuthDone = function (ok) {
+    refreshCloudStatus().then((c) => {
+      if (ok) toast('Вход выполнен: ' + ((c && c.email) || 'аккаунт Google'), { type: 'success' });
+      else toast((c && c.loginError) || 'Вход не выполнен', { type: 'error', duration: 9000 });
+    });
+  };
+
+  // Another device changed data and this one took it in: reload what is shown.
+  window.__onCloudSyncChanged = function (info) {
+    const changed = info || {};
+    if (changed.prompt) state.systemPromptText = null;
+    const room = state.room;
+    const roomId = room ? room.chatId : 0;
+    loadAll().then(async () => {
+      if (!room || state.room !== room) return;
+      if ((changed.deletedChatIds || []).includes(roomId)) {
+        closeChatRoom();
+        toast('Этот чат удалили на другом устройстве');
+        return;
+      }
+      if (!(changed.chatIds || []).includes(roomId) && !changed.cards) return;
+      // A reply being generated here will refresh the chat itself when it ends.
+      if (state.generations[roomId]) return;
+      try {
+        const data = withCardImages(await api(`/api/chats/${roomId}`));
+        if (state.room !== room) return;
+        room.data = data;
+        renderRoomHeader();
+        syncFeed();
+      } catch (e) {
+        // the chat stays as shown
+      }
+    }).catch(() => {});
+    refreshCloudStatus();
+  };
+
   window.__onNativeFileSaved = function (success) {
     if (success) toast('Файл сохранён', { type: 'success' });
   };
@@ -1061,6 +1179,7 @@
     if (name === 'settings') {
       refreshAgyStatus();
       refreshClaudeStatus();
+      refreshCloudStatus();
     }
   }
 
@@ -3023,8 +3142,12 @@
     const upd = state.updateInfo;
     const updAvailable = updateAction(upd) !== 'none';
     const pill = (st) => `<span class="pill ${st.ok ? 'ok' : 'warn'}">${st.ok ? 'Готово' : 'Настроить'}</span>`;
+    const cloud = cloudSummary(state.cloud);
     pane.innerHTML = `<div class="tab-inner">
       <div class="appbar"><h1 class="appbar-title">Настройки</h1></div>
+      <div class="section"><div class="section-title">Аккаунт</div><div class="list">
+        ${settingsRow({ page: 'cloud', icon: 'shield', title: 'Облако и аккаунт', sub: escapeHtml(cloud.text), value: `<span class="pill ${cloud.tone}">${escapeHtml(cloud.label)}</span>` })}
+      </div></div>
       <div class="section"><div class="section-title">ИИ</div><div class="list">
         ${settingsRow({ page: 'prompt', icon: 'scroll', title: 'Системный промпт', sub: promptSub })}
         ${settingsRow({ page: 'model', icon: 'cpu', title: 'Модель по умолчанию', sub: escapeHtml(modelSummary(s.selectedModel, s.selectedEffort)) + ' · для новых чатов' })}
@@ -3056,6 +3179,7 @@
     else if (page === 'reading') openReadingPage();
     else if (page === 'backup') openBackupPage();
     else if (page === 'updates') openUpdatesPage();
+    else if (page === 'cloud') openCloudPage();
   }
 
   function openProviderSettings(provider) {
@@ -3701,7 +3825,7 @@
         </div>
         <div class="card card-pad section">
           <div class="status-card-title">Восстановить</div>
-          <p class="step-text">Текущие персонажи, чаты и сообщения будут <b>полностью заменены</b> данными из копии.</p>
+          <p class="step-text">Текущие персонажи, чаты и сообщения будут <b>полностью заменены</b> данными из копии.${state.cloud && state.cloud.linked ? ' Облако включено: данные в облаке тоже заменятся копией.' : ''}</p>
           <button class="btn btn-secondary btn-block" data-act="pick">${ic('upload')}Выбрать файл .json</button><input type="file" accept=".json,application/json" class="hidden" data-role="file" />
           <details class="disclosure" style="margin-top:6px"><summary>Вставить JSON вручную ${ic('chevron-down', 'ic-sm')}</summary><textarea class="textarea mono" data-role="paste" placeholder='{"backupFormat":1, …}'></textarea><button class="btn btn-secondary btn-block" style="margin-top:10px" data-act="paste">Восстановить из текста</button></details>
         </div>
@@ -3718,7 +3842,7 @@
       const c = parsed.counts || {};
       const ok = await confirmDialog({
         title: 'Восстановить данные?',
-        message: `В копии: персонажей ${c.characters ?? '?'}, чатов ${c.chats ?? '?'}, сообщений ${c.messages ?? '?'}.\n\nТекущие данные будут полностью заменены. Отменить это нельзя.`,
+        message: `В копии: персонажей ${c.characters ?? '?'}, чатов ${c.chats ?? '?'}, сообщений ${c.messages ?? '?'}.\n\nТекущие данные будут полностью заменены${state.cloud && state.cloud.linked ? ' — и на телефоне, и в облаке' : ''}. Отменить это нельзя.`,
         confirmText: 'Восстановить',
         danger: true,
       });
@@ -3769,6 +3893,569 @@
           return;
         }
         restore(raw);
+      },
+    });
+  }
+
+  // --- cloud: account, encryption, sync ----------------------------------------
+  // The phone keeps the working copy; the engine (CloudSync) keeps an end-to-end
+  // encrypted copy in the user's own Firebase project. A password typed here goes
+  // to the engine once; the page forgets it when it closes.
+  const CLOUD_GUIDE_URL = 'https://github.com/Kuka001/111/blob/main/firebase/README.md';
+
+  function strengthHtml(pw, minChars) {
+    const st = passwordStrength(pw, minChars);
+    return `<div class="strength s${st.score}" data-role="meter"><span></span><span></span><span></span><span></span>
+      <em>${escapeHtml([st.label, st.hint].filter(Boolean).join(' · '))}</em></div>`;
+  }
+
+  function cloudPasswordInput(role, opts) {
+    const o = opts || {};
+    return `<input class="input${o.mono ? ' mono' : ''}" data-role="${role}" type="${o.text ? 'text' : 'password'}"
+      autocomplete="${o.autocomplete || 'off'}" autocapitalize="off" spellcheck="false" placeholder="${escapeHtml(o.placeholder || '')}" />`;
+  }
+
+  function openCloudPage() {
+    // Typed values survive the re-rendering on status updates; cleared on close.
+    const draft = { config: '', code: '', pw1: '', pw2: '', unlockPw: '', recovery: '' };
+    const ui = { mode: 'merge', useCode: false, show: false, busy: '' };
+    let timer = null;
+    let lastHtml = '';
+    let lastPoll = 0;
+    const minChars = () => (state.cloud && state.cloud.minPasswordChars) || 10;
+
+    const busyBtn = (act, label, busyLabel, cls) =>
+      `<button class="btn ${cls}" data-act="${act}"${ui.busy ? ' disabled' : ''}>${ui.busy === act ? `<span class="spinner"></span>${busyLabel}` : label}</button>`;
+    const errorCard = (text) => `<div class="error-card" style="margin-top:12px"><div class="error-head">${ic('alert')}<div>${escapeHtml(text)}</div></div></div>`;
+    const signOutLink = () => `<div class="btn-row" style="margin-top:4px"><button class="btn btn-ghost btn-sm" data-act="signout">${ic('logout', 'ic-sm')}Выйти из аккаунта</button></div>`;
+    const keyHint = (c) => c.certSha1 ? `<details class="disclosure section"><summary>Ограничить ключ API этим приложением (необязательно) ${ic('chevron-down', 'ic-sm')}</summary>
+        <div class="step-text">Google Cloud → APIs &amp; Services → Credentials → ваш ключ API. Application restrictions: <b>Android apps</b>, пакет <b>com.agy.roleplay</b> и этот отпечаток SHA-1. API restrictions: Identity Toolkit API и Token Service API.</div>
+        <div class="link-box">${escapeHtml(c.certSha1)}</div>
+        <button class="btn btn-ghost btn-sm" style="padding:0;margin-top:6px" data-act="copy-sha">${ic('copy', 'ic-sm')}Скопировать SHA-1</button>
+      </details>` : '';
+
+    const configView = (c) => `
+      <div class="card">
+        <div class="step"><span class="step-num">1</span><div class="step-body"><div class="step-title">Проект Firebase</div>
+          <div class="step-text">Облако — ваш собственный бесплатный проект Firebase (тариф Spark, без банковской карты). Создайте его по инструкции и вставьте сюда четыре значения: <b>projectId</b>, <b>apiKey</b>, <b>clientId</b> и <b>clientSecret</b> — как JSON или прямо фрагментами из консоли.</div>
+          <button class="btn btn-secondary btn-sm" data-act="guide">${ic('external', 'ic-sm')}Открыть инструкцию</button>
+          <textarea class="textarea mono" data-role="config" style="margin-top:12px" autocomplete="off" autocapitalize="off" spellcheck="false"
+            placeholder='{"projectId": "…", "apiKey": "AIza…", "clientId": "….apps.googleusercontent.com", "clientSecret": "GOCSPX-…"}'></textarea>
+          <div class="btn-row" style="margin-top:10px">${busyBtn('save-config', 'Сохранить', 'Проверяю…', 'btn-primary btn-sm')}</div>
+        </div></div>
+        <div class="step"><span class="step-num">2</span><div class="step-body"><div class="step-title">Вход через Google</div>
+          <div class="step-text">Данные привяжутся к вашему аккаунту Google.</div></div></div>
+        <div class="step"><span class="step-num">3</span><div class="step-body"><div class="step-title">Пароль шифрования</div>
+          <div class="step-text">Его знаете только вы: им данные шифруются ещё на телефоне.</div></div></div>
+      </div>
+      ${keyHint(c)}`;
+
+    const signInView = (c) => `
+      <div class="card status-card">
+        <span class="status-card-icon warn">${ic('login')}</span>
+        <div class="row-body"><div class="status-card-title">${c.linked ? 'Войдите снова' : 'Войдите через Google'}</div>
+          <div class="status-card-sub">${c.linked
+            ? `Вход в облако истёк. Войдите тем же аккаунтом${c.email ? ' (' + escapeHtml(c.email) + ')' : ''} — синхронизация продолжится.`
+            : 'Данные будут привязаны к этому аккаунту Google.'}</div></div>
+      </div>
+      ${c.loginError ? errorCard(c.loginError) : ''}
+      <div class="btn-row" style="margin-top:12px">
+        ${c.loginCaptured
+          ? '<div class="install-progress" style="flex:1"><span class="spinner"></span><span>Завершаю вход…</span></div>'
+          : c.loginPending
+            ? '<div class="install-progress" style="flex:1"><span class="spinner"></span><span>Жду возврата из браузера…</span></div>'
+            : busyBtn('login', `${ic('login')}Войти через Google`, 'Открываю…', 'btn-primary')}
+      </div>
+      <details class="disclosure section"><summary>Браузер не вернул в приложение? ${ic('chevron-down', 'ic-sm')}</summary>
+        <label class="field"><span class="field-label">Адрес из строки браузера (http://127.0.0.1:…)</span>
+          <input class="input mono" data-role="code" placeholder="http://127.0.0.1:…/cloud-callback?state=…&amp;code=…" autocomplete="off" autocapitalize="off" spellcheck="false" /></label>
+        <div style="margin-top:10px">${busyBtn('exchange', 'Подтвердить', 'Проверяю…', 'btn-secondary btn-block')}</div>
+      </details>
+      <p class="section-hint">Проект Firebase: ${escapeHtml(c.projectId)}${c.linked ? '' : ' · <button class="link" data-act="edit-config">сменить</button>'}</p>
+      ${keyHint(c)}`;
+
+    const createView = (c) => `
+      ${c.errorKind === 'vault' && c.lastError ? errorCard(c.lastError) : ''}
+      <div class="card card-pad">
+        <div class="status-card-title">Пароль шифрования</div>
+        <p class="step-text">Им шифруются все данные перед отправкой в облако. Его не знает никто, кроме вас — ни Google, ни разработчик, — поэтому забытый пароль восстановить нельзя: только кодом восстановления, который появится на следующем шаге. Вводить пароль понадобится только на новом телефоне.</p>
+        <label class="field"><span class="field-label">Пароль</span>${cloudPasswordInput('pw1', { text: ui.show, autocomplete: 'new-password', placeholder: 'Например, фраза из 4–5 слов' })}</label>
+        ${strengthHtml(draft.pw1, minChars())}
+        <label class="field" style="margin-top:12px"><span class="field-label">Повторите пароль</span>${cloudPasswordInput('pw2', { text: ui.show, autocomplete: 'new-password' })}</label>
+        <button class="btn btn-ghost btn-sm" style="padding:0;margin-top:8px" data-act="toggle-show">${ic('eye', 'ic-sm')}${ui.show ? 'Скрыть пароль' : 'Показать пароль'}</button>
+        <div style="margin-top:14px">${busyBtn('create', `${ic('shield')}Создать хранилище`, 'Шифрую…', 'btn-primary btn-block')}</div>
+      </div>
+      <p class="section-hint">Аккаунт: ${escapeHtml(c.email)}. ${c.hasLocalData ? 'Всё, что есть на телефоне, зашифруется и загрузится в облако.' : 'На телефоне пока нет данных.'}</p>
+      ${signOutLink()}`;
+
+    const unlockView = (c) => {
+      const choose = c.hasLocalData && !c.linked;
+      const modes = [
+        { value: 'merge', title: 'Объединить', sub: 'Данные телефона и облака сольются; где они расходятся, останется версия с телефона.' },
+        { value: 'replace', title: 'Заменить данными из облака', sub: 'Данные на этом телефоне будут стёрты и заменены облачными.' },
+      ];
+      return `
+      ${c.lastError ? errorCard(c.lastError) : ''}
+      <div class="card card-pad">
+        <div class="status-card-title">${ui.useCode ? 'Код восстановления' : 'Пароль шифрования'}</div>
+        <p class="step-text">${ui.useCode
+          ? 'Код, который вы сохранили при создании хранилища: 32 буквы и цифры, дефисы и регистр не важны.'
+          : 'В облаке уже есть ваши зашифрованные данные. Введите пароль, которым они защищены.'}</p>
+        ${ui.useCode
+          ? cloudPasswordInput('recovery', { text: true, mono: true, placeholder: 'XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX' })
+          : cloudPasswordInput('unlockPw', { text: ui.show, autocomplete: 'current-password', placeholder: 'Пароль шифрования' })}
+        <button class="btn btn-ghost btn-sm" style="padding:0;margin-top:8px" data-act="use-code">${ui.useCode ? 'Ввести пароль' : 'Забыли пароль? Ввести код восстановления'}</button>
+      </div>
+      ${choose ? `<div class="section"><div class="section-title">На телефоне уже есть данные</div><div class="list">
+        ${modes.map(o => `<button class="row" data-act="mode" data-value="${o.value}"><span class="radio${ui.mode === o.value ? ' on' : ''}"></span><div class="row-body"><div class="row-title">${o.title}</div><div class="row-sub wrap">${o.sub}</div></div></button>`).join('')}
+      </div>
+      ${ui.mode === 'replace' ? `<button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="backup">${ic('download', 'ic-sm')}Сначала сохранить копию</button>` : ''}
+      </div>` : ''}
+      <div style="margin-top:14px">${busyBtn('unlock', `${ic('shield')}Открыть хранилище`, 'Проверяю…', 'btn-primary btn-block')}</div>
+      <p class="section-hint">Аккаунт: ${escapeHtml(c.email)}</p>
+      ${signOutLink()}`;
+    };
+
+    const readyView = (c) => {
+      const sum = cloudSummary(c);
+      const u = c.usage || {};
+      const lim = u.limits || {};
+      const progress = c.busy && c.total ? Math.min(100, Math.round((c.done / c.total) * 100)) : -1;
+      const title = c.busy ? 'Синхронизация…' : (sum.tone === 'ok' ? 'Данные в облаке' : (sum.tone === 'err' ? 'Ошибка синхронизации' : 'Синхронизация на паузе'));
+      return `
+      <div class="card status-card">
+        <span class="status-card-icon ${sum.tone}">${c.busy ? '<span class="spinner"></span>' : ic(sum.tone === 'ok' ? 'check-circle' : 'alert')}</span>
+        <div class="row-body"><div class="status-card-title">${title}</div><div class="status-card-sub">${escapeHtml(sum.text)}</div></div>
+      </div>
+      ${progress >= 0 ? `<div class="progress" style="margin-top:12px"><span style="width:${progress}%"></span></div>` : ''}
+      ${c.keystoreUnavailable ? errorCard('Хранилище ключей Android недоступно: ключ шифрования хранится только в памяти, после перезапуска приложения понадобится пароль.') : ''}
+      <div class="card card-pad section">
+        <div class="kv"><span>Последняя синхронизация</span><b>${c.lastSyncAt ? escapeHtml(agoText(c.lastSyncAt)) : 'ещё не было'}</b></div>
+        <div class="kv"><span>Ждут отправки</span><b>${formatCount(c.pending)}</b></div>
+        <div class="kv"><span>В облаке</span><b>${formatCount(c.cloudRecords)} ${pluralRu(c.cloudRecords, 'запись', 'записи', 'записей')} · ${formatBytes(c.cloudBytes)}</b></div>
+        <div class="kv"><span>Сегодня из бесплатного лимита</span><b>чтений ${formatCount(u.reads)} из ${formatCount(lim.reads)}, записей ${formatCount(u.writes)} из ${formatCount(lim.writes)}</b></div>
+        ${c.parked ? `<div class="kv"><span>Ждут своего чата</span><b>${formatCount(c.parked)}</b></div>` : ''}
+        <div style="margin-top:12px">${busyBtn('sync', `${ic('reroll')}Синхронизировать сейчас`, 'Запускаю…', 'btn-secondary btn-block')}</div>
+      </div>
+      <div class="section"><div class="section-title">Шифрование</div><div class="list">
+        <button class="row" data-act="password"><span class="row-icon">${ic('lock')}</span><div class="row-body"><div class="row-title">Сменить пароль</div><div class="row-sub">Нужен текущий пароль или код восстановления</div></div>${ic('chevron-right', 'row-chevron')}</button>
+        <button class="row" data-act="recovery"><span class="row-icon">${ic('key')}</span><div class="row-body"><div class="row-title">Новый код восстановления</div><div class="row-sub">Старый перестанет действовать</div></div>${ic('chevron-right', 'row-chevron')}</button>
+      </div></div>
+      <div class="section"><div class="section-title">Аккаунт</div><div class="list">
+        <button class="row" data-act="signout"><span class="row-icon">${ic('logout')}</span><div class="row-body"><div class="row-title">Выйти из облака</div><div class="row-sub">Данные в облаке останутся</div></div>${ic('chevron-right', 'row-chevron')}</button>
+        <button class="row danger" data-act="wipe"><span class="row-icon">${ic('trash')}</span><div class="row-body"><div class="row-title">Удалить данные из облака</div><div class="row-sub">На этом телефоне всё останется</div></div>${ic('chevron-right', 'row-chevron')}</button>
+      </div></div>
+      <p class="section-hint">Проект Firebase: ${escapeHtml(c.projectId)}. Каждая запись шифруется на телефоне (AES-256-GCM) ключом, который есть только на ваших устройствах; в облаке он лежит лишь обёрнутым вашим паролем (PBKDF2, 600 000 итераций) и кодом восстановления.</p>`;
+    };
+
+    const render = () => {
+      const c = state.cloud;
+      if (!c) return '<div class="install-progress"><span class="spinner"></span><span>Загрузка…</span></div>';
+      if (c.vault === 'ready' && c.signedIn) return readyView(c);
+      const intro = '<p class="section-hint" style="margin:0 4px 14px">Данные шифруются на телефоне вашим паролем: в облако уходит только шифротекст. Без облака приложение работает как раньше — только на этом телефоне.</p>';
+      if (!c.configured) return intro + configView(c);
+      if (!c.signedIn) return intro + signInView(c);
+      if (c.vault === 'none') return intro + createView(c);
+      if (c.vault === 'locked') return intro + unlockView(c);
+      return intro + '<div class="install-progress"><span class="spinner"></span><span>Проверяю хранилище в облаке…</span></div>'
+        + (c.lastError ? errorCard(c.lastError) : '') + signOutLink();
+    };
+
+    const layer = openPage({
+      title: 'Облако и аккаунт',
+      body: '',
+      onClose: () => {
+        clearInterval(timer);
+        Object.keys(draft).forEach((k) => { draft[k] = ''; });
+      },
+    });
+    layer.isCloudPage = true;
+    const fillInputs = () => {
+      $$('[data-role]', layer.el).forEach((el) => {
+        const role = el.dataset.role;
+        if (Object.prototype.hasOwnProperty.call(draft, role) && 'value' in el) el.value = draft[role];
+      });
+    };
+    layer.refresh = () => {
+      const active = document.activeElement;
+      if (active && layer.el.contains(active) && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+      const html = render();
+      if (html === lastHtml) return;
+      lastHtml = html;
+      const body = $('.page-body', layer.el);
+      const scroll = body.scrollTop;
+      const openDetails = $$('details.disclosure', body).map(d => d.open);
+      layer.setBody(html);
+      $$('details.disclosure', body).forEach((d, i) => { if (openDetails[i]) d.open = true; });
+      fillInputs();
+      body.scrollTop = scroll;
+    };
+    const rerender = () => {
+      lastHtml = '';
+      layer.refresh();
+    };
+    rerender();
+    layer.el.addEventListener('input', (e) => {
+      const role = e.target.dataset.role;
+      if (!Object.prototype.hasOwnProperty.call(draft, role)) return;
+      draft[role] = e.target.value;
+      if (role === 'pw1') {
+        const meter = $('[data-role="meter"]', layer.el);
+        if (meter) meter.outerHTML = strengthHtml(draft.pw1, minChars());
+      }
+    });
+
+    refreshCloudStatus();
+    timer = setInterval(() => {
+      const c = state.cloud;
+      // Often while something runs, otherwise every 10 s.
+      const watching = !c || c.busy || c.loginPending || (c.signedIn && c.vault === 'unknown');
+      if (watching || Date.now() - lastPoll > 10000) {
+        lastPoll = Date.now();
+        refreshCloudStatus();
+      }
+    }, 1500);
+
+    const run = async (act, fn) => {
+      if (ui.busy) return;
+      ui.busy = act;
+      rerender();
+      try {
+        await fn();
+      } catch (e) {
+        toast(e.message || 'Ошибка', { type: 'error', duration: 8000 });
+      } finally {
+        ui.busy = '';
+        await refreshCloudStatus();
+        rerender();
+      }
+    };
+
+    bindActs(layer, {
+      guide: () => openExternal(CLOUD_GUIDE_URL),
+      'copy-sha': () => copyText((state.cloud && state.cloud.certSha1) || ''),
+      'save-config': () => run('save-config', async () => {
+        if (!draft.config.trim()) throw new Error('Вставьте конфигурацию проекта');
+        await api('/api/cloud/config', { method: 'POST', body: { config: draft.config } });
+        draft.config = '';
+        toast('Проект Firebase сохранён', { type: 'success' });
+      }),
+      'edit-config': async () => {
+        const ok = await confirmDialog({ title: 'Сменить проект Firebase?', message: 'Текущая конфигурация будет удалена — затем вставьте новую.', confirmText: 'Сменить' });
+        if (ok) run('edit-config', () => api('/api/cloud/config', { method: 'POST', body: { clear: true } }));
+      },
+      login: () => run('login', async () => {
+        const res = await api('/api/cloud/auth/start', { method: 'POST' });
+        if (res.authUrl && !hasBridge) window.open(res.authUrl, '_blank');
+        toast('Завершите вход в браузере');
+      }),
+      exchange: () => run('exchange', async () => {
+        if (!draft.code.trim()) throw new Error('Вставьте адрес из строки браузера');
+        await api('/api/cloud/auth/exchange', { method: 'POST', body: { codeOrUrl: draft.code.trim() } });
+        draft.code = '';
+        toast('Вход выполнен', { type: 'success' });
+      }),
+      'toggle-show': () => {
+        ui.show = !ui.show;
+        rerender();
+      },
+      create: async () => {
+        const st = passwordStrength(draft.pw1, minChars());
+        if (!st.ok) {
+          toast(st.hint || 'Пароль слишком простой', { type: 'error' });
+          return;
+        }
+        if (draft.pw1 !== draft.pw2) {
+          toast('Пароли не совпадают', { type: 'error' });
+          return;
+        }
+        const ok = await confirmDialog({
+          title: 'Запомнили пароль?',
+          message: 'Без пароля и без кода восстановления данные в облаке не расшифровать — никому, даже разработчику. На следующем шаге сохраните код восстановления.',
+          confirmText: 'Создать',
+        });
+        if (!ok) return;
+        run('create', async () => {
+          const res = await api('/api/cloud/vault/create', { method: 'POST', body: { password: draft.pw1 } });
+          draft.pw1 = '';
+          draft.pw2 = '';
+          if (res.recoveryCode) showRecoveryCode(res.recoveryCode);
+        });
+      },
+      'use-code': () => {
+        ui.useCode = !ui.useCode;
+        rerender();
+      },
+      mode: (el) => {
+        ui.mode = el.dataset.value === 'replace' ? 'replace' : 'merge';
+        rerender();
+      },
+      backup: () => openBackupPage(),
+      unlock: async () => {
+        const c = state.cloud || {};
+        const body = ui.useCode ? { recoveryCode: draft.recovery.trim() } : { password: draft.unlockPw };
+        if (!body.recoveryCode && !body.password) {
+          toast(ui.useCode ? 'Введите код восстановления' : 'Введите пароль', { type: 'error' });
+          return;
+        }
+        if (c.hasLocalData && !c.linked) {
+          body.mode = ui.mode;
+          if (ui.mode === 'replace') {
+            const ok = await confirmDialog({
+              title: 'Заменить данные на телефоне?',
+              message: 'Все персонажи, персоны, чаты и системный промпт на этом телефоне будут стёрты и заменены данными из облака. Отменить это нельзя.',
+              confirmText: 'Заменить',
+              danger: true,
+            });
+            if (!ok) return;
+          }
+        }
+        run('unlock', async () => {
+          await api('/api/cloud/vault/unlock', { method: 'POST', body });
+          draft.unlockPw = '';
+          draft.recovery = '';
+          if (body.mode === 'replace') {
+            closeChatRoom();
+            state.systemPromptText = null;
+            await loadAll();
+          }
+          toast('Хранилище открыто — идёт синхронизация', { type: 'success' });
+        });
+      },
+      sync: () => run('sync', () => api('/api/cloud/sync', { method: 'POST' })),
+      password: () => openCloudPasswordSheet(),
+      recovery: () => openCloudRecoverySheet(),
+      signout: () => openCloudSignOutSheet(),
+      wipe: () => openCloudWipeSheet(),
+    });
+  }
+
+  /** A new recovery code, shown once: the dialog stays until the user confirms it is saved. */
+  function showRecoveryCode(code) {
+    let saved = false;
+    const layer = openLayer({
+      kind: 'dialog',
+      dismissible: false,
+      onBack: () => saved,
+      html: `<div class="dialog" role="alertdialog">
+        <h2 class="dialog-title">Код восстановления</h2>
+        <p class="dialog-text">Если забудете пароль, данные в облаке откроет только этот код. Сохраните его в менеджере паролей или запишите на бумаге — отдельно от пароля. Больше он показан не будет.</p>
+        <div class="recovery-code">${escapeHtml(code)}</div>
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn btn-secondary btn-sm" data-act="copy">${ic('copy', 'ic-sm')}Скопировать</button>
+          <button class="btn btn-secondary btn-sm" data-act="save">${ic('download', 'ic-sm')}Сохранить файлом</button>
+        </div>
+        <button class="row" data-act="saved" style="margin-top:8px;padding-left:0;padding-right:0"><span class="switch" data-role="saved"></span><div class="row-body"><div class="row-title">Я сохранил код</div></div></button>
+        <div class="dialog-actions"><button class="btn btn-primary" data-act="done" disabled>Готово</button></div>
+      </div>`,
+    });
+    bindActs(layer, {
+      copy: () => copyText(code),
+      save: () => saveFile('agy-recovery-code.txt',
+        'AGY Roleplay — код восстановления облачного хранилища\n\n' + code + '\n\nХраните отдельно от пароля шифрования.\n', 'text/plain'),
+      saved: () => {
+        saved = !saved;
+        $('[data-role="saved"]', layer.el).classList.toggle('on', saved);
+        $('[data-act="done"]', layer.el).disabled = !saved;
+      },
+      done: () => {
+        if (saved) layer.close();
+      },
+    });
+  }
+
+  function openCloudPasswordSheet() {
+    const d = { current: '', pw1: '', pw2: '' };
+    let useCode = false;
+    let busy = false;
+    const min = (state.cloud && state.cloud.minPasswordChars) || 10;
+    const layer = openSheet({
+      title: 'Сменить пароль',
+      body: `
+        <label class="field"><span class="field-label" data-role="current-label">Текущий пароль</span>${cloudPasswordInput('current', { autocomplete: 'current-password' })}</label>
+        <button class="btn btn-ghost btn-sm" style="padding:0;margin-top:6px" data-act="use-code">Не помню — ввести код восстановления</button>
+        <label class="field" style="margin-top:12px"><span class="field-label">Новый пароль</span>${cloudPasswordInput('pw1', { autocomplete: 'new-password' })}</label>
+        ${strengthHtml('', min)}
+        <label class="field" style="margin-top:12px"><span class="field-label">Повторите новый пароль</span>${cloudPasswordInput('pw2', { autocomplete: 'new-password' })}</label>
+        <p class="section-hint">Данные заново шифровать не нужно: меняется только обёртка ключа в облаке. На других телефонах, где облако уже открыто, ничего вводить не придётся.</p>`,
+      footer: '<button class="btn btn-primary btn-block" data-act="save">Сменить пароль</button>',
+      onClose: () => {
+        d.current = '';
+        d.pw1 = '';
+        d.pw2 = '';
+      },
+    });
+    layer.el.addEventListener('input', (e) => {
+      const role = e.target.dataset.role;
+      if (!Object.prototype.hasOwnProperty.call(d, role)) return;
+      d[role] = e.target.value;
+      if (role === 'pw1') {
+        const meter = $('[data-role="meter"]', layer.el);
+        if (meter) meter.outerHTML = strengthHtml(d.pw1, min);
+      }
+    });
+    bindActs(layer, {
+      'use-code': (btn) => {
+        useCode = !useCode;
+        const input = $('[data-role="current"]', layer.el);
+        input.type = useCode ? 'text' : 'password';
+        input.classList.toggle('mono', useCode);
+        input.placeholder = useCode ? 'XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX' : '';
+        input.value = '';
+        d.current = '';
+        $('[data-role="current-label"]', layer.el).textContent = useCode ? 'Код восстановления' : 'Текущий пароль';
+        btn.textContent = useCode ? 'Ввести текущий пароль' : 'Не помню — ввести код восстановления';
+      },
+      save: async (btn) => {
+        if (busy) return;
+        const st = passwordStrength(d.pw1, min);
+        if (!d.current.trim()) {
+          toast(useCode ? 'Введите код восстановления' : 'Введите текущий пароль', { type: 'error' });
+          return;
+        }
+        if (!st.ok) {
+          toast(st.hint || 'Пароль слишком простой', { type: 'error' });
+          return;
+        }
+        if (d.pw1 !== d.pw2) {
+          toast('Пароли не совпадают', { type: 'error' });
+          return;
+        }
+        busy = true;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>Шифрую…';
+        try {
+          await api('/api/cloud/vault/password', {
+            method: 'POST',
+            body: useCode ? { recoveryCode: d.current.trim(), newPassword: d.pw1 } : { password: d.current, newPassword: d.pw1 },
+          });
+          layer.close();
+          toast('Пароль изменён', { type: 'success' });
+        } catch (e) {
+          toast(e.message, { type: 'error', duration: 8000 });
+          busy = false;
+          btn.disabled = false;
+          btn.textContent = 'Сменить пароль';
+        }
+      },
+    });
+  }
+
+  function openCloudRecoverySheet() {
+    let pw = '';
+    let busy = false;
+    const layer = openSheet({
+      title: 'Новый код восстановления',
+      body: `<p class="step-text">Старый код перестанет действовать. Подтвердите паролем шифрования.</p>
+        ${cloudPasswordInput('pw', { autocomplete: 'current-password', placeholder: 'Пароль шифрования' })}`,
+      footer: '<button class="btn btn-primary btn-block" data-act="make">Создать новый код</button>',
+      onClose: () => { pw = ''; },
+    });
+    layer.el.addEventListener('input', (e) => {
+      if (e.target.dataset.role === 'pw') pw = e.target.value;
+    });
+    bindActs(layer, {
+      make: async (btn) => {
+        if (busy) return;
+        if (!pw) {
+          toast('Введите пароль', { type: 'error' });
+          return;
+        }
+        busy = true;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>Проверяю…';
+        try {
+          const res = await api('/api/cloud/vault/recovery', { method: 'POST', body: { password: pw } });
+          layer.close();
+          if (res.recoveryCode) showRecoveryCode(res.recoveryCode);
+        } catch (e) {
+          toast(e.message, { type: 'error', duration: 8000 });
+          busy = false;
+          btn.disabled = false;
+          btn.textContent = 'Создать новый код';
+        }
+      },
+    });
+  }
+
+  function openCloudSignOutSheet() {
+    const c = state.cloud || {};
+    const pending = Number(c.pending) || 0;
+    const unsent = pending
+      ? ` <b>${formatCount(pending)} ${pluralRu(pending, 'изменение ещё не отправлено', 'изменения ещё не отправлены', 'изменений ещё не отправлено')}</b> — оно останется только на этом телефоне.`
+      : '';
+    const layer = openSheet({
+      title: 'Выйти из облака',
+      body: `<p class="step-text">Данные в облаке останутся: их можно открыть на любом телефоне, войдя тем же аккаунтом и введя пароль шифрования.${unsent}</p>
+        <div class="list">
+          <button class="row" data-act="keep"><span class="row-icon">${ic('logout')}</span><div class="row-body"><div class="row-title">Выйти, данные оставить</div><div class="row-sub">Всё останется и на этом телефоне</div></div></button>
+          <button class="row danger" data-act="wipe"><span class="row-icon">${ic('trash')}</span><div class="row-body"><div class="row-title">Выйти и стереть данные с телефона</div><div class="row-sub">Например, перед тем как отдать телефон</div></div></button>
+        </div>`,
+    });
+    const go = async (wipeLocal) => {
+      if (wipeLocal) {
+        const ok = await confirmDialog({
+          title: 'Стереть данные с телефона?',
+          message: 'Персонажи, персоны, чаты и системный промпт будут удалены с этого телефона.'
+            + (pending ? ` Неотправленные изменения (${pending}) пропадут.` : ' В облаке они останутся.'),
+          confirmText: 'Стереть',
+          danger: true,
+        });
+        if (!ok) return;
+      }
+      layer.close();
+      try {
+        await api('/api/cloud/signout', { method: 'POST', body: { wipeLocal } });
+        if (wipeLocal) {
+          closeChatRoom();
+          state.systemPromptText = null;
+          await loadAll();
+        }
+        await refreshCloudStatus();
+        toast(wipeLocal ? 'Вы вышли, данные с телефона стёрты' : 'Вы вышли из облака', { type: 'success' });
+      } catch (e) {
+        toast(e.message, { type: 'error', duration: 8000 });
+      }
+    };
+    bindActs(layer, { keep: () => go(false), wipe: () => go(true) });
+  }
+
+  function openCloudWipeSheet() {
+    let deleteAccount = false;
+    let busy = false;
+    const layer = openSheet({
+      title: 'Удалить данные из облака',
+      body: `<p class="step-text">Все зашифрованные данные и хранилище ключа будут удалены из вашего проекта Firebase, облако отключится. На этом телефоне всё останется. Другие телефоны тоже потеряют облачную копию.</p>
+        <button class="row" data-act="account" style="padding-left:0;padding-right:0"><span class="switch" data-role="account"></span><div class="row-body"><div class="row-title">Удалить и аккаунт в Firebase</div><div class="row-sub">Запись о вашем входе в этом проекте</div></div></button>
+        <label class="field" style="margin-top:12px"><span class="field-label">Для подтверждения введите УДАЛИТЬ</span>
+          <input class="input" data-role="confirm" autocomplete="off" autocapitalize="characters" spellcheck="false" /></label>`,
+      footer: '<button class="btn btn-danger btn-block" data-act="go" disabled>Удалить из облака</button>',
+    });
+    layer.el.addEventListener('input', (e) => {
+      if (e.target.dataset.role !== 'confirm') return;
+      $('[data-act="go"]', layer.el).disabled = e.target.value.trim().toUpperCase() !== 'УДАЛИТЬ';
+    });
+    bindActs(layer, {
+      account: () => {
+        deleteAccount = !deleteAccount;
+        $('[data-role="account"]', layer.el).classList.toggle('on', deleteAccount);
+      },
+      go: async (btn) => {
+        if (busy) return;
+        busy = true;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>Удаляю…';
+        try {
+          await api('/api/cloud/wipe', { method: 'POST', body: { confirm: 'УДАЛИТЬ', deleteAccount } });
+          layer.close();
+          await refreshCloudStatus();
+          toast('Данные удалены из облака', { type: 'success' });
+        } catch (e) {
+          toast(e.message, { type: 'error', duration: 8000 });
+          busy = false;
+          btn.disabled = false;
+          btn.textContent = 'Удалить из облака';
+        }
       },
     });
   }
@@ -4400,6 +5087,9 @@
         refreshAgyStatus();
         // Returning from the browser after the Claude sign-in.
         if (layerStack.some(l => l.isClaudePage)) refreshClaudeStatus();
+        // Changes from other devices (the engine checks at most once a minute).
+        api('/api/cloud/sync', { method: 'POST', body: { reason: 'resume' } }).catch(() => {});
+        if (layerStack.some(l => l.isCloudPage)) refreshCloudStatus();
       }
     });
   }
@@ -4415,7 +5105,10 @@
     initGestures();
     renderAllTabs();
     loadAll()
-      .then(() => setTimeout(() => checkForUpdates(false), 800))
+      .then(() => {
+        refreshCloudStatus();
+        setTimeout(() => checkForUpdates(false), 800);
+      })
       .catch(showLoadError);
   }
 
@@ -4458,5 +5151,9 @@
     isDefaultChatTitle,
     updateAction,
     deliveryNote,
+    passwordStrength,
+    cloudSummary,
+    formatBytes,
+    agoText,
   };
 })();

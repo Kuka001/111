@@ -985,7 +985,7 @@ details.disclosure[open] > summary .ic {
 }
 
 /* ==========================================================================
-   Layers: pages, sheets, dialogs (all .modal-overlay for the legacy back button)
+   Layers: pages, sheets, dialogs (each a .modal-overlay in #layers; Back closes the top one)
    ========================================================================== */
 .modal-overlay {
   position: fixed;
@@ -2362,6 +2362,88 @@ body.layer-open .toast-host {
 .status-card-icon.warn {
   background: var(--warning-soft);
   color: var(--warning);
+}
+
+.status-card-icon.err {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* Cloud: password strength, recovery code, sync progress, key/value rows */
+.strength {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 8px 4px 0;
+}
+
+.strength > span {
+  flex: 0 0 28px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-3);
+}
+
+.strength.s1 > span:nth-child(-n+1) { background: var(--danger); }
+.strength.s2 > span:nth-child(-n+2) { background: var(--warning); }
+.strength.s3 > span:nth-child(-n+3),
+.strength.s4 > span:nth-child(-n+4) { background: var(--success); }
+
+.strength > em {
+  margin-left: 6px;
+  font-style: normal;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.recovery-code {
+  margin-top: 12px;
+  padding: 14px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.6;
+  text-align: center;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.progress > span {
+  display: block;
+  height: 100%;
+  background: var(--accent-strong);
+  transition: width 0.3s ease;
+}
+
+.kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+
+.kv + .kv {
+  border-top: 1px solid var(--border);
+}
+
+.kv > b {
+  font-weight: 600;
+  color: var(--text);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .status-card-title {

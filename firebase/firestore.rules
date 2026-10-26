@@ -1,0 +1,66 @@
+rules_version = '2';
+
+// AGY Roleplay: Cloud Firestore rules for the end-to-end encrypted cloud copy.
+//
+// Publish them in the Firebase console (Firestore Database -> Rules) after
+// replacing OWNER_EMAIL with the Gmail address you sign in with in the app.
+// See firebase/README.md.
+//
+// The phone encrypts every record before it leaves it, so these rules are the
+// second line of defence: only you, signed in with Google, can read or write,
+// only under your own uid, only in the shape the app writes.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.firebase.sign_in_provider == 'google.com'
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'OWNER_EMAIL';
+    }
+
+    // c: the sealed record; u: the server's write time; n: parts of a split record.
+    function isRecord() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['c', 'u', 'n'])
+        && d.c is bytes && d.c.size() <= 1000000
+        && d.u == request.time
+        && (!('n' in d) || (d.n is int && d.n >= 2 && d.n <= 6));
+    }
+
+    function isPart() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['c', 'u'])
+        && d.c is bytes && d.c.size() <= 1000000
+        && d.u == request.time;
+    }
+
+    // The data key, wrapped by the password (pw) and by the recovery code (rc).
+    function isVault() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['v', 'kdf', 'iter', 'salt', 'pw', 'rc', 'kid', 'u'])
+        && d.v is int && d.kdf is string && d.kid is string
+        && d.iter is int && d.iter >= 100000
+        && d.salt is bytes && d.pw is bytes && d.rc is bytes
+        && d.u == request.time;
+    }
+
+    match /users/{uid}/records/{docId} {
+      allow read, delete: if isOwner(uid);
+      allow create, update: if isOwner(uid) && isRecord();
+    }
+
+    match /users/{uid}/parts/{partId} {
+      allow read, delete: if isOwner(uid);
+      allow create, update: if isOwner(uid) && isPart();
+    }
+
+    match /users/{uid}/meta/vault {
+      allow read, delete: if isOwner(uid);
+      allow create, update: if isOwner(uid) && isVault();
+    }
+
+    // Anything else is closed.
+  }
+}
