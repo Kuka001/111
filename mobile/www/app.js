@@ -4,14 +4,8 @@
   // ==========================================================================
   // NATIVE BRIDGE CONTRACT
   // Called by MainActivity / LocalBackendServer. Names and signatures are part
-  // of the contract with every shipped native engine — do not rename.
+  // of the contract with the native engine — do not rename.
   // ==========================================================================
-  window.__setAndroidInsets = function (topPx, bottomPx) {
-    document.documentElement.style.setProperty('--safe-top', topPx + 'px');
-    document.documentElement.style.setProperty('--safe-bottom', bottomPx + 'px');
-  };
-
-  const DEFAULT_LAN_URL = 'http://127.0.0.1:3001';
   const hasBridge = typeof window.AndroidServer !== 'undefined';
   const pendingAndroidRequests = new Map();
   let androidReqCounter = 1;
@@ -23,12 +17,15 @@
     return new TextDecoder('utf-8').decode(bytes);
   }
 
-  window.__onAndroidServerResponse = function (reqId, status, b64Json) {
+  // The engine passes the JSON text itself; engines before 1.7.0 sent it as
+  // base64, which never starts with "{" or "[".
+  window.__onAndroidServerResponse = function (reqId, status, payload) {
     const entry = pendingAndroidRequests.get(reqId);
     if (!entry) return;
     pendingAndroidRequests.delete(reqId);
     try {
-      const data = JSON.parse(decodeBase64Utf8(b64Json) || '{}');
+      const text = String(payload || '');
+      const data = JSON.parse((/^[[{]/.test(text) ? text : decodeBase64Utf8(text)) || '{}');
       if (status >= 200 && status < 300) {
         entry.resolve(data);
       } else {
@@ -42,35 +39,18 @@
     }
   };
 
-  function getServerBaseUrl() {
-    const loc = window.location || {};
-    if (loc.protocol !== 'file:' && loc.origin && loc.origin !== 'null') return loc.origin;
-    return DEFAULT_LAN_URL;
-  }
-
-  async function api(endpoint, options = {}) {
+  /** Calls the native backend (LocalBackendServer.routeRequest) through the bridge. */
+  function api(endpoint, options = {}) {
+    if (!hasBridge || typeof window.AndroidServer.requestAsync !== 'function') {
+      return Promise.reject(new Error('Нет связи с приложением: интерфейс открыт вне AGY Roleplay.'));
+    }
     const method = (options.method || 'GET').toUpperCase();
     const bodyStr = typeof options.body === 'string' ? options.body : (options.body ? JSON.stringify(options.body) : '');
-    if (hasBridge && typeof window.AndroidServer.requestAsync === 'function') {
-      const reqId = 'req_' + (androidReqCounter++) + '_' + Date.now();
-      return new Promise((resolve, reject) => {
-        pendingAndroidRequests.set(reqId, { resolve, reject });
-        window.AndroidServer.requestAsync(reqId, method, endpoint, bodyStr);
-      });
-    }
-    const res = await fetch(state.serverUrl + endpoint, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: bodyStr || undefined,
+    const reqId = 'req_' + (androidReqCounter++) + '_' + Date.now();
+    return new Promise((resolve, reject) => {
+      pendingAndroidRequests.set(reqId, { resolve, reject });
+      window.AndroidServer.requestAsync(reqId, method, endpoint, bodyStr);
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const err = new Error(data.error || `Ошибка сервера (${res.status})`);
-      err.data = data;
-      err.status = res.status;
-      throw err;
-    }
-    return data;
   }
 
   // ==========================================================================
@@ -94,6 +74,8 @@
       .replace(/\*([^*]+)\*/g, '$1')
       .replace(/~~([^~]+)~~/g, '$1')
       .replace(/^#{1,6}\s+/gm, '')
+      // Markers left unpaired, e.g. when the engine cut the text to a preview.
+      .replace(/\*+/g, '')
       .replace(/\n+/g, ' ')
       .trim();
   }
@@ -274,12 +256,41 @@
     return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
   }
 
+  // Photo avatars are data: URIs of ~100 KB. Each becomes one blob: URL, so the
+  // DOM (a chat repeats the avatar on every message) and the image cache hold a
+  // short URL instead of another copy of the picture.
+  const avatarObjectUrls = new Map();
+
+  function objectUrlFor(dataUrl) {
+    const cached = avatarObjectUrls.get(dataUrl);
+    if (cached) return cached;
+    let url;
+    try {
+      const comma = dataUrl.indexOf(',');
+      const meta = dataUrl.slice(5, comma);
+      const base64 = /;base64$/i.test(meta);
+      const mime = meta.split(';')[0] || 'application/octet-stream';
+      const payload = dataUrl.slice(comma + 1);
+      let bytes;
+      if (base64) {
+        const bin = atob(payload);
+        bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      } else {
+        bytes = new TextEncoder().encode(decodeURIComponent(payload));
+      }
+      url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+    } catch (e) {
+      return dataUrl;
+    }
+    avatarObjectUrls.set(dataUrl, url);
+    return url;
+  }
+
   function resolveAvatarUrl(url, name) {
     const u = String(url || '');
-    if (u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('http://') || u.startsWith('https://') || u.startsWith('file:')) {
-      return u;
-    }
-    if (u && !hasBridge) return state.serverUrl + (u.startsWith('/') ? u : '/' + u);
+    if (u.startsWith('data:')) return u.length > 2048 ? objectUrlFor(u) : u;
+    if (u.startsWith('blob:') || u.startsWith('https://')) return u;
     return initialsAvatar(name || '');
   }
 
@@ -298,7 +309,7 @@
   const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
 
   /**
-   * Reasoning levels a model really honours. Native engine 19+ reports them per
+   * Reasoning levels a model really honours. The native engine reports them per
    * model (models[].efforts); otherwise per provider: Gemini maps MAX to HIGH,
    * Claude-on-Vertex ignores effort, the Claude CLI accepts up to xhigh/max.
    */
@@ -359,8 +370,7 @@
   // STATE, PREFERENCES, FEATURES
   // ==========================================================================
   const state = {
-    serverUrl: getServerBaseUrl(),
-    engineBuild: 17,
+    engineBuild: 0,
     webVersion: '',
     settings: {
       projectId: '',
@@ -372,7 +382,6 @@
       agyEmail: '',
       claudeRuntimeReady: false,
       claudeAuthenticated: false,
-      claudeRuntimeUrlConfigured: null,
       claudeDownloadMb: 0,
       claudeInstalling: false,
       claudeInstallProgress: '',
@@ -443,18 +452,10 @@
     }
   }
 
-  // Native engine capabilities (APK build 18 added these endpoints/bridges).
-  const can = {
-    cancel: () => state.engineBuild >= 18,
-    promptPreview: () => state.engineBuild >= 18,
-    rename: () => state.engineBuild >= 18,
-    jsonPicker: () => !hasBridge || state.engineBuild >= 18,
-    perChatModel: () => state.engineBuild >= 18,
-    systemBars: () => !hasBridge || typeof window.AndroidServer.setSystemBars === 'function',
-    claudeInstall: () => state.engineBuild >= 19,
-    claudeLogin: () => state.engineBuild >= 20,
-    claudeCancelLogin: () => state.engineBuild >= 24,
-  };
+  // The native engine (APK build) this web layer is made for. The engine only
+  // installs an OTA web layer of its own build; this guards against an older
+  // engine that still accepts any build.
+  const MIN_ENGINE_BUILD = 25;
 
   const THEMES = {
     dark: { label: 'Тёмная', bg: '#0f1115', nav: '#13161c', light: false, swatch: ['#0f1115', '#1c2029', '#a4abbb'] },
@@ -670,9 +671,8 @@
 
   // ==========================================================================
   // UI KIT: layers (pages, sheets, dialogs, viewer)
-  // Every layer is a .modal-overlay appended to #layers in opening order, so
-  // the legacy native back handler ("hide the last visible .modal-overlay")
-  // keeps working on older APK engines.
+  // Every layer is a .modal-overlay appended to #layers in opening order; the
+  // system Back button closes them top-down (handleBack).
   // ==========================================================================
   const layerStack = [];
 
@@ -912,7 +912,8 @@
   // ==========================================================================
   function applySettings(s) {
     if (!s) return;
-    state.engineBuild = Number(s.engineBuild) || 17;
+    state.engineBuild = Number(s.engineBuild) || 0;
+    if (s.appVersion) state.webVersion = s.appVersion;
     Object.assign(state.settings, {
       projectId: s.projectId || '',
       selectedModel: s.selectedModel || 'gemini-4-argon',
@@ -935,6 +936,7 @@
       api('/api/chats'),
     ]);
     applySettings(settings);
+    warnOldEngine();
     state.models = models.models || [];
     state.characters = chars.characters || [];
     state.personas = personas.personas || [];
@@ -943,6 +945,18 @@
     state.loaded = true;
     state.loadError = '';
     renderAllTabs();
+  }
+
+  let engineWarned = false;
+
+  function warnOldEngine() {
+    if (engineWarned || !state.engineBuild || state.engineBuild >= MIN_ENGINE_BUILD) return;
+    engineWarned = true;
+    toast(`Этот интерфейс сделан для APK build ${MIN_ENGINE_BUILD}, а установлен build ${state.engineBuild}. Скачайте новый APK или сбросьте интерфейс к APK на странице «Обновления».`, {
+      type: 'error',
+      duration: 15000,
+      action: { label: 'Обновления', fn: () => openUpdatesPage() },
+    });
   }
 
   async function loadChats() {
@@ -982,7 +996,6 @@
       const data = await api('/api/claude/status');
       state.settings.claudeRuntimeReady = Boolean(data.runtimeReady);
       state.settings.claudeAuthenticated = Boolean(data.authenticated);
-      state.settings.claudeRuntimeUrlConfigured = data.runtimeUrlConfigured !== undefined ? Boolean(data.runtimeUrlConfigured) : null;
       state.settings.claudeDownloadMb = Number(data.downloadMb) || 0;
       state.settings.claudeInstalling = Boolean(data.installing);
       state.settings.claudeInstallProgress = data.installProgress || '';
@@ -997,7 +1010,7 @@
       state.settings.claudeSelftestRunning = Boolean(data.selftestRunning);
       state.settings.claudeSelftestProgress = data.selftestProgress || '';
       state.settings.claudeSafeMode = Boolean(data.safeMode);
-      // Engine 24+: sign-in is done when new credentials appear (not old ones).
+      // Sign-in is done when new credentials appear (not old ones).
       state.settings.claudeCredentialsStamp = data.credentialsStamp;
       state.settings.claudeLoginBaseStamp = data.loginBaseStamp;
       if (state.tab === 'settings') renderSettingsTab();
@@ -1067,8 +1080,8 @@
 
   /**
    * Back navigation: closes the top-most layer, then the chat room, then search,
-   * then returns to the Chats tab, and finally lets the app exit.
-   * Called by MainActivity.onBackPressed on native engine 18+.
+   * then returns to the Chats tab, and finally lets the app go to the background.
+   * Called by MainActivity.onBackPressed.
    */
   function handleBack() {
     const top = topLayer();
@@ -1151,7 +1164,7 @@
     const seen = new Map();
     sortChats(state.chats).forEach(c => {
       const id = Number(c.character_id) || 0;
-      if (id && !seen.has(id)) seen.set(id, { id, name: c.character_name, avatar: c.character_avatar });
+      if (id && !seen.has(id)) seen.set(id, { id, name: c.character_name, avatar: (findChar(id) || {}).avatar_url });
     });
     if (state.chatsFilter && !seen.has(state.chatsFilter)) state.chatsFilter = 0;
     filtersHost.innerHTML = seen.size > 1
@@ -1172,13 +1185,14 @@
     const meta = [custom ? c.title : '', c.persona_name || 'Игрок'].filter(Boolean).map(escapeHtml).join(' · ');
     const preview = stripMarkdownPreview(c.last_message);
     const gen = state.generations[c.id];
+    const ch = findChar(c.character_id);
     return `<div class="chat-row" data-chat-id="${c.id}">
       <div class="chat-row-actions">
         <button class="act-export" data-action="chat-export" data-id="${c.id}">${ic('share', 'ic-sm')}Экспорт</button>
         <button class="act-delete" data-action="chat-delete" data-id="${c.id}">${ic('trash', 'ic-sm')}Удалить</button>
       </div>
       <div class="chat-row-main" role="button" tabindex="0" data-action="open-chat" data-id="${c.id}">
-        <img class="avatar avatar-52" src="${escapeHtml(resolveAvatarUrl(c.character_avatar, c.character_name))}" alt="" />
+        <img class="avatar avatar-52" src="${escapeHtml(resolveAvatarUrl(ch && ch.avatar_url, c.character_name))}" alt="" />
         <div class="chat-row-body">
           <div class="chat-row-top"><span class="chat-row-name">${escapeHtml(c.character_name || 'Персонаж')}</span><span class="chat-row-time">${escapeHtml(time)}</span></div>
           <div class="chat-row-meta"><span>${meta}</span><span class="provider-tag">${ic(P.icon)}${escapeHtml(P.short)}</span></div>
@@ -1439,6 +1453,22 @@
   // ==========================================================================
   // CHAT ROOM
   // ==========================================================================
+  /**
+   * Chat details come without card images (a photo is ~100-200 KB and the
+   * character and persona lists already hold it): fill them in from there.
+   */
+  function withCardImages(data) {
+    if (data && data.character && data.character.avatar_url === undefined) {
+      const c = findChar(data.character.id);
+      data.character.avatar_url = c ? c.avatar_url : '';
+    }
+    if (data && data.persona && data.persona.avatar_url === undefined) {
+      const p = findPersona(data.persona.id);
+      data.persona.avatar_url = p ? p.avatar_url : '';
+    }
+    return data;
+  }
+
   async function openChatRoom(chatId, preloaded) {
     const id = Number(chatId);
     let data = preloaded && preloaded.chat ? preloaded : null;
@@ -1450,6 +1480,7 @@
         return;
       }
     }
+    withCardImages(data);
     if (state.room) saveDraft();
     state.room = { chatId: id, data, error: null };
     const view = $('#chatRoomView');
@@ -1602,7 +1633,7 @@
   }
 
   function isAuthError(message) {
-    return /401|авториз|войдите|войти|токен|сесси|Среда Claude Code не установлена|Нет авторизации/i.test(String(message || ''));
+    return /401|авториз|войдите|войти|Нужен вход|токен|сесси|Project ID|Среда Claude Code не установлена|Нет авторизации/i.test(String(message || ''));
   }
 
   function errorHtml(err) {
@@ -1734,18 +1765,11 @@
     btn.classList.remove('stop', 'busy');
     btn.disabled = false;
     if (gen) {
-      if (can.cancel()) {
-        btn.classList.add('stop');
-        btn.dataset.action = 'stop';
-        btn.setAttribute('aria-label', 'Остановить генерацию');
-        btn.innerHTML = gen.stopping ? '<span class="spinner"></span>' : ic('stop');
-        btn.disabled = Boolean(gen.stopping);
-      } else {
-        btn.classList.add('busy');
-        btn.dataset.action = 'noop';
-        btn.setAttribute('aria-label', 'Идёт генерация');
-        btn.innerHTML = '<span class="spinner"></span>';
-      }
+      btn.classList.add('stop');
+      btn.dataset.action = 'stop';
+      btn.setAttribute('aria-label', 'Остановить генерацию');
+      btn.innerHTML = gen.stopping ? '<span class="spinner"></span>' : ic('stop');
+      btn.disabled = Boolean(gen.stopping);
     } else {
       btn.dataset.action = 'send';
       btn.setAttribute('aria-label', 'Отправить');
@@ -1756,6 +1780,7 @@
   // --- generation lifecycle ------------------------------------------------
   let pollTimer = null;
   let tickTimer = null;
+  let pollBusy = false;
 
   function startGeneration(chatId, info) {
     state.generations[chatId] = Object.assign({ startedAt: Date.now(), last: null, stopping: false }, info);
@@ -1777,6 +1802,16 @@
       tickTimer = null;
       return;
     }
+    if (pollBusy || document.visibilityState === 'hidden') return;
+    pollBusy = true;
+    try {
+      await pollWatched(ids);
+    } finally {
+      pollBusy = false;
+    }
+  }
+
+  async function pollWatched(ids) {
     // Only the chat the user looks at (or whose diagnostics are open) needs live data.
     const watched = ids.filter(id => (state.room && state.room.chatId === id) || (diag && diag.chatId === id));
     for (const id of watched) {
@@ -1794,7 +1829,7 @@
           delete state.generations[id];
           if (state.room && state.room.chatId === id) {
             try {
-              state.room.data = await api(`/api/chats/${id}`);
+              state.room.data = withCardImages(await api(`/api/chats/${id}`));
             } catch (e) {
               // keep current data
             }
@@ -1835,7 +1870,7 @@
 
   function generationError(err) {
     const g = err && err.data && err.data.generation;
-    const cancelled = Boolean((err && err.status === 409) || (err && err.data && err.data.cancelled) || (g && g.cancelled));
+    const cancelled = Boolean((err && err.data && err.data.cancelled) || (g && g.cancelled));
     return { message: err ? err.message : 'Неизвестная ошибка', cancelled, generation: g || null };
   }
 
@@ -1868,7 +1903,12 @@
     try {
       const res = await api(`/api/chats/${chatId}/messages`, { method: 'POST', body: { content: text } });
       endGeneration(chatId, res.generation);
-      if (state.room && state.room.chatId === chatId) state.room.data.messages = res.messages || state.room.data.messages;
+      if (state.room && state.room.chatId === chatId) {
+        const list = state.room.data.messages.filter(m => m.id !== temp.id);
+        if (res.userMessage) list.push(res.userMessage);
+        if (res.assistantMessage) list.push(res.assistantMessage);
+        state.room.data.messages = Array.isArray(res.messages) ? res.messages : list;
+      }
     } catch (err) {
       const info = generationError(err);
       endGeneration(chatId, info.generation);
@@ -1930,7 +1970,7 @@
     const room = state.room;
     if (!room) return;
     const gen = state.generations[room.chatId];
-    if (!gen || !can.cancel() || gen.stopping) return;
+    if (!gen || gen.stopping) return;
     gen.stopping = true;
     updateComposer();
     try {
@@ -2112,17 +2152,14 @@
     });
     if (!ok) return;
     let removed = 0;
-    for (const m of victims.reverse()) {
-      try {
-        await api(`/api/messages/${m.id}`, { method: 'DELETE' });
-        removed++;
-      } catch (e) {
-        toast(e.message, { type: 'error' });
-        break;
-      }
+    try {
+      const res = await api(`/api/chats/${chatId}/messages?after=${msgId}`, { method: 'DELETE' });
+      removed = Number(res.removed) || 0;
+    } catch (e) {
+      toast(e.message, { type: 'error' });
     }
     try {
-      const data = await api(`/api/chats/${chatId}`);
+      const data = withCardImages(await api(`/api/chats/${chatId}`));
       if (state.room && state.room.chatId === chatId) {
         state.room.data = data;
         state.room.error = null;
@@ -2137,7 +2174,7 @@
 
   // --- chat settings sheet --------------------------------------------------
   async function patchChat(chatId, body) {
-    const res = await api(`/api/chats/${chatId}`, { method: 'PATCH', body });
+    const res = withCardImages(await api(`/api/chats/${chatId}`, { method: 'PATCH', body }));
     if (state.room && state.room.chatId === chatId) {
       state.room.data.chat = res.chat;
       state.room.data.persona = res.persona;
@@ -2167,11 +2204,10 @@
           <img class="avatar avatar-52" src="${escapeHtml(resolveAvatarUrl(ch.avatar_url, ch.name))}" alt="" />
           <div class="row-body"><div class="row-title" style="font-size:var(--fs-lg)">${escapeHtml(ch.name || 'Персонаж')}</div><div class="row-sub">${msgCount} ${pluralRu(msgCount, 'сообщение', 'сообщения', 'сообщений')}</div></div>
         </div>
-        ${can.rename() ? `<label class="field"><span class="field-label">Название чата</span><input class="input" data-role="title" value="${escapeHtml(custom)}" placeholder="${escapeHtml(ch.name || 'Без названия')}" maxlength="120" autocomplete="off" /><span class="field-hint">Помогает различать несколько историй с одним персонажем.</span></label>` : ''}
+        <label class="field"><span class="field-label">Название чата</span><input class="input" data-role="title" value="${escapeHtml(custom)}" placeholder="${escapeHtml(ch.name || 'Без названия')}" maxlength="120" autocomplete="off" /><span class="field-hint">Помогает различать несколько историй с одним персонажем.</span></label>
         <div class="section">
           <div class="section-title">Модель этого чата</div>
           <div class="list"><button class="row" data-act="model"><span class="row-icon">${ic(PROVIDERS[prov].icon)}</span><div class="row-body"><div class="row-title">${escapeHtml(modelName(chat.model_id))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effectiveEffort(chat.model_id, chat.effort, state.models) ? ' · ' + EFFORT_LABELS[effectiveEffort(chat.model_id, chat.effort, state.models)] : ''}</div></div>${ic('chevron-right', 'row-chevron')}</button></div>
-          ${can.perChatModel() ? '' : '<p class="section-hint">На текущей версии APK выбор модели здесь также меняет модель по умолчанию.</p>'}
         </div>
         <div class="section">
           <div class="section-title">Вы играете за</div>
@@ -2181,7 +2217,7 @@
           <div class="section-title">Контекст</div>
           <div class="list">
             <button class="row" data-act="memory"><span class="row-icon">${ic('book')}</span><div class="row-body"><div class="row-title">Память чата</div><div class="row-sub">Заметки для модели в &lt;chat_memory&gt;</div></div>${ic('chevron-right', 'row-chevron')}</button>
-            ${can.promptPreview() ? `<button class="row" data-act="prompt"><span class="row-icon">${ic('eye')}</span><div class="row-body"><div class="row-title">Итоговый системный промпт</div><div class="row-sub">Ровно то, что получает модель</div></div>${ic('chevron-right', 'row-chevron')}</button>` : ''}
+            <button class="row" data-act="prompt"><span class="row-icon">${ic('eye')}</span><div class="row-body"><div class="row-title">Итоговый системный промпт</div><div class="row-sub">Ровно то, что получает модель</div></div>${ic('chevron-right', 'row-chevron')}</button>
             <button class="row" data-act="diag"><span class="row-icon">${ic('activity')}</span><div class="row-body"><div class="row-title">Последняя генерация</div><div class="row-sub">Журнал, мысли, параметры запроса</div></div>${ic('chevron-right', 'row-chevron')}</button>
           </div>
         </div>
@@ -2264,13 +2300,23 @@
     });
   }
 
+  /** What a model gets besides the system prompt; nothing else is added or changed. */
+  function deliveryNote(modelId) {
+    if (isClaudeCliModel(modelId)) {
+      return 'Claude Code получает историю чата одним сообщением: каждая реплика с именем говорящего, а в конце задание — «Продолжи ролевую игру одной следующей репликой за персонажа «…». Выведи только сам ответ персонажа без служебных пометок, имени в начале и мета-комментариев.»';
+    }
+    return 'История чата передаётся целиком и без изменений. Если чат начинается с приветствия персонажа, перед ним стоит служебная реплика «[Начало ролевой игры]»: API требует, чтобы первой шла реплика игрока.';
+  }
+
   async function openPromptPreview(chatId) {
     const layer = openSheet({ title: 'Системный промпт чата', full: true, body: '<div class="empty"><span class="spinner"></span></div>' });
+    const chat = state.room && state.room.chatId === chatId ? state.room.data.chat : null;
+    const note = `<details class="disclosure" style="margin:0 0 12px"><summary>Что ещё получает модель ${ic('chevron-down', 'ic-sm')}</summary><p class="section-hint" style="margin:6px 0 0">${escapeHtml(deliveryNote(chat && chat.model_id))}</p></details>`;
     try {
       const res = await api(`/api/chats/${chatId}/system-prompt`);
       const text = res.systemPrompt || '';
       layer.setBody(text
-        ? `<p class="section-hint" style="margin:0 0 10px">${formatCount(text.length)} симв. Собирается заново перед каждым ответом.</p><div class="prose mono" style="font-size:13px">${escapeHtml(text)}</div>`
+        ? `<p class="section-hint" style="margin:0 0 10px">${formatCount(text.length)} симв. Собирается заново перед каждым ответом.</p>${note}<div class="prose mono" style="font-size:13px">${escapeHtml(text)}</div>`
         : emptyHtml('scroll', 'Промпт пуст', 'Заполните «Системный промпт» в настройках и описания персонажа и персоны.'));
       if (text) {
         const footer = htmlToElement(`<div class="sheet-footer"><button class="btn btn-secondary btn-block" data-act="copy">${ic('copy')}Скопировать</button></div>`);
@@ -2361,16 +2407,6 @@
   // ==========================================================================
   // EXPORT
   // ==========================================================================
-  async function fetchFileText(relPath) {
-    if (!relPath) return '';
-    try {
-      const res = await api(`/api/files/content?path=${encodeURIComponent(relPath)}`);
-      return typeof res.content === 'string' ? res.content : '';
-    } catch (e) {
-      return '';
-    }
-  }
-
   function sanitizeFilenamePart(str) {
     return String(str || 'chat').trim().replace(/[^\wЀ-ӿ-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 32) || 'chat';
   }
@@ -2396,9 +2432,7 @@
         persona: { id: persona && persona.id, name: persona && persona.name, file_path: persona && persona.file_path },
       };
       if (o.prompts) {
-        payload.context = src.systemPrompt !== null
-          ? { systemPrompt: src.systemPrompt }
-          : { systemPrompt: src.rules, characterCard: src.characterMd, personaCard: src.personaMd, chatMemory: src.memoryMd };
+        payload.context = { systemPrompt: src.systemPrompt };
       }
       payload.messages = messages.map((m, i) => {
         const v = variants(m);
@@ -2432,14 +2466,7 @@
         if (!String(text || '').trim()) return;
         lines.push('<details>', `<summary><b>${title}</b></summary>`, '', '```markdown', String(text).trim(), '```', '</details>', '');
       };
-      if (src.systemPrompt !== null) {
-        block('Итоговый системный промпт', src.systemPrompt);
-      } else {
-        block('Системный промпт', src.rules);
-        block(`Карточка персонажа: ${charName}`, src.characterMd);
-        block(`Персона: ${personaName}`, src.personaMd);
-        block('Память чата', src.memoryMd);
-      }
+      block('Итоговый системный промпт', src.systemPrompt);
     }
     lines.push('---', '', '## История', '');
     messages.forEach((m, i) => {
@@ -2518,6 +2545,14 @@
       copy: () => result && copyText(result.text),
       share: () => {
         if (!result) return;
+        // Android hands shared text over in one Binder transaction (about 1 MB,
+        // two bytes per character); a long chat does not fit.
+        if (result.text.length > 200000) {
+          toast('Чат слишком большой, чтобы поделиться текстом. Сохраните его файлом.', {
+            action: { label: 'Сохранить', fn: () => saveFile(result.filename, result.text, result.mime) },
+          });
+          return;
+        }
         if (hasBridge && typeof window.AndroidServer.shareExportText === 'function') {
           window.AndroidServer.shareExportText(result.filename, result.text);
         } else if (navigator.share) {
@@ -2531,25 +2566,11 @@
 
     try {
       const data = state.room && state.room.chatId === id ? state.room.data : await api(`/api/chats/${id}`);
-      let systemPrompt = null;
-      let rules = '';
-      let characterMd = '';
-      let personaMd = '';
-      let memoryMd = '';
-      if (can.promptPreview()) {
-        try {
-          systemPrompt = (await api(`/api/chats/${id}/system-prompt`)).systemPrompt || '';
-        } catch (e) {
-          systemPrompt = null;
-        }
-      }
-      if (systemPrompt === null) {
-        [rules, characterMd, personaMd, memoryMd] = await Promise.all([
-          fetchFileText('GEMINI.md'),
-          fetchFileText(data.character && data.character.file_path),
-          fetchFileText(data.persona && data.persona.file_path),
-          fetchFileText(data.chat.memory_file_path),
-        ]);
+      let systemPrompt = '';
+      try {
+        systemPrompt = (await api(`/api/chats/${id}/system-prompt`)).systemPrompt || '';
+      } catch (e) {
+        systemPrompt = '';
       }
       let generation = (state.lastGeneration && state.lastGeneration[id]) || null;
       if (!generation) {
@@ -2560,7 +2581,7 @@
           generation = null;
         }
       }
-      src = { data, systemPrompt, rules, characterMd, personaMd, memoryMd, generation };
+      src = { data, systemPrompt, generation };
       if (!layer.closed) rerender();
     } catch (e) {
       layer.setBody(emptyHtml('alert', 'Не удалось подготовить экспорт', escapeHtml(e.message)));
@@ -2808,9 +2829,7 @@
       fileInput.value = '';
       if (!file) return;
       try {
-        const dataUrl = await downscaleImage(file, 640);
-        const res = await api('/api/upload-avatar', { method: 'POST', body: { base64Data: dataUrl, filename: file.name } });
-        cur.avatarUrl = res.avatarUrl || dataUrl;
+        cur.avatarUrl = await downscaleImage(file, 640);
         updateAvatar();
         updateTitle();
       } catch (e) {
@@ -2873,7 +2892,7 @@
           loadChats();
           if (state.room) {
             try {
-              state.room.data = await api(`/api/chats/${state.room.chatId}`);
+              state.room.data = withCardImages(await api(`/api/chats/${state.room.chatId}`));
               renderRoomHeader();
               syncFeed({ scroll: 'keep' });
             } catch (e) {
@@ -3002,7 +3021,7 @@
     const vertex = providerStatus('gemini');
     const cli = providerStatus('cli');
     const upd = state.updateInfo;
-    const updAvailable = upd && (upd.updateAvailable || upd.nativeUpdateRequired);
+    const updAvailable = updateAction(upd) !== 'none';
     const pill = (st) => `<span class="pill ${st.ok ? 'ok' : 'warn'}">${st.ok ? 'Готово' : 'Настроить'}</span>`;
     pane.innerHTML = `<div class="tab-inner">
       <div class="appbar"><h1 class="appbar-title">Настройки</h1></div>
@@ -3050,18 +3069,9 @@
       modelId: state.settings.selectedModel,
       effort: state.settings.selectedEffort,
       onPick: async (r) => {
-        if (!can.perChatModel()) {
-          const ok = await confirmDialog({
-            title: 'Сменить модель везде?',
-            message: 'На текущей версии APK модель по умолчанию также применяется ко всем существующим чатам. Обновите APK, чтобы чаты сохраняли свою модель.',
-            confirmText: 'Сменить',
-          });
-          if (!ok) return;
-        }
         try {
           applySettings(await api('/api/settings', { method: 'POST', body: { selectedModel: r.modelId, selectedEffort: r.effort } }));
           renderSettingsTab();
-          if (!can.perChatModel()) loadChats();
           toast('Модель по умолчанию: ' + modelSummary(r.modelId, r.effort), { type: 'success' });
         } catch (e) {
           toast(e.message, { type: 'error' });
@@ -3142,11 +3152,11 @@
   }
 
   // --- Google Vertex --------------------------------------------------------
+  // Google's own safety settings for Gemini. The request text is always sent as is.
   const SAFETY_OPTIONS = [
-    { value: 'OFF', title: 'Без фильтров + авто-обход', sub: 'Фильтры отключены. Если ответ заблокирован, до 4 повторов на той же модели.' },
-    { value: 'NSFW_BYPASS', title: 'Обходной режим сразу', sub: 'Как предыдущий, но уже первая попытка идёт в обходном режиме.' },
-    { value: 'BLOCK_NONE', title: 'Разрешить все категории + авто-обход', sub: 'Порог BLOCK_NONE для всех категорий и повторы при блокировке.' },
-    { value: 'BLOCK_ONLY_HIGH', title: 'Стандартный фильтр Google', sub: 'Блокируется только высокий риск. Одна попытка, без обхода.' },
+    { value: 'OFF', title: 'Фильтры выключены', sub: 'Настраиваемые фильтры Google отключены (OFF).' },
+    { value: 'BLOCK_NONE', title: 'Не блокировать', sub: 'Google оценивает ответы, но не блокирует их (BLOCK_NONE).' },
+    { value: 'BLOCK_ONLY_HIGH', title: 'Стандартный фильтр', sub: 'Блокируется только высокий риск (BLOCK_ONLY_HIGH).' },
   ];
 
   function openVertexPage() {
@@ -3267,11 +3277,13 @@
     let installing = false;
     let progressTimer = null;
     let loginTimer = null;
-    // Sign-in flow: idle -> waiting (CLI running; link shown when ready) -> done / error
-    const login = { phase: 'idle', legacyUrl: '', error: '', submitting: false, codeDraft: '' };
+    // Sign-in flow: idle -> starting -> waiting (CLI running; link shown when ready) -> idle
+    const login = { phase: 'idle', error: '', submitting: false, codeDraft: '' };
     let selftestTimer = null;
     // The check also runs on when the page was closed and reopened meanwhile.
     const selftestRunning = () => Boolean((state.claudeSelftest && state.claudeSelftest.running) || state.settings.claudeSelftestRunning);
+    // Signed in by THIS attempt: Claude Code has written new credentials (old ones do not count).
+    const signedInNow = (s) => s.claudeAuthenticated && s.claudeCredentialsStamp !== s.claudeLoginBaseStamp;
 
     const outputBlock = (text) => `<div class="console" style="margin-top:10px;max-height:28vh">${escapeHtml(text)}</div>`;
 
@@ -3284,23 +3296,18 @@
       if (!s.claudeRuntimeReady) {
         return '<div class="step-text">Станет доступно после установки среды.</div>';
       }
-      if (!can.claudeLogin()) {
-        return '<div class="step-text">Для входа обновите приложение (APK) до версии 1.6.2 или новее.</div>';
-      }
       if (login.phase === 'starting') {
         return `<div class="install-progress"><span class="spinner"></span><span>Запускаю Claude Code…</span></div>`;
       }
       if (login.phase === 'waiting') {
-        const url = s.claudeLoginUrl || login.legacyUrl;
+        const url = s.claudeLoginUrl;
         const autoUrl = s.claudeLoginAutoUrl;
         const live = [s.claudeLoginOutput, s.claudeLoginDebug ? '--- debug ---\n' + s.claudeLoginDebug : ''].filter(Boolean).join('\n');
         const cancel = '<button class="btn btn-ghost btn-sm" style="margin-top:10px;padding:0" data-act="cancel-login">Отменить вход</button>';
         if (!url && !autoUrl) {
           const slow = s.claudeLoginElapsed >= 30;
           const limit = s.claudeLoginTimeout;
-          const hint = limit
-            ? `Дольше обычного. Если ссылка не появится за ${limit} с, вход остановится и покажет, на чём завис Claude Code.`
-            : 'Дольше обычного. Ниже — что сейчас делает Claude Code; если так и не появится ссылка, скопируйте этот текст и пришлите.';
+          const hint = `Дольше обычного. Если ссылка не появится за ${limit || 75} с, вход остановится и покажет, на чём завис Claude Code.`;
           return `<div class="install-progress"><span class="spinner"></span><span>Claude Code готовит ссылку для входа… ${s.claudeLoginElapsed}${limit ? ' из ' + limit : ''} с</span></div>
             ${slow ? `<p class="section-hint" style="margin:8px 0 0">${hint}</p>` : ''}
             ${live ? `<details class="disclosure"${slow ? ' open' : ''}><summary>Что происходит ${ic('chevron-down', 'ic-sm')}</summary>${outputBlock(live)}<button class="btn btn-ghost btn-sm" style="padding:0;margin-top:6px" data-act="copy-live">${ic('copy', 'ic-sm')}Скопировать</button></details>` : ''}
@@ -3329,7 +3336,7 @@
         ${errorCard}
         <div class="btn-row">
           <button class="btn btn-primary btn-sm" data-act="login"${selftestRunning() ? ' disabled' : ''}>${ic('login')}${login.error ? 'Попробовать снова' : 'Войти'}</button>
-          ${login.error && can.claudeLogin() ? `<button class="btn btn-secondary btn-sm" data-act="selftest"${selftestRunning() ? ' disabled' : ''}>${ic('activity', 'ic-sm')}Проверить запуск</button>` : ''}
+          ${login.error ? `<button class="btn btn-secondary btn-sm" data-act="selftest"${selftestRunning() ? ' disabled' : ''}>${ic('activity', 'ic-sm')}Проверить запуск</button>` : ''}
         </div>`;
     };
 
@@ -3339,26 +3346,21 @@
       if (selftestRunning()) {
         const stage = s.claudeSelftestProgress ? `: ${s.claudeSelftestProgress}` : '';
         return `<div class="install-progress" style="margin-top:10px"><span class="spinner"></span><span>Проверяю${escapeHtml(stage)}…</span></div>
-          <p class="section-hint" style="margin:8px 0 0">Если Claude Code зависает, проверка перебирает режимы запуска — это до 5 минут. Не закрывайте приложение.</p>`;
+          <p class="section-hint" style="margin:8px 0 0">Если Claude Code зависает, проверка пробует безопасный режим Bun и чистый профиль — это может занять несколько минут. Не закрывайте приложение.</p>`;
       }
-      if (!st) return '';
-      if (!Array.isArray(st.stages)) {
-        return `<div style="margin-top:10px"><span class="pill ${st.ok ? 'ok' : 'err'}">${st.ok ? 'Работает' : 'Не запускается'}</span>${outputBlock(st.output || '(пустой вывод)')}</div>`;
-      }
-      const engine = { direct: 'напрямую, без proot', static: 'proot (static)', android: 'proot (Termux)' }[st.engine] || st.engine;
+      if (!st || !Array.isArray(st.stages)) return '';
       return `<div class="selftest">
         <div class="selftest-summary"><span class="pill ${st.ok ? 'ok' : 'err'}">${st.ok ? 'Claude Code запускается' : 'Claude Code не запускается'}</span>
-          ${st.engine ? `<span class="faint">движок: ${engine}${st.safeMode ? ' · безопасный режим Bun' : ''}</span>` : ''}</div>
+          ${st.safeMode ? '<span class="faint">безопасный режим Bun</span>' : ''}</div>
         ${st.summary ? `<div class="step-text" style="margin-top:8px">${escapeHtml(st.summary)}</div>` : ''}
         ${st.ok ? '' : `<button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="copy-report">${ic('copy', 'ic-sm')}Скопировать отчёт</button>`}
-        <details class="disclosure"${st.ok ? '' : ' open'}><summary>Этапы проверки ${ic('chevron-down', 'ic-sm')}</summary>
+        ${st.stages.length ? `<details class="disclosure"${st.ok ? '' : ' open'}><summary>Этапы проверки ${ic('chevron-down', 'ic-sm')}</summary>
           ${st.stages.map(stage => `<div class="selftest-stage">
             <div class="selftest-head">${ic(stage.ok ? 'check-circle' : 'alert', 'ic-sm')}<span>${escapeHtml(stage.name)}</span><span class="faint">${escapeHtml(stage.exit || '')} · ${escapeHtml(stage.seconds || '0')} с</span></div>
             ${stage.output ? outputBlock(stage.output) : (stage.ok ? '' : outputBlock('(пустой вывод)'))}
-            ${stage.verbose ? `<details class="disclosure"><summary>Подробный журнал ${ic('chevron-down', 'ic-sm')}</summary>${outputBlock(stage.verbose)}</details>` : ''}
             ${stage.snapshot ? `<details class="disclosure"><summary>Процессы в момент зависания ${ic('chevron-down', 'ic-sm')}</summary>${outputBlock(stage.snapshot)}</details>` : ''}
           </div>`).join('')}
-        </details>
+        </details>` : ''}
         ${st.ok ? `<button class="btn btn-ghost btn-sm" style="padding:0;margin-top:8px" data-act="copy-report">${ic('copy', 'ic-sm')}Скопировать отчёт</button>` : ''}
       </div>`;
     };
@@ -3366,11 +3368,9 @@
     const render = () => {
       const s = state.settings;
       const sizeMb = s.claudeDownloadMb || 128;
-      const canInstall = can.claudeInstall();
       const busy = installing || s.claudeInstalling;
       let runtimeText;
       if (s.claudeRuntimeReady) runtimeText = 'Установлена. Новые чаты с моделями Claude Code работают в ней автоматически.';
-      else if (!canInstall) runtimeText = 'Для установки среды обновите приложение (APK) до версии 1.6.1 или новее.';
       else runtimeText = `Разовая загрузка около ${sizeMb} МБ (после распаковки ~300 МБ), лучше по Wi-Fi. Компоненты берутся из официальных источников — Alpine Linux и npm — и проверяются по SHA-256.`;
       if (s.claudeRuntimeReady && s.claudeSafeMode) runtimeText += ' Включён безопасный режим Bun — его подобрала проверка запуска.';
       return `
@@ -3382,8 +3382,8 @@
               <div class="step-text">${escapeHtml(runtimeText)}</div>
               ${busy ? `<div class="install-progress"><span class="spinner"></span><span>${escapeHtml(s.claudeInstallProgress || 'Подготовка…')}</span></div><p class="section-hint" style="margin:8px 0 0">Не закрывайте приложение до окончания установки.</p>`
                 : `<div class="btn-row">
-                    ${s.claudeRuntimeReady && can.claudeLogin() ? `<button class="btn btn-secondary btn-sm" data-act="selftest"${selftestRunning() ? ' disabled' : ''}>${ic('activity', 'ic-sm')}Проверить запуск</button>` : ''}
-                    <button class="btn ${s.claudeRuntimeReady ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="install"${canInstall && !selftestRunning() ? '' : ' disabled'}>${s.claudeRuntimeReady ? `${ic('reroll')}Переустановить` : `${ic('download')}Скачать среду`}</button>
+                    ${s.claudeRuntimeReady ? `<button class="btn btn-secondary btn-sm" data-act="selftest"${selftestRunning() ? ' disabled' : ''}>${ic('activity', 'ic-sm')}Проверить запуск</button>` : ''}
+                    <button class="btn ${s.claudeRuntimeReady ? 'btn-secondary' : 'btn-primary'} btn-sm" data-act="install"${selftestRunning() ? ' disabled' : ''}>${s.claudeRuntimeReady ? `${ic('reroll')}Переустановить` : `${ic('download')}Скачать среду`}</button>
                   </div>${selftestView()}`}
             </div>
           </div>
@@ -3442,10 +3442,7 @@
       loginTimer = setInterval(async () => {
         await refreshClaudeStatus();
         const s = state.settings;
-        const signedIn = s.claudeCredentialsStamp === undefined
-          ? s.claudeAuthenticated
-          : s.claudeAuthenticated && s.claudeCredentialsStamp !== s.claudeLoginBaseStamp;
-        if (signedIn) finishLogin(true);
+        if (signedInNow(s)) finishLogin(true);
         else if (!s.claudeLoginPending && s.claudeLoginError) finishLogin(false, s.claudeLoginError);
         else if (Date.now() - startedAt > 15 * 60 * 1000) finishLogin(false, 'Время ожидания входа истекло. Попробуйте снова.');
         else layer.refresh();
@@ -3465,7 +3462,7 @@
       if (state.settings.claudeInstalling) watchProgress();
       if (selftestRunning()) watchSelftest();
       const s = state.settings;
-      if (s.claudeLoginPending && (!s.claudeAuthenticated || (s.claudeCredentialsStamp !== undefined && s.claudeCredentialsStamp === s.claudeLoginBaseStamp))) {
+      if (s.claudeLoginPending && !signedInNow(s)) {
         login.phase = 'waiting';
         layer.refresh();
         watchLogin();
@@ -3513,13 +3510,13 @@
         try {
           result = await api('/api/claude/selftest', { method: 'POST' });
         } catch (e) {
-          result = { ok: false, output: e.message };
+          result = { ok: false, summary: e.message, stages: [], report: e.message };
         }
         clearInterval(selftestTimer);
         state.claudeSelftest = result;
         await refreshClaudeStatus();
         layer.refresh();
-        if (result.ok && Array.isArray(result.stages)) toast(result.summary || 'Claude Code запускается', { type: 'success' });
+        if (result.ok) toast(result.summary || 'Claude Code запускается', { type: 'success' });
       },
       login: async () => {
         login.phase = 'starting';
@@ -3527,14 +3524,8 @@
         login.codeDraft = '';
         layer.refresh();
         try {
-          const res = await api('/api/claude/auth/start', { method: 'POST' });
-          if (!res.pending && !res.authUrl) {
-            // Engine 19 and older: setup-token never produced a link.
-            finishLogin(false, res.note || 'Claude Code не выдал ссылку для входа.');
-            return;
-          }
-          // Engine 20-21 answered with the link directly; 22+ streams it via status.
-          login.legacyUrl = res.pending ? '' : (res.manualUrl || res.authUrl || '');
+          await api('/api/claude/auth/start', { method: 'POST' });
+          // Links, live output and the result arrive through /api/claude/status.
           state.settings.claudeLoginUrl = '';
           state.settings.claudeLoginAutoUrl = '';
           state.settings.claudeLoginElapsed = 0;
@@ -3549,17 +3540,17 @@
       },
       'copy-report': () => {
         const st = state.claudeSelftest;
-        if (st) copyText(st.report || st.output || '');
+        if (st) copyText(st.report || st.summary || '');
       },
       'copy-error': () => {
         if (login.error) copyText(login.error);
       },
       'open-link': () => {
-        const link = state.settings.claudeLoginUrl || login.legacyUrl || state.settings.claudeLoginAutoUrl;
+        const link = state.settings.claudeLoginUrl || state.settings.claudeLoginAutoUrl;
         if (link) openExternal(link);
       },
       'copy-link': () => {
-        const link = state.settings.claudeLoginUrl || login.legacyUrl || state.settings.claudeLoginAutoUrl;
+        const link = state.settings.claudeLoginUrl || state.settings.claudeLoginAutoUrl;
         if (link) copyText(link);
       },
       'open-auto': () => {
@@ -3593,15 +3584,16 @@
       'cancel-login': async () => {
         clearInterval(loginTimer);
         try {
-          // Older engines can only stop a sign-in by signing out.
-          const res = await api(can.claudeCancelLogin() ? '/api/claude/auth/cancel' : '/api/claude/auth/logout', { method: 'POST' });
+          // Stops the attempt only; an existing sign-in stays.
+          const res = await api('/api/claude/auth/cancel', { method: 'POST' });
           state.settings.claudeAuthenticated = Boolean(res.authenticated);
         } catch (e) {
-          state.settings.claudeAuthenticated = false;
+          // the status refresh below shows the real state
         }
         login.phase = 'idle';
         login.error = '';
         login.codeDraft = '';
+        await refreshClaudeStatus();
         layer.refresh();
       },
       logout: async () => {
@@ -3628,7 +3620,6 @@
           return `<button class="theme-option${prefs.theme === k ? ' active' : ''}" data-act="theme" data-theme="${k}">
             <span class="theme-swatch" style="background:${t.swatch[0]}"><i style="background:${t.swatch[1]};width:80%"></i><i style="background:hsl(${prefs.accent} 70% 60%);width:50%"></i><i style="background:${t.swatch[1]};width:65%"></i></span>${t.label}</button>`;
         }).join('')}</div>
-        ${can.systemBars() ? '' : '<p class="section-hint">Цвет строки состояния подстроится под тему после обновления APK.</p>'}
       </div>
       <div class="section"><div class="section-title">Акцентный цвет</div>
         <div class="accent-options">${ACCENTS.map(a => `<button class="accent-option${prefs.accent === a.hue ? ' active' : ''}" style="background:hsl(${a.hue} 68% 58%)" data-act="accent" data-hue="${a.hue}" aria-label="${a.label}"></button>`).join('')}</div>
@@ -3711,10 +3702,8 @@
         <div class="card card-pad section">
           <div class="status-card-title">Восстановить</div>
           <p class="step-text">Текущие персонажи, чаты и сообщения будут <b>полностью заменены</b> данными из копии.</p>
-          ${can.jsonPicker()
-            ? `<button class="btn btn-secondary btn-block" data-act="pick">${ic('upload')}Выбрать файл .json</button><input type="file" accept=".json,application/json" class="hidden" data-role="file" />
-               <details class="disclosure" style="margin-top:6px"><summary>Вставить JSON вручную ${ic('chevron-down', 'ic-sm')}</summary><textarea class="textarea mono" data-role="paste" placeholder='{"backupFormat":1, …}'></textarea><button class="btn btn-secondary btn-block" style="margin-top:10px" data-act="paste">Восстановить из текста</button></details>`
-            : `<textarea class="textarea mono" data-role="paste" placeholder='{"backupFormat":1, …}'></textarea><button class="btn btn-secondary btn-block" style="margin-top:10px" data-act="paste">Восстановить из текста</button><p class="section-hint">Выбор файла станет доступен после обновления APK.</p>`}
+          <button class="btn btn-secondary btn-block" data-act="pick">${ic('upload')}Выбрать файл .json</button><input type="file" accept=".json,application/json" class="hidden" data-role="file" />
+          <details class="disclosure" style="margin-top:6px"><summary>Вставить JSON вручную ${ic('chevron-down', 'ic-sm')}</summary><textarea class="textarea mono" data-role="paste" placeholder='{"backupFormat":1, …}'></textarea><button class="btn btn-secondary btn-block" style="margin-top:10px" data-act="paste">Восстановить из текста</button></details>
         </div>
         <p class="section-hint">Перед переустановкой приложения обязательно сделайте копию: при удалении APK все чаты стираются.</p>`,
     });
@@ -3785,28 +3774,40 @@
   }
 
   // --- updates --------------------------------------------------------------
+  /**
+   * What the update check offers: a newer build needs a new APK ('apk'); a
+   * newer version for the installed build is a signed web update ('ota').
+   */
+  function updateAction(d) {
+    if (!d || !d.remoteReachable) return 'none';
+    if (d.nativeUpdateRequired) return 'apk';
+    if (d.otaAvailable) return 'ota';
+    return 'none';
+  }
+
   async function checkForUpdates(manual) {
     try {
       const data = await api('/api/updates/check');
       state.updateInfo = data;
-      const nativeRequired = Boolean(data.nativeUpdateRequired || (data.remoteReachable && Number(data.latestBuild || 0) > Number(data.bundledBuild || 0)));
-      const available = Boolean(data.updateAvailable || nativeRequired);
+      const action = updateAction(data);
       const badge = $('#navSettingsBadge');
-      if (badge) badge.classList.toggle('hidden', !available);
+      if (badge) badge.classList.toggle('hidden', action === 'none');
       if (state.tab === 'settings') renderSettingsTab();
       refreshLayers();
-      if (available && !manual && !state.updateToastShown) {
+      if (action !== 'none' && !manual && !state.updateToastShown) {
         state.updateToastShown = true;
-        toast(nativeRequired && data.otaActive && Number(data.currentBuild || 0) >= Number(data.latestBuild || 0)
-          ? `Нужен новый APK (build ${data.latestBuild})`
-          : `Доступна версия ${data.latestVersion}`, {
+        toast(action === 'apk' ? `Вышла версия ${data.latestVersion} — нужен новый APK` : `Доступна версия ${data.latestVersion}`, {
           action: { label: 'Подробнее', fn: () => openUpdatesPage() },
           duration: 8000,
         });
       }
       if (manual) {
-        toast(available ? `Доступна версия ${data.latestVersion}` : (data.remoteReachable ? 'Установлена последняя версия' : 'Репозиторий недоступен: ' + (data.remoteError || '')),
-          { type: available ? 'info' : (data.remoteReachable ? 'success' : 'error') });
+        if (!data.remoteReachable) {
+          toast('Репозиторий недоступен: ' + (data.remoteError || ''), { type: 'error' });
+        } else {
+          toast(action === 'none' ? 'Установлена последняя версия' : `Доступна версия ${data.latestVersion}`,
+            { type: action === 'none' ? 'success' : 'info' });
+        }
       }
     } catch (e) {
       if (manual) toast('Не удалось проверить обновления: ' + e.message, { type: 'error' });
@@ -3824,7 +3825,7 @@
       toast((res.message || 'Обновление установлено') + '. Перезапуск…', { type: 'success' });
       setTimeout(reloadApp, 700);
     } catch (e) {
-      toast('Ошибка обновления: ' + e.message, { type: 'error' });
+      toast('Ошибка обновления: ' + e.message, { type: 'error', duration: 8000 });
     }
   }
 
@@ -3833,24 +3834,25 @@
     const render = () => {
       const d = state.updateInfo;
       if (!d) return '<div class="empty"><span class="spinner"></span></div>';
-      const nativeRequired = Boolean(d.nativeUpdateRequired || (d.remoteReachable && Number(d.latestBuild || 0) > Number(d.bundledBuild || 0)));
-      const apkOnly = nativeRequired && d.otaActive && Number(d.currentBuild || 0) >= Number(d.latestBuild || 0);
+      const action = updateAction(d);
       let status;
       if (!d.remoteReachable) status = `<span class="pill warn">${ic('alert', 'ic-xs')}Репозиторий недоступен</span>`;
-      else if (apkOnly) status = `<span class="pill warn">Нужен новый APK</span>`;
-      else if (d.updateAvailable) status = `<span class="pill accent">Доступно обновление</span>`;
+      else if (action === 'apk') status = '<span class="pill warn">Нужен новый APK</span>';
+      else if (action === 'ota') status = '<span class="pill accent">Доступно обновление</span>';
       else status = `<span class="pill ok">${ic('check', 'ic-xs')}Актуальная версия</span>`;
       const releases = d.releases || [];
       const commits = d.commits || [];
+      const primary = action === 'apk'
+        ? `<button class="btn btn-primary btn-block" data-act="apk">${ic('package')}Скачать APK v${escapeHtml(d.latestVersion)}</button>
+           <p class="section-hint">Загрузка откроется в браузере. Установите файл поверх приложения — чаты и настройки сохранятся.</p>`
+        : `<button class="btn btn-primary btn-block" data-act="apply"${action === 'ota' ? '' : ' disabled'}>${ic('update')}${action === 'ota' ? `Обновить до v${escapeHtml(d.latestVersion)}` : 'Обновлений нет'}</button>`;
       return `
         <div class="version-hero">
-          <div class="version-box"><div class="version-label">Установлена</div><div class="version-value">v${escapeHtml(d.currentVersion || state.webVersion || '—')}</div><div class="version-sub">build ${escapeHtml(d.currentBuild || '—')} · ${d.otaActive ? 'OTA' : 'APK'} · движок ${escapeHtml(d.bundledBuild || state.engineBuild)}</div></div>
+          <div class="version-box"><div class="version-label">Установлена</div><div class="version-value">v${escapeHtml(d.currentVersion || state.webVersion || '—')}</div><div class="version-sub">build ${escapeHtml(d.currentBuild || '—')} · ${d.otaActive ? 'OTA' : 'APK'}</div></div>
           <div class="version-box highlight"><div class="version-label">В репозитории</div><div class="version-value">v${escapeHtml(d.latestVersion || '—')}</div><div class="version-sub">build ${escapeHtml(d.latestBuild || '—')}${d.latestCommit ? ' · ' + escapeHtml(d.latestCommit) : ''}</div></div>
         </div>
         <div style="margin:12px 0">${status}${d.remoteError && !d.remoteReachable ? `<p class="section-hint">${escapeHtml(d.remoteError)}</p>` : ''}</div>
-        ${apkOnly
-          ? `<button class="btn btn-primary btn-block" data-act="apk">${ic('package')}Скачать новый APK</button>`
-          : `<button class="btn btn-primary btn-block" data-act="apply"${d.updateAvailable ? '' : ' disabled'}>${ic('update')}${d.updateAvailable ? `Обновить до v${escapeHtml(d.latestVersion)}` : 'Обновлений нет'}</button>`}
+        ${primary}
         <div class="btn-row" style="margin-top:10px">
           <button class="btn btn-secondary" data-act="check"${checking ? ' disabled' : ''}>${checking ? '<span class="spinner"></span>' : ic('reroll')}Проверить</button>
           ${d.otaActive ? `<button class="btn btn-secondary" data-act="reset">${ic('undo')}Сброс к APK</button>` : `<button class="btn btn-secondary" data-act="apk">${ic('package')}APK</button>`}
@@ -3859,11 +3861,10 @@
             <div class="release-head"><span class="release-ver">v${escapeHtml(r.version)}</span>${r.version === d.currentVersion ? '<span class="pill ok">Установлена</span>' : ''}<span class="release-date">${escapeHtml(r.date || '')}</span></div>
             ${r.title ? `<div class="release-title">${escapeHtml(r.title)}</div>` : ''}
             ${(r.changelog || []).length ? `<ul>${r.changelog.map(l => `<li>${escapeHtml(l)}</li>`).join('')}</ul>` : ''}
-            ${r.version !== d.currentVersion ? `<button class="btn btn-ghost btn-sm" style="padding:0" data-act="release" data-ref="${escapeHtml(r.ref || d.gitBranch || 'main')}">Установить v${escapeHtml(r.version)}</button>` : ''}
           </div>`).join('')}</div></div>` : ''}
         <details class="disclosure section"><summary>${ic('code', 'ic-sm')}Для разработчиков ${ic('chevron-down', 'ic-sm')}</summary>
           <label class="field"><span class="field-label">Ветка</span><input class="input mono" data-role="branch" value="${escapeHtml(d.gitBranch || 'main')}" autocomplete="off" />
-            <span class="field-hint">Репозиторий ${escapeHtml(d.gitRepo || '')} зафиксирован в подписанном APK.</span></label>
+            <span class="field-hint">Репозиторий ${escapeHtml(d.gitRepo || '')} зафиксирован в подписанном APK. Установить можно только интерфейс для этого же build APK.</span></label>
           <button class="btn btn-secondary btn-sm" style="margin-top:10px" data-act="branch">Сохранить ветку</button>
           <button class="btn btn-ghost btn-sm" style="margin-top:10px" data-act="github">${ic('external', 'ic-sm')}GitHub</button>
           ${commits.length ? `<div class="list section">${commits.slice(0, 15).map(c => `<div class="row"><div class="row-body"><div class="row-title">${escapeHtml(c.message)}</div><div class="row-sub"><span class="mono">${escapeHtml(c.shortSha)}</span> · ${escapeHtml(c.author || '')} · ${escapeHtml(String(c.date || '').replace('T', ' ').slice(0, 16))}</div></div>
@@ -3886,10 +3887,6 @@
       apply: async () => {
         const ok = await confirmDialog({ title: 'Установить обновление?', message: 'Приложение перезапустится. Чаты и настройки сохранятся.', confirmText: 'Обновить' });
         if (ok) applyGitUpdate('', '');
-      },
-      release: async (el) => {
-        const ok = await confirmDialog({ title: 'Переключить версию?', message: 'Будут загружены файлы интерфейса этой версии. Приложение перезапустится.', confirmText: 'Установить' });
-        if (ok) applyGitUpdate(el.dataset.ref, '');
       },
       commit: async (el) => {
         const ok = await confirmDialog({ title: 'Установить коммит?', message: 'Только для отладки. Приложение перезапустится.', confirmText: 'Установить' });
@@ -4385,15 +4382,6 @@
       });
     }, { passive: true });
 
-    // Keep the layer stack honest when the legacy native back handler hides a layer.
-    const layersHost = $('#layers');
-    new MutationObserver((mutations) => {
-      mutations.forEach(m => {
-        const el = m.target;
-        if (el && el._layer && el.classList.contains('hidden') && !el._layer.closed) closeLayer(el._layer, { immediate: true });
-      });
-    }).observe(layersHost, { attributes: true, attributeFilter: ['class'], subtree: true });
-
     // Keyboard visibility (native callback + visualViewport fallback)
     const setKeyboard = (open) => document.body.classList.toggle('kb-open', Boolean(open));
     window.onAndroidKeyboardVisibilityChanged = setKeyboard;
@@ -4421,23 +4409,11 @@
     renderAllTabs();
   }
 
-  async function loadWebVersion() {
-    try {
-      const res = await fetch('version.json', { cache: 'no-store' });
-      const v = await res.json();
-      state.webVersion = v.version || '';
-      if (state.tab === 'settings') renderSettingsTab();
-    } catch (e) {
-      // version is informational only
-    }
-  }
-
   function init() {
     applyTheme();
     initEvents();
     initGestures();
     renderAllTabs();
-    loadWebVersion();
     loadAll()
       .then(() => setTimeout(() => checkForUpdates(false), 800))
       .catch(showLoadError);
@@ -4457,11 +4433,6 @@
     openCharacterEditor,
     openPersonaEditor,
     openSettingsPage,
-    // Legacy name kept for older native back handlers / bookmarks.
-    closeModal: (id) => {
-      const el = document.getElementById(id);
-      if (el && el._layer) el._layer.close();
-    },
   };
 
   // Pure, side-effect-free helpers for the unit tests in mobile/tests/.
@@ -4485,5 +4456,7 @@
     sortChats,
     filterChats,
     isDefaultChatTitle,
+    updateAction,
+    deliveryNote,
   };
 })();

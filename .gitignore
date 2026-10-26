@@ -1,9 +1,5 @@
-# Node dependencies & runtime DB
+# Node dependencies
 node_modules/
-server/node_modules/
-server/data/*.db
-server/data/*.db-shm
-server/data/*.db-wal
 
 # Android intermediate build artifacts & signing keys
 android/build/
@@ -24,9 +20,6 @@ android/assets/www/
 Проблемы/
 exports/
 *.chatlog.md
-
-# Locally uploaded avatars (user media, not project source)
-server/uploads/avatars/avatar_*
 
 # OS temporary files
 .DS_Store

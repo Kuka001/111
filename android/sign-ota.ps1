@@ -172,10 +172,12 @@ $Manifest | Add-Member -NotePropertyName otaSignature -NotePropertyValue $Signat
 $Json = $Manifest | ConvertTo-Json -Depth 20
 $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText($VersionJson, $Json, $Utf8NoBom)
+# Keep the copy next to the web files identical, so it never carries a stale signature.
+[System.IO.File]::WriteAllText("$WebDir\version.json", $Json, $Utf8NoBom)
 
 Write-Host ""
 Write-Host "=== OTA bundle signed ===" -ForegroundColor Green
-Write-Host "otaSignature written into version.json"
+Write-Host "otaSignature written into version.json and mobile/www/version.json"
 Write-Host ""
 Write-Host "IMPORTANT: commit and push mobile/www/* together with version.json." -ForegroundColor Yellow
 Write-Host "Changing any of those files after signing invalidates the signature."

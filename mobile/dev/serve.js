@@ -4,10 +4,9 @@
 // against an in-memory backend that follows the LocalBackendServer contract.
 //
 //   npm run dev                 -> http://localhost:5173/
-//   http://localhost:5173/?engine=17&long=1   (see mock-bridge.js for switches)
+//   http://localhost:5173/?long=1&update=ota   (see mock-bridge.js for switches)
 //
-// Unlike the legacy server/ (whose /api/updates/apply overwrites mobile/www
-// with unsigned files from GitHub), this server never writes anything.
+// It only reads files and never writes anything.
 'use strict';
 
 const http = require('http');
@@ -55,5 +54,5 @@ http.createServer((req, res) => {
   if (!file || !fs.existsSync(file) || fs.statSync(file).isDirectory()) return send(res, 404, 'Not found');
   send(res, 200, fs.readFileSync(file), TYPES[path.extname(file)] || 'application/octet-stream');
 }).listen(PORT, () => {
-  console.log(`AGY Roleplay UI dev server: http://localhost:${PORT}/  (mock bridge, engine 18; ?engine=17 for legacy)`);
+  console.log(`AGY Roleplay UI dev server: http://localhost:${PORT}/  (mock bridge, see mobile/dev/mock-bridge.js for URL switches)`);
 });

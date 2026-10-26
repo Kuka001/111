@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon foreground: the AGY hexagon, scaled into the 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.78"
+        android:scaleY="0.78">
+        <path
+            android:fillColor="#8B5CF6"
+            android:pathData="M54,18 L86,36 L86,72 L54,90 L22,72 L22,36 Z" />
+        <path
+            android:fillColor="#EC4899"
+            android:pathData="M54,30 L74,42 L74,66 L54,78 L34,66 L34,42 Z" />
+        <path
+            android:fillColor="#F4F4FA"
+            android:pathData="M54,40 L63,64 L58,64 L56,58 L52,58 L50,64 L45,64 Z M53,48 L55,54 L53,54 Z" />
+    </group>
+</vector>

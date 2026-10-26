@@ -1641,10 +1641,6 @@ body.layer-open .toast-host {
   border: 1px solid var(--user-card-border);
 }
 
-.msg.swiping .msg-text {
-  transition: none;
-}
-
 .msg-text.swipe-anim {
   transition: transform 180ms var(--ease), opacity 180ms;
 }

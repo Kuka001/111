@@ -22,6 +22,7 @@ const {
   sortChats,
   filterChats,
   isDefaultChatTitle,
+  resolveAvatarUrl,
 } = loadAppInternals();
 
 test('escapeHtml also neutralizes single quotes', () => {
@@ -59,6 +60,18 @@ test('formatMessageTime shows the date only for older messages', () => {
 test('pluralRu follows Russian plural rules', () => {
   const p = (n) => pluralRu(n, 'чат', 'чата', 'чатов');
   assert.deepStrictEqual([1, 2, 5, 11, 21, 22, 25, 111, 0].map(p), ['чат', 'чата', 'чатов', 'чатов', 'чат', 'чата', 'чатов', 'чатов', 'чатов']);
+});
+
+test('resolveAvatarUrl keeps images and draws initials for everything else', () => {
+  const small = 'data:image/png;base64,iVBORw0KGgo=';
+  assert.strictEqual(resolveAvatarUrl(small, 'Кира'), small);
+  assert.strictEqual(resolveAvatarUrl('https://example.com/a.webp', 'Кира'), 'https://example.com/a.webp');
+  // No image (or a leftover path of the old PC server): the UI's own initials.
+  for (const url of ['', null, '/avatars/kira.svg', 'http://127.0.0.1:3001/a.png']) {
+    const out = resolveAvatarUrl(url, 'Кира');
+    assert.ok(out.startsWith('data:image/svg+xml;utf8,'), String(url));
+    assert.ok(decodeURIComponent(out).includes('>К<'));
+  }
 });
 
 test('initialsOf and hueFromString are stable', () => {

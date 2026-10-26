@@ -1,8 +1,6 @@
 package com.agy.roleplay;
 
 import android.app.Activity;
-import android.app.AlertDialog;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Insets;
@@ -13,8 +11,6 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.ViewGroup;
-import android.webkit.JsPromptResult;
-import android.webkit.JsResult;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -22,7 +18,6 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.EditText;
 import android.widget.FrameLayout;
 
 import java.io.ByteArrayInputStream;
@@ -122,13 +117,14 @@ public class MainActivity extends Activity {
                     v.setPadding(sysBars.left, sysBars.top, sysBars.right, bottomPad);
 
                     final boolean kbOpen = ime.bottom > (sysBars.bottom + 80);
-                    if (kbOpen != lastKbOpen) {
+                    final WebView wv = webView;
+                    if (kbOpen != lastKbOpen && wv != null) {
                         lastKbOpen = kbOpen;
-                        webView.post(new Runnable() {
+                        wv.post(new Runnable() {
                             @Override
                             public void run() {
                                 try {
-                                    webView.evaluateJavascript(
+                                    wv.evaluateJavascript(
                                         "window.onAndroidKeyboardVisibilityChanged && window.onAndroidKeyboardVisibilityChanged(" + (kbOpen ? "true" : "false") + ");",
                                         null
                                     );
@@ -147,7 +143,6 @@ public class MainActivity extends Activity {
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
         settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         settings.setTextZoom(100);
 
@@ -285,71 +280,11 @@ public class MainActivity extends Activity {
                 }
                 return true;
             }
-
-            @Override
-            public boolean onJsAlert(WebView view, String url, String message, final JsResult result) {
-                new AlertDialog.Builder(MainActivity.this)
-                    .setTitle("AGY Roleplay")
-                    .setMessage(message)
-                    .setPositiveButton("OK", new DialogInterface.OnClickListener() {
-                        @Override
-                        public void onClick(DialogInterface dialog, int which) {
-                            result.confirm();
-                        }
-                    })
-                    .setCancelable(false)
-                    .show();
-                return true;
-            }
-
-            @Override
-            public boolean onJsConfirm(WebView view, String url, String message, final JsResult result) {
-                new AlertDialog.Builder(MainActivity.this)
-                    .setTitle("Подтверждение")
-                    .setMessage(message)
-                    .setPositiveButton("Да", new DialogInterface.OnClickListener() {
-                        @Override
-                        public void onClick(DialogInterface dialog, int which) {
-                            result.confirm();
-                        }
-                    })
-                    .setNegativeButton("Отмена", new DialogInterface.OnClickListener() {
-                        @Override
-                        public void onClick(DialogInterface dialog, int which) {
-                            result.cancel();
-                        }
-                    })
-                    .setCancelable(false)
-                    .show();
-                return true;
-            }
-
-            @Override
-            public boolean onJsPrompt(WebView view, String url, String message, String defaultValue, final JsPromptResult result) {
-                final EditText input = new EditText(MainActivity.this);
-                input.setText(defaultValue != null ? defaultValue : "");
-                new AlertDialog.Builder(MainActivity.this)
-                    .setTitle(message)
-                    .setView(input)
-                    .setPositiveButton("Создать", new DialogInterface.OnClickListener() {
-                        @Override
-                        public void onClick(DialogInterface dialog, int which) {
-                            result.confirm(input.getText().toString());
-                        }
-                    })
-                    .setNegativeButton("Отмена", new DialogInterface.OnClickListener() {
-                        @Override
-                        public void onClick(DialogInterface dialog, int which) {
-                            result.cancel();
-                        }
-                    })
-                    .setCancelable(false)
-                    .show();
-                return true;
-            }
         });
 
-        localBackendServer = new LocalBackendServer(this, webView);
+        // One backend per process: after the Activity is recreated, replies that
+        // are still being generated keep running and the new WebView follows them.
+        localBackendServer = LocalBackendServer.attach(this, webView);
         webView.addJavascriptInterface(localBackendServer, "AndroidServer");
 
         rootLayout.addView(webView, new FrameLayout.LayoutParams(
@@ -402,32 +337,40 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (webView != null) {
-            // Newer web layers expose appUI.handleBack(), which walks their own
-            // layer stack (dialogs, sheets, pages, chat room, tabs). The legacy
-            // DOM walk below stays as the fallback for older OTA bundles.
-            webView.evaluateJavascript(
-                "(function(){" +
-                "  if (window.appUI && typeof window.appUI.handleBack === 'function') {" +
-                "    try { return window.appUI.handleBack() === 'exit' ? 'exit' : 'handled'; } catch (e) { return 'exit'; }" +
-                "  }" +
-                "  var openModals = document.querySelectorAll('.modal-overlay:not(.hidden)');" +
-                "  if (openModals.length > 0) { openModals[openModals.length - 1].classList.add('hidden'); return 'modal'; }" +
-                "  var chatRoom = document.getElementById('chatRoomView');" +
-                "  if (chatRoom && !chatRoom.classList.contains('hidden')) { window.appUI.closeChatRoom(); return 'chat'; }" +
-                "  return 'exit';" +
-                "})()",
-                new ValueCallback<String>() {
-                    @Override
-                    public void onReceiveValue(String value) {
-                        if (value != null && value.contains("exit")) {
-                            MainActivity.super.onBackPressed();
-                        }
+        if (webView == null) {
+            super.onBackPressed();
+            return;
+        }
+        // appUI.handleBack() walks the web layer's own stack (dialogs, sheets,
+        // pages, chat room, tabs) and answers 'exit' once nothing is left.
+        webView.evaluateJavascript(
+            "(function(){try{" +
+            "if(!window.appUI||typeof window.appUI.handleBack!=='function')return 'exit';" +
+            "return window.appUI.handleBack()==='exit'?'exit':'handled';" +
+            "}catch(e){return 'exit';}})()",
+            new ValueCallback<String>() {
+                @Override
+                public void onReceiveValue(String value) {
+                    if (value == null || value.contains("exit")) {
+                        // Like Android 12+ does for launcher activities: go to the
+                        // background instead of finishing, so the open chat, drafts
+                        // and a reply being generated are still there on return.
+                        if (!moveTaskToBack(true)) MainActivity.super.onBackPressed();
                     }
                 }
-            );
-        } else {
-            super.onBackPressed();
+            }
+        );
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (localBackendServer != null) localBackendServer.detach(this);
+        if (webView != null) {
+            webView.removeJavascriptInterface("AndroidServer");
+            if (rootLayout != null) rootLayout.removeView(webView);
+            webView.destroy();
+            webView = null;
         }
+        super.onDestroy();
     }
 }

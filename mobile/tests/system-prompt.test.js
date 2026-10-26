@@ -85,3 +85,15 @@ test('the legacy "# GEMINI.md" seed is not sent as an instruction', () => {
 test('nothing at all yields an empty prompt', () => {
   assert.strictEqual(buildSystemPrompt({ charName: 'A', userName: 'B' }), '');
 });
+
+// Builds before 1.6 created every memory file from a template; tidyChatFiles()
+// in LocalBackendServer.java rewrites such files to the plain heading, so the
+// template never reaches the model as if it were the user's notes.
+const LEGACY_MEMORY_TEMPLATE = /^# Память ролевого чата #\d+ \([^\n]*\)\s*(?:- Чат начат\.)?\s*$/;
+
+test('the legacy auto-created memory template is recognised, real notes are not', () => {
+  assert.ok(LEGACY_MEMORY_TEMPLATE.test('# Память ролевого чата #4 (Эльза и Юна & Казума)\n\n- Чат начат.'));
+  assert.ok(LEGACY_MEMORY_TEMPLATE.test('# Память ролевого чата #8 (Ллиэн & Аня)'));
+  assert.ok(!LEGACY_MEMORY_TEMPLATE.test('# Память ролевого чата #4 (Эльза & Казума)\n\n- Чат начат.\n- Кадзума обещал вернуться.'));
+  assert.strictEqual(readChatMemory('# Память чата #4\n\n'), '');
+});

@@ -41,14 +41,36 @@ test('compareSemver tolerates prefixes, blanks and missing parts', () => {
   assert.strictEqual(compareSemver('2.0', '1.9.9'), 1);
 });
 
-test('nativeUpdateRequired triggers when the APK engine lags the repo', () => {
-  const nativeUpdateRequired = (latestBuild, bundledBuild) => latestBuild > bundledBuild;
-  // The exact bug the two-tier update system exists to catch: web layer updated
-  // via OTA to build 16 while the compiled APK is still build 15.
-  assert.strictEqual(nativeUpdateRequired(16, 15), true);
-  assert.strictEqual(nativeUpdateRequired(15, 15), false);
-  // A stale remote must never ask the user to "downgrade" the APK.
-  assert.strictEqual(nativeUpdateRequired(14, 15), false);
+/** Mirror of the decision in handleUpdatesCheck(): a web layer fits exactly one APK build. */
+function updateDecision({ latestVersion, latestBuild, currentVersion, bundledBuild }) {
+  const nativeUpdateRequired = latestBuild > bundledBuild;
+  const otaAvailable = latestBuild === bundledBuild && compareSemver(latestVersion, currentVersion) > 0;
+  return { nativeUpdateRequired, otaAvailable, updateAvailable: nativeUpdateRequired || otaAvailable };
+}
+
+test('a newer build needs a new APK and is never installed over the air', () => {
+  const d = updateDecision({ latestVersion: '1.8.0', latestBuild: 26, currentVersion: '1.7.0', bundledBuild: 25 });
+  assert.deepStrictEqual(d, { nativeUpdateRequired: true, otaAvailable: false, updateAvailable: true });
+});
+
+test('a newer version for the same build is a web-only (OTA) update', () => {
+  const d = updateDecision({ latestVersion: '1.7.1', latestBuild: 25, currentVersion: '1.7.0', bundledBuild: 25 });
+  assert.deepStrictEqual(d, { nativeUpdateRequired: false, otaAvailable: true, updateAvailable: true });
+});
+
+test('the same version, or an older build in the repo, is no update at all', () => {
+  assert.strictEqual(updateDecision({ latestVersion: '1.7.0', latestBuild: 25, currentVersion: '1.7.0', bundledBuild: 25 }).updateAvailable, false);
+  // A stale remote must never ask the user to "downgrade".
+  assert.strictEqual(updateDecision({ latestVersion: '1.6.6', latestBuild: 24, currentVersion: '1.7.0', bundledBuild: 25 }).updateAvailable, false);
+});
+
+test('the UI offers the action the engine decided', () => {
+  const { updateAction } = require('./harness').loadAppInternals();
+  assert.strictEqual(updateAction({ remoteReachable: true, nativeUpdateRequired: true, otaAvailable: false }), 'apk');
+  assert.strictEqual(updateAction({ remoteReachable: true, nativeUpdateRequired: false, otaAvailable: true }), 'ota');
+  assert.strictEqual(updateAction({ remoteReachable: true, nativeUpdateRequired: false, otaAvailable: false }), 'none');
+  assert.strictEqual(updateAction({ remoteReachable: false, nativeUpdateRequired: true }), 'none');
+  assert.strictEqual(updateAction(null), 'none');
 });
 
 /** Mirror of buildOtaManifestPayload() in LocalBackendServer.java. */

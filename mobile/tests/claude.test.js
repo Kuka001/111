@@ -2,8 +2,8 @@
 
 // Tests for the Claude Code CLI provider detection on the web layer. The CLI
 // itself and its stream-json parsing live in Java (LocalBackendServer); here we
-// only verify the UI's provider routing helper, which decides when the on-device
-// Claude fields (system-prompt .md, first-message .md, project path) are sent.
+// only verify the UI's provider routing helper, which decides which provider a
+// chat model belongs to (labels, effort options, the prompt preview note).
 
 const { test } = require('node:test');
 const assert = require('node:assert');

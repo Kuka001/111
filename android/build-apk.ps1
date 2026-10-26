@@ -5,7 +5,7 @@ param([switch]$Debuggable)
 
 $ErrorActionPreference = "Stop"
 
-$ProjectRoot = "C:\Users\Kazuma\mobile_project"
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 $AndroidDir = "$ProjectRoot\android"
 $WebDir = "$ProjectRoot\mobile\www"
 $AssetsWwwDir = "$AndroidDir\assets\www"
@@ -83,8 +83,13 @@ if ($env:AGY_SKIP_TESTS -ne "1") {
     }
 }
 
+# Byte copy with a fresh timestamp: Copy-Item keeps the source mtime, and a
+# same-size file with an unchanged mtime can slip past git's change detection.
+function Copy-Fresh([string]$From, [string]$To) {
+    [System.IO.File]::WriteAllBytes($To, [System.IO.File]::ReadAllBytes($From))
+}
 if (Test-Path "$ProjectRoot\version.json") {
-    Copy-Item -Path "$ProjectRoot\version.json" -Destination "$WebDir\version.json" -Force
+    Copy-Fresh "$ProjectRoot\version.json" "$WebDir\version.json"
 }
 if (Test-Path $AssetsWwwDir) { Remove-Item -Recurse -Force $AssetsWwwDir }
 New-Item -ItemType Directory -Force -Path $AssetsWwwDir | Out-Null
@@ -223,7 +228,7 @@ if (Test-Path $VersionJsonPath) {
         $Json = $Manifest | ConvertTo-Json -Depth 20
         $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
         [System.IO.File]::WriteAllText($VersionJsonPath, $Json, $Utf8NoBom)
-        Copy-Item -Path $VersionJsonPath -Destination "$WebDir\version.json" -Force
+        Copy-Fresh $VersionJsonPath "$WebDir\version.json"
         Write-Host "Recorded apkSha256 in version.json"
     } catch {
         Write-Host "WARNING: could not update version.json with apkSha256: $_" -ForegroundColor Yellow

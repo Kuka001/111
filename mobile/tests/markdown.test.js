@@ -95,3 +95,9 @@ test('stripMarkdownPreview produces clean single-line previews', () => {
 test('stripMarkdownPreview collapses code blocks to a marker', () => {
   assert.ok(stripMarkdownPreview('before ```js\ncode\n``` after').includes('[код]'));
 });
+
+test('stripMarkdownPreview drops markers a cut-off preview leaves unpaired', () => {
+  // The chat list gets the last message cut to 300 characters, which can cut
+  // off the closing asterisk of an action.
+  assert.strictEqual(stripMarkdownPreview('*Мягкий утренний свет скользнул по'), 'Мягкий утренний свет скользнул по');
+});

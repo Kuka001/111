@@ -16,12 +16,12 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Plain-text snapshot of the processes this app started (proot and whatever
- * runs inside the sandbox), taken when one of them stops responding. For every
- * thread it shows the scheduler state, the kernel wait channel and the system
- * call it is blocked in; for every process its open files and TCP/UDP sockets.
- * That is enough to tell a stuck event loop from a child it waits on, a network
- * connect that never completes or a ptrace stop proot never resumed.
+ * Plain-text snapshot of the processes this app started (Claude Code and its
+ * children), taken when one of them stops responding. For every thread it shows
+ * the scheduler state, the kernel wait channel and the system call it is
+ * blocked in; for every process its open files and TCP/UDP sockets. That is
+ * enough to tell a stuck event loop from a child it waits on or a network
+ * connect that never completes. Also lists process trees for killing them.
  */
 final class ProcSnapshot {
 
@@ -52,7 +52,7 @@ final class ProcSnapshot {
         return children;
     }
 
-    /** Every descendant of {@code pid}, deepest first (sandboxed processes before their proot). */
+    /** Every descendant of {@code pid}, deepest first (children before their parent). */
     static List<Integer> descendants(int pid) {
         List<Integer> out = new ArrayList<>();
         Map<Integer, List<Integer>> children = childrenByParent();
@@ -342,11 +342,7 @@ final class ProcSnapshot {
     private static String cmdline(int pid, String hide) {
         String raw = read("/proc/" + pid + "/cmdline");
         if (raw.isEmpty()) return "";
-        String cmd = raw.replace('\0', ' ').trim();
-        // proot's own command line is mostly bind mounts; keep the guest command.
-        int w = cmd.indexOf(" -w /root ");
-        if (w >= 0) cmd = "proot … " + cmd.substring(w + 10);
-        return shorten(cmd, hide);
+        return shorten(raw.replace('\0', ' ').trim(), hide);
     }
 
     private static String shorten(String s, String hide) {
