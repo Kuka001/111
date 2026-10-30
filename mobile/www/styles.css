@@ -950,8 +950,30 @@ details.disclosure[open] > summary .ic {
 
 .macro-chips {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
+}
+
+/* A macro chip's name: {{char2}} Хана */
+.chip-sub {
+  color: var(--text-3);
+  font-weight: 500;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The card editor's macro chips stay above the keyboard and scroll sideways. */
+.macro-bar .macro-chips {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  margin: 0;
+  scrollbar-width: none;
+}
+
+.macro-bar .macro-chips::-webkit-scrollbar {
+  display: none;
 }
 
 /* ==========================================================================
@@ -1707,6 +1729,95 @@ body.layer-open .toast-host {
   background: var(--surface-2);
 }
 
+/* Characters a reply introduced (its <new_character> blocks) */
+.cast-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.cast-chips:empty {
+  display: none;
+}
+
+.cast-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 4px 12px;
+  border-radius: var(--r-full);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.cast-chip:active {
+  background: var(--surface-2);
+}
+
+.cast-chip.pending {
+  background: var(--surface);
+  border-style: dashed;
+  border-color: var(--border-strong);
+  color: var(--text-2);
+  animation: cast-pending 1.4s ease-in-out infinite;
+}
+
+@keyframes cast-pending {
+  50% { opacity: 0.55; }
+}
+
+.cast-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* {{char3}}: a character's macro */
+.cast-num {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.cast-chip .cast-num {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  opacity: 0.75;
+}
+
+.cast-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+/* The reply a character came from, after «К сообщению» */
+.msg.flash {
+  animation: msg-flash 1.6s ease-out;
+}
+
+@keyframes msg-flash {
+  0%, 30% { background: var(--accent-soft); }
+  100% { background: transparent; }
+}
+
 /* Thoughts */
 .thoughts {
   margin: 0 0 10px;
@@ -2287,6 +2398,65 @@ body.layer-open .toast-host {
 .greeting-preview .ic,
 .inline-warn .ic {
   margin-top: 2px;
+}
+
+.inline-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.inline-note .ic {
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+/* Card editor: one block per character */
+.char-block {
+  margin: 0 0 12px;
+  padding: 12px 14px 2px;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.char-block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -2px -6px 8px 0;
+}
+
+.char-block-label {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.char-block-head .icon-btn {
+  margin-left: auto;
+}
+
+/* Card page: a character of a structured card */
+.cast-card {
+  margin: 0 0 12px;
+}
+
+.cast-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 4px 6px;
+}
+
+.cast-card-name {
+  font-weight: 600;
 }
 
 .inline-warn {

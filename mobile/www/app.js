@@ -356,14 +356,109 @@
     return (chats || []).filter(c => {
       if (characterId && Number(c.character_id) !== characterId) return false;
       if (!query) return true;
-      return [c.character_name, c.persona_name, c.title, stripMarkdownPreview(c.last_message)]
+      return [c.character_name, c.character_title, c.persona_name, c.persona_title, c.title, stripMarkdownPreview(c.last_message)]
         .some(v => String(v || '').toLowerCase().includes(query));
     });
   }
 
-  function isDefaultChatTitle(title, characterName) {
+  /** Empty, or "Чат: …" with the card's name or title (the engine names new chats so). */
+  function isDefaultChatTitle(title, characterName, cardTitle) {
     const t = String(title || '').trim();
-    return !t || t === 'Чат: ' + String(characterName || '').trim();
+    if (!t) return true;
+    return [characterName, cardTitle].some(n => String(n || '').trim() !== '' && t === 'Чат: ' + String(n).trim());
+  }
+
+  // --- cards, cast & macros (mirror of "CARDS, CAST & MACROS" in LocalBackendServer.java) ---
+
+  /** What the user calls a card in lists: its title, else its (first character's) name. */
+  function cardLabel(c) {
+    if (!c) return 'Персонаж';
+    return String(c.title || '').trim() || String(c.name || '').trim() || 'Без названия';
+  }
+
+  function personaLabel(p) {
+    if (!p) return 'Игрок';
+    return String(p.title || '').trim() || String(p.name || '').trim() || 'Игрок';
+  }
+
+  /** The card's characters: a structured card's list, or a free-text card as character 1. */
+  function cardCast(character) {
+    if (!character) return [];
+    const card = character.card;
+    if (card && Array.isArray(card.chars)) {
+      return card.chars.map(c => ({ n: Number(c.n) || 0, name: String(c.name || ''), text: String(c.text || '') }));
+    }
+    return [{ n: 1, name: character.name || 'Персонаж', text: character.fileContent || '', legacy: true }];
+  }
+
+  /** The characters replies introduced, from the variant each reply shows. */
+  function storyCast(messages) {
+    const out = [];
+    (messages || []).forEach((m, idx) => {
+      if (!m || m.role === 'user' || !Array.isArray(m.cast)) return;
+      m.cast.forEach(c => out.push({ n: Number(c.n) || 0, name: String(c.name || ''), text: String(c.text || ''), msgId: m.id, msgIndex: idx }));
+    });
+    return out;
+  }
+
+  /**
+   * What the macros of a chat stand for: {{user}} the persona's name, {{charN}}
+   * character N (the card's first, then those the replies introduced), {{char}}
+   * character 1 or, without one, the card's first character.
+   */
+  function castMacros(character, persona, messages) {
+    const card = cardCast(character);
+    const names = {};
+    card.concat(storyCast(messages)).forEach(c => {
+      if (!(c.n in names)) names[c.n] = c.name;
+    });
+    return {
+      user: persona ? (persona.name || 'Игрок') : null,
+      names,
+      alias: (1 in names) ? names[1] : (card[0] ? card[0].name : null),
+    };
+  }
+
+  const MACRO_RE = /\{\{(user|char(\d{0,5}))\}\}/gi;
+
+  /** Fills in {{user}}, {{char}}, {{charN}} (any letter case); a macro without a name stays as written. */
+  function applyMacros(text, macros) {
+    const m = macros || {};
+    return String(text == null ? '' : text).replace(MACRO_RE, (all, word, digits) => {
+      let v;
+      if (word.toLowerCase() === 'user') v = m.user;
+      else if (!digits) v = m.alias;
+      else v = (m.names || {})[Number(digits)];
+      return v == null ? all : v;
+    });
+  }
+
+  /**
+   * A reply still being written, without its <new_character> blocks: a
+   * finished block is cut out, an unfinished one hides everything after it.
+   * names: the characters being created ('' while the name is not out yet).
+   */
+  function splitLiveText(text) {
+    const names = [];
+    const nameOf = (attrs) => {
+      const m = String(attrs || '').match(/name\s*=\s*(?:"([^"]*)"|'([^']*)'|«([^»]*)»|“([^”]*)”|([^\s>"'«“]+))/i);
+      return m ? String(m[1] || m[2] || m[3] || m[4] || m[5] || '').trim() : '';
+    };
+    let out = String(text || '').replace(/<\s*new_character\b([^>]*)>[\s\S]*?<\s*\/\s*new_character\s*>/gi, (all, attrs) => {
+      names.push(nameOf(attrs));
+      return '';
+    });
+    const open = out.search(/<\s*new_character\b/i);
+    if (open >= 0) {
+      const head = out.slice(open).match(/^<\s*new_character\b([^>]*)/i);
+      names.push(nameOf(head && head[1]));
+      out = out.slice(0, open);
+    } else {
+      // The tag may be arriving one piece at a time: "<", "<new_", …
+      const tail = out.match(/<[a-z_]*$/i);
+      if (tail && '<new_character'.startsWith(tail[0].toLowerCase())) out = out.slice(0, tail.index);
+    }
+    return { text: names.length ? out.replace(/\n{3,}/g, '\n\n').trim() : out, names };
   }
 
   /**
@@ -524,7 +619,7 @@
   // The native engine (APK build) this web layer is made for. The engine only
   // installs an OTA web layer of its own build; this guards against an older
   // engine that still accepts any build.
-  const MIN_ENGINE_BUILD = 26;
+  const MIN_ENGINE_BUILD = 27;
 
   const THEMES = {
     dark: { label: 'Тёмная', bg: '#0f1115', nav: '#13161c', light: false, swatch: ['#0f1115', '#1c2029', '#a4abbb'] },
@@ -586,6 +681,19 @@
 
   function findPersona(id) {
     return state.personas.find(p => p.id === Number(id)) || null;
+  }
+
+  /** A card found by its title, its characters' names or its description. */
+  function cardMatches(c, query) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return true;
+    return [cardLabel(c), c.name, c.description_preview, ...cardCast(c).map(m => m.name)]
+      .some(v => String(v || '').toLowerCase().includes(q));
+  }
+
+  /** Persona chips (a sheet's data-act="persona"); a persona with a title shows the title. */
+  function personaChipsHtml(activeId) {
+    return `<div class="chips wrap">${state.personas.map(p => `<button class="chip${p.id === Number(activeId) ? ' active' : ''}" data-act="persona" data-id="${p.id}"><img class="avatar avatar-24" src="${escapeHtml(resolveAvatarUrl(p.avatar_url, personaLabel(p)))}" alt="" />${escapeHtml(personaLabel(p))}</button>`).join('')}</div>`;
   }
 
   function modelName(modelId) {
@@ -1283,7 +1391,7 @@
     const seen = new Map();
     sortChats(state.chats).forEach(c => {
       const id = Number(c.character_id) || 0;
-      if (id && !seen.has(id)) seen.set(id, { id, name: c.character_name, avatar: (findChar(id) || {}).avatar_url });
+      if (id && !seen.has(id)) seen.set(id, { id, name: chatCardLabel(c), avatar: (findChar(id) || {}).avatar_url });
     });
     if (state.chatsFilter && !seen.has(state.chatsFilter)) state.chatsFilter = 0;
     filtersHost.innerHTML = seen.size > 1
@@ -1297,23 +1405,35 @@
       : emptyHtml('search', 'Ничего не найдено', 'Попробуйте другой запрос или сбросьте фильтр.');
   }
 
+  /** The card's label for a row of the chat list (the list comes without the cards). */
+  function chatCardLabel(c) {
+    return String(c.character_title || '').trim() || c.character_name || 'Персонаж';
+  }
+
+  /** A chat list row's last message with the names filled in (characters of later replies are not in the list). */
+  function chatPreview(c) {
+    const card = findChar(c.character_id) || { name: c.character_name };
+    return stripMarkdownPreview(applyMacros(c.last_message, castMacros(card, { name: c.persona_name }, [])));
+  }
+
   function chatRowHtml(c) {
     const time = formatRelativeTime(chatActivityTime(c));
     const P = PROVIDERS[providerOf(c.model_id)];
-    const custom = !isDefaultChatTitle(c.title, c.character_name);
-    const meta = [custom ? c.title : '', c.persona_name || 'Игрок'].filter(Boolean).map(escapeHtml).join(' · ');
-    const preview = stripMarkdownPreview(c.last_message);
+    const custom = !isDefaultChatTitle(c.title, c.character_name, c.character_title);
+    const meta = [custom ? c.title : '', String(c.persona_title || '').trim() || c.persona_name || 'Игрок'].filter(Boolean).map(escapeHtml).join(' · ');
+    const preview = chatPreview(c);
     const gen = state.generations[c.id];
     const ch = findChar(c.character_id);
+    const label = chatCardLabel(c);
     return `<div class="chat-row" data-chat-id="${c.id}">
       <div class="chat-row-actions">
         <button class="act-export" data-action="chat-export" data-id="${c.id}">${ic('share', 'ic-sm')}Экспорт</button>
         <button class="act-delete" data-action="chat-delete" data-id="${c.id}">${ic('trash', 'ic-sm')}Удалить</button>
       </div>
       <div class="chat-row-main" role="button" tabindex="0" data-action="open-chat" data-id="${c.id}">
-        <img class="avatar avatar-52" src="${escapeHtml(resolveAvatarUrl(ch && ch.avatar_url, c.character_name))}" alt="" />
+        <img class="avatar avatar-52" src="${escapeHtml(resolveAvatarUrl(ch && ch.avatar_url, label))}" alt="" />
         <div class="chat-row-body">
-          <div class="chat-row-top"><span class="chat-row-name">${escapeHtml(c.character_name || 'Персонаж')}</span><span class="chat-row-time">${escapeHtml(time)}</span></div>
+          <div class="chat-row-top"><span class="chat-row-name">${escapeHtml(label)}</span><span class="chat-row-time">${escapeHtml(time)}</span></div>
           <div class="chat-row-meta"><span>${meta}</span><span class="provider-tag">${ic(P.icon)}${escapeHtml(P.short)}</span></div>
           <div class="chat-row-preview">${gen ? '<span style="color:var(--accent)">Генерирует ответ…</span>' : escapeHtml(preview || 'Пока без сообщений')}</div>
         </div>
@@ -1334,7 +1454,7 @@
     const c = state.chats.find(x => x.id === chatId);
     if (!c) return;
     actionSheet({
-      title: c.character_name || 'Чат',
+      title: chatCardLabel(c),
       items: [
         { icon: 'chat', label: 'Открыть', onSelect: () => openChatRoom(chatId) },
         { icon: 'share', label: 'Экспорт', onSelect: () => openExport(chatId) },
@@ -1348,7 +1468,7 @@
     const n = c ? Number(c.message_count) || 0 : 0;
     const ok = await confirmDialog({
       title: 'Удалить чат?',
-      message: c ? `Чат с «${c.character_name}» и ${n} ${pluralRu(n, 'сообщение', 'сообщения', 'сообщений')} будут удалены без возможности восстановления.` : 'Чат будет удалён без возможности восстановления.',
+      message: c ? `Чат с «${chatCardLabel(c)}» и ${n} ${pluralRu(n, 'сообщение', 'сообщения', 'сообщений')} будут удалены без возможности восстановления.` : 'Чат будет удалён без возможности восстановления.',
       confirmText: 'Удалить',
       danger: true,
     });
@@ -1398,16 +1518,16 @@
 
     const render = () => {
       const ch = findChar(sel.charId);
-      const chars = state.characters.filter(c => !sel.q || c.name.toLowerCase().includes(sel.q.toLowerCase()));
+      const chars = state.characters.filter(c => !sel.q || cardMatches(c, sel.q));
       const prov = providerOf(sel.modelId);
       const status = providerStatus(prov);
-      const greeting = ch ? stripMarkdownPreview(ch.first_message || '') : '';
+      const greeting = ch ? stripMarkdownPreview(applyMacros(ch.first_message || '', castMacros(ch, findPersona(sel.personaId), []))) : '';
       return `
         ${state.characters.length > 6 ? `<label class="search-field" style="margin-bottom:12px">${ic('search', 'ic-sm')}<input data-role="q" placeholder="Найти персонажа" value="${escapeHtml(sel.q)}" autocomplete="off" /></label>` : ''}
         <div class="section-title">Персонаж</div>
         <div class="pick-grid">${chars.map(c => `<button class="pick-card${c.id === sel.charId ? ' active' : ''}" data-act="char" data-id="${c.id}">
-            <img class="avatar avatar-64" src="${escapeHtml(resolveAvatarUrl(c.avatar_url, c.name))}" alt="" />
-            <span class="pick-name">${escapeHtml(c.name)}</span></button>`).join('') || '<div class="faint">Нет совпадений</div>'}</div>
+            <img class="avatar avatar-64" src="${escapeHtml(resolveAvatarUrl(c.avatar_url, cardLabel(c)))}" alt="" />
+            <span class="pick-name">${escapeHtml(cardLabel(c))}</span></button>`).join('') || '<div class="faint">Нет совпадений</div>'}</div>
         <div class="greeting-preview">${greeting
           ? `${ic('chat', 'ic-xs')}<span>Начнётся с приветствия: «${escapeHtml(greeting.slice(0, 140))}${greeting.length > 140 ? '…' : ''}»</span>`
           : `${ic('info', 'ic-xs')}<span>У персонажа нет приветствия — первым пишете вы.</span>`}</div>
@@ -1415,7 +1535,7 @@
         <div class="section">
           <div class="section-title">Вы играете за</div>
           ${state.personas.length
-            ? `<div class="chips wrap">${state.personas.map(p => `<button class="chip${p.id === sel.personaId ? ' active' : ''}" data-act="persona" data-id="${p.id}"><img class="avatar avatar-24" src="${escapeHtml(resolveAvatarUrl(p.avatar_url, p.name))}" alt="" />${escapeHtml(p.name)}</button>`).join('')}</div>`
+            ? personaChipsHtml(sel.personaId)
             : `<div class="card card-pad muted" style="font-size:var(--fs-sm)">Персон пока нет — модель будет звать вас «Игрок». Создать персону можно во вкладке «Персоны».</div>`}
         </div>
 
@@ -1641,10 +1761,10 @@
     const d = room.data;
     const ch = d.character || {};
     const persona = d.persona || {};
-    const title = isDefaultChatTitle(d.chat.title, ch.name) ? (ch.name || 'Персонаж') : d.chat.title;
-    $('#chatHeaderAvatar').src = resolveAvatarUrl(ch.avatar_url, ch.name);
+    const title = isDefaultChatTitle(d.chat.title, ch.name, ch.title) ? cardLabel(ch) : d.chat.title;
+    $('#chatHeaderAvatar').src = resolveAvatarUrl(ch.avatar_url, cardLabel(ch));
     $('#chatHeaderName').textContent = title;
-    $('#chatHeaderSub').textContent = modelSummary(d.chat.model_id, d.chat.effort) + ' · ' + (persona.name || 'Игрок');
+    $('#chatHeaderSub').textContent = modelSummary(d.chat.model_id, d.chat.effort) + ' · ' + personaLabel(persona);
     const st = providerStatus(providerOf(d.chat.model_id));
     const dot = $('#chatStatusDot');
     dot.classList.toggle('off', !st.ok);
@@ -1682,20 +1802,29 @@
         break;
       }
     }
-    return { msgs, lastAiIdx, character: d.character || {}, persona: d.persona || {} };
+    const character = d.character || {};
+    const persona = d.persona || {};
+    const macros = castMacros(character, persona, msgs);
+    return { msgs, lastAiIdx, character, persona, macros, macroSig: JSON.stringify(macros) };
   }
 
   function messageSig(m, idx, ctx, extra) {
     return JSON.stringify([
       m.content, m.swipe_index, (m.swipes || []).length, (m.thoughts || '').length, m.created_at,
-      idx === ctx.lastAiIdx, idx === 0, ctx.character.name, ctx.character.avatar_url ? ctx.character.avatar_url.length : 0,
-      ctx.persona.name, ctx.persona.avatar_url ? ctx.persona.avatar_url.length : 0, extra || '',
+      idx === ctx.lastAiIdx, idx === 0, cardLabel(ctx.character), ctx.character.avatar_url ? ctx.character.avatar_url.length : 0,
+      ctx.persona.name, ctx.persona.avatar_url ? ctx.persona.avatar_url.length : 0, ctx.macroSig, m.cast || [], extra || '',
     ]);
+  }
+
+  /** The chips under a reply for the characters its shown variant introduced. */
+  function castChipsHtml(m) {
+    if (!Array.isArray(m.cast) || !m.cast.length) return '';
+    return `<div class="cast-chips">${m.cast.map(c => `<button class="cast-chip" data-action="story-character" data-msg="${m.id}" data-n="${Number(c.n)}">${ic('user-plus', 'ic-xs')}<span class="cast-chip-name">${escapeHtml(c.name)}</span><span class="cast-num">{{char${Number(c.n)}}}</span></button>`).join('')}</div>`;
   }
 
   function messageHtml(m, idx, ctx, opts) {
     const isUser = m.role === 'user';
-    const name = isUser ? (ctx.persona.name || 'Вы') : (ctx.character.name || 'Персонаж');
+    const name = isUser ? (ctx.persona.name || 'Вы') : cardLabel(ctx.character);
     const avatar = resolveAvatarUrl(isUser ? ctx.persona.avatar_url : ctx.character.avatar_url, name);
     const time = formatMessageTime(parseServerTime(m.created_at));
     const swipes = Array.isArray(m.swipes) && m.swipes.length ? m.swipes : [m.content];
@@ -1713,8 +1842,9 @@
         ${m._pending ? '' : `<button class="icon-btn sm" data-action="msg-menu" data-id="${m.id}" aria-label="Действия с сообщением">${ic('more', 'ic-sm')}</button>`}
       </div>`;
 
+    const text = formatRoleplayHtml(applyMacros(m.content, ctx.macros), { dialogue: prefs.dialogue });
     if (isUser) {
-      return `<div class="msg user${hiddenCls}" data-msg-id="${m.id}">${head}<div class="msg-card"><div class="msg-text">${formatRoleplayHtml(m.content, { dialogue: prefs.dialogue })}</div></div></div>`;
+      return `<div class="msg user${hiddenCls}" data-msg-id="${m.id}">${head}<div class="msg-card"><div class="msg-text">${text}</div></div></div>`;
     }
 
     const thoughts = m.thoughts || '';
@@ -1726,19 +1856,19 @@
       : '';
     const reroll = swipeable ? `<button class="foot-btn" data-action="reroll" data-id="${m.id}">${ic('reroll')}Другой вариант</button>` : '';
     const foot = nav || reroll ? `<div class="msg-foot">${nav}${reroll}</div>` : '';
-    return `<div class="msg assistant${hiddenCls}" data-msg-id="${m.id}"${swipeable ? ' data-swipeable="1"' : ''}>${head}${thoughtsHtml}<div class="msg-text">${formatRoleplayHtml(m.content, { dialogue: prefs.dialogue })}</div>${foot}</div>`;
+    return `<div class="msg assistant${hiddenCls}" data-msg-id="${m.id}"${swipeable ? ' data-swipeable="1"' : ''}>${head}${thoughtsHtml}<div class="msg-text">${text}</div>${castChipsHtml(m)}${foot}</div>`;
   }
 
   function introHtml(ctx) {
     return `<div class="feed-intro">
-      <img class="avatar avatar-64" src="${escapeHtml(resolveAvatarUrl(ctx.character.avatar_url, ctx.character.name))}" alt="" />
-      <div class="empty-title">${escapeHtml(ctx.character.name || 'Персонаж')}</div>
+      <img class="avatar avatar-64" src="${escapeHtml(resolveAvatarUrl(ctx.character.avatar_url, cardLabel(ctx.character)))}" alt="" />
+      <div class="empty-title">${escapeHtml(cardLabel(ctx.character))}</div>
       <div>У персонажа нет приветствия. Опишите сцену и сделайте первый ход.</div>
     </div>`;
   }
 
   function liveHtml(ctx) {
-    const name = ctx.character.name || 'Персонаж';
+    const name = cardLabel(ctx.character);
     return `<div class="msg assistant live">
       <div class="msg-head">
         <img class="avatar avatar-28" src="${escapeHtml(resolveAvatarUrl(ctx.character.avatar_url, name))}" alt="" />
@@ -1748,6 +1878,7 @@
       </div>
       <details class="thoughts hidden" data-live="thoughts-wrap"${prefs.thoughtsOpen ? ' open' : ''}><summary>${ic('bulb')}<span data-live="thoughts-label">Мысли</span>${ic('chevron-down', 'chev')}</summary><div class="thoughts-body" data-live="thoughts"></div></details>
       <div class="msg-text" data-live="text"><div class="typing-dots"><i></i><i></i><i></i></div></div>
+      <div class="cast-chips" data-live="cast"></div>
     </div>`;
   }
 
@@ -1780,7 +1911,7 @@
     const gen = state.generations[room.chatId];
     const items = [];
 
-    if (!ctx.msgs.length && !gen) items.push({ key: 'intro', sig: 'intro' + ctx.character.name, html: () => introHtml(ctx) });
+    if (!ctx.msgs.length && !gen) items.push({ key: 'intro', sig: 'intro' + cardLabel(ctx.character), html: () => introHtml(ctx) });
     ctx.msgs.forEach((m, idx) => {
       const regenerating = gen && gen.kind === 'reroll' && gen.msgId === m.id;
       items.push({
@@ -1863,7 +1994,13 @@
       const textEl = $('[data-live="text"]', live);
       if (textEl.dataset.len !== String(g.text.length)) {
         textEl.dataset.len = String(g.text.length);
-        textEl.innerHTML = formatRoleplayHtml(g.text, { dialogue: prefs.dialogue });
+        // A <new_character> block is not shown raw: a chip stands for it until the reply is saved.
+        const parts = splitLiveText(g.text);
+        textEl.innerHTML = formatRoleplayHtml(parts.text, { dialogue: prefs.dialogue });
+        const castEl = $('[data-live="cast"]', live);
+        if (castEl) {
+          castEl.innerHTML = parts.names.map(n => `<span class="cast-chip pending">${ic('user-plus', 'ic-xs')}<span class="cast-chip-name">${escapeHtml(n ? `Создаётся персонаж «${n}»…` : 'Создаётся новый персонаж…')}</span></span>`).join('');
+        }
       }
     }
     if (wasNearBottom) scrollToBottom();
@@ -2027,6 +2164,7 @@
         if (res.userMessage) list.push(res.userMessage);
         if (res.assistantMessage) list.push(res.assistantMessage);
         state.room.data.messages = Array.isArray(res.messages) ? res.messages : list;
+        announceNewCharacters(res.assistantMessage);
       }
     } catch (err) {
       const info = generationError(err);
@@ -2068,6 +2206,7 @@
       const res = await api(`/api/messages/${msgId}/swipe`, { method: 'POST', body: { action: 'regenerate' } });
       endGeneration(chatId, res.generation);
       replaceMessage(chatId, res.message);
+      if (state.room && state.room.chatId === chatId) announceNewCharacters(res.message);
     } catch (err) {
       const info = generationError(err);
       endGeneration(chatId, info.generation);
@@ -2120,6 +2259,16 @@
     const list = state.room.data.messages;
     const idx = list.findIndex(m => m.id === msg.id);
     if (idx >= 0) list[idx] = msg;
+  }
+
+  /** A toast for the characters a new reply introduced (its <new_character> blocks). */
+  function announceNewCharacters(msg) {
+    const cast = msg && Array.isArray(msg.cast) ? msg.cast : [];
+    if (!cast.length) return;
+    toast(`${cast.length > 1 ? 'Новые персонажи' : 'Новый персонаж'}: ${cast.map(c => c.name).join(', ')}`, {
+      type: 'success',
+      action: { label: 'Открыть', fn: () => openStoryCharacter(msg.id, Number(cast[0].n)) },
+    });
   }
 
   async function selectSwipe(msgId, index) {
@@ -2181,11 +2330,12 @@
     const isLast = idx === ctx.msgs.length - 1;
     const busy = Boolean(state.generations[room.chatId]);
     const later = ctx.msgs.length - idx - 1;
+    const shown = applyMacros(m.content, ctx.macros);
     actionSheet({
-      title: isUser ? (ctx.persona.name || 'Ваше сообщение') : (ctx.character.name || 'Сообщение'),
+      title: isUser ? (ctx.persona.name || 'Ваше сообщение') : cardLabel(ctx.character),
       items: [
-        { icon: 'copy', label: 'Копировать', onSelect: () => copyText(m.content) },
-        { icon: 'file', label: 'Выделить текст', onSelect: () => openTextSheet('Текст сообщения', m.content, { selectable: true }) },
+        { icon: 'copy', label: 'Копировать', onSelect: () => copyText(shown) },
+        { icon: 'file', label: 'Выделить текст', onSelect: () => openTextSheet('Текст сообщения', shown, { selectable: true }) },
         { icon: 'edit', label: 'Редактировать', hidden: busy, onSelect: () => openEditMessage(msgId) },
         { icon: 'reroll', label: 'Сгенерировать другой вариант', hidden: isUser || isGreeting || busy, onSelect: () => regenerate(msgId) },
         { icon: 'bulb', label: 'Показать мысли', hidden: !m.thoughts, onSelect: () => openTextSheet('Мысли', m.thoughts) },
@@ -2203,7 +2353,9 @@
     const layer = openSheet({
       title: 'Редактирование',
       full: true,
-      body: `<textarea class="textarea tall" data-role="text">${escapeHtml(m.content)}</textarea>
+      body: `<textarea class="textarea tall" data-role="text" data-macro-target="1">${escapeHtml(m.content)}</textarea>
+        ${macroBarHtml(feedContext().macros)}
+        <p class="section-hint">Макросы {{user}} и {{charN}} хранятся как есть, а в ленте и для модели заменяются именами.</p>
         ${m.role !== 'user' && (m.swipes || []).length > 1 ? '<p class="section-hint">Изменится только текущий вариант ответа.</p>' : ''}`,
       footer: `<div class="btn-row"><button class="btn btn-secondary" data-action="layer-close">Отмена</button><button class="btn btn-primary" data-act="save">Сохранить</button></div>`,
       onBack: () => {
@@ -2214,6 +2366,7 @@
         return false;
       },
     });
+    bindMacroBar(layer);
     bindActs(layer, {
       save: async (btn) => {
         const content = $('[data-role="text"]', layer.el).value;
@@ -2240,7 +2393,13 @@
     const room = state.room;
     if (!room) return;
     const chatId = room.chatId;
-    const ok = await confirmDialog({ title: 'Удалить сообщение?', message: 'Все его варианты тоже будут удалены.', confirmText: 'Удалить', danger: true });
+    const m = room.data.messages.find(x => x.id === msgId);
+    const ok = await confirmDialog({
+      title: 'Удалить сообщение?',
+      message: 'Все его варианты тоже будут удалены.' + castLossNote(m ? [m] : []),
+      confirmText: 'Удалить',
+      danger: true,
+    });
     if (!ok) return;
     try {
       await api(`/api/messages/${msgId}`, { method: 'DELETE' });
@@ -2265,7 +2424,7 @@
     if (!victims.length) return;
     const ok = await confirmDialog({
       title: 'Откатить чат?',
-      message: `${victims.length} ${pluralRu(victims.length, 'сообщение', 'сообщения', 'сообщений')} после выбранного будут удалены.`,
+      message: `${victims.length} ${pluralRu(victims.length, 'сообщение', 'сообщения', 'сообщений')} после выбранного будут удалены.` + castLossNote(victims),
       confirmText: 'Откатить',
       danger: true,
     });
@@ -2289,6 +2448,233 @@
     }
     if (removed) toast(`Удалено ${removed} ${pluralRu(removed, 'сообщение', 'сообщения', 'сообщений')}`);
     loadChats();
+  }
+
+  // --- macros in editors ------------------------------------------------------
+  /** Chips that insert {{user}} / {{charN}} where the cursor was in the layer's last focused [data-macro-target] field. */
+  function macroBarHtml(macros) {
+    const names = (macros && macros.names) || {};
+    const nums = Object.keys(names).map(Number).sort((a, b) => a - b);
+    return `<div class="macro-chips"><button class="chip sm" data-act="macro" data-macro="{{user}}">{{user}}</button>${nums.map(n =>
+      `<button class="chip sm" data-act="macro" data-macro="{{char${n}}}">{{char${n}}}${names[n] ? `<span class="chip-sub">${escapeHtml(names[n])}</span>` : ''}</button>`).join('')}</div>`;
+  }
+
+  function bindMacroBar(layer) {
+    let target = null;
+    layer.el.addEventListener('focusin', (e) => {
+      if (e.target.matches && e.target.matches('[data-macro-target]')) target = e.target;
+    });
+    // A tap on a chip must not move the cursor out of the field.
+    layer.el.addEventListener('mousedown', (e) => {
+      if (e.target.closest('[data-act="macro"]')) e.preventDefault();
+    });
+    bindActs(layer, {
+      macro: (el) => {
+        const field = target && layer.el.contains(target) ? target : $('[data-macro-target]', layer.el);
+        if (!field) return;
+        const macro = el.dataset.macro;
+        const s = field.selectionStart ?? field.value.length;
+        const e2 = field.selectionEnd ?? s;
+        field.value = field.value.slice(0, s) + macro + field.value.slice(e2);
+        field.focus();
+        field.setSelectionRange(s + macro.length, s + macro.length);
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      },
+    });
+  }
+
+  /** " Вместе с ним удалятся персонажи…" when replies about to go introduced characters (in any variant). */
+  function castLossNote(messages) {
+    const names = [];
+    (messages || []).forEach(m => (m.cast_swipes || [m.cast || []]).forEach(list => (list || []).forEach(c => {
+      if (!names.includes(c.name)) names.push(c.name);
+    })));
+    if (!names.length) return '';
+    return ` Вместе с ${messages.length > 1 ? 'ними' : 'ним'} удалятся персонажи из ответов: ${names.join(', ')}.`;
+  }
+
+  // --- the chat's characters: the card's and those the replies introduced ----
+  function scrollToMessage(msgId) {
+    const el = $(`#chatFeed [data-msg-id="${Number(msgId)}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 1600);
+  }
+
+  function openCastSheet() {
+    const room = state.room;
+    if (!room) return;
+    const chatId = room.chatId;
+    const data = () => (state.room && state.room.chatId === chatId ? state.room.data : null);
+
+    const render = () => {
+      const d = data();
+      if (!d) return '';
+      const ch = d.character || {};
+      const macros = castMacros(ch, d.persona, d.messages);
+      const card = cardCast(ch);
+      const story = storyCast(d.messages);
+      const world = ch.card ? String(ch.card.world || '').trim() : '';
+      const preview = (text) => stripMarkdownPreview(applyMacros(text, macros)).slice(0, 160) || 'Без описания';
+      const row = (c, act) => `<button class="row" data-act="${act}" data-n="${c.n}"${c.msgId ? ` data-msg="${c.msgId}"` : ''}>
+          <img class="avatar avatar-36" src="${escapeHtml(initialsAvatar(c.name))}" alt="" />
+          <div class="row-body"><div class="row-title">${escapeHtml(c.name)} <span class="cast-num">{{char${c.n}}}</span></div><div class="row-sub">${escapeHtml(preview(c.text))}</div></div>
+          ${ic('chevron-right', 'row-chevron')}</button>`;
+      return `
+        ${world ? `<div class="section"><div class="section-title">Мир</div><div class="list"><button class="row" data-act="world"><span class="row-icon">${ic('book')}</span><div class="row-body"><div class="row-title">Настройки мира</div><div class="row-sub">${escapeHtml(preview(world))}</div></div>${ic('chevron-right', 'row-chevron')}</button></div></div>` : ''}
+        <div class="section"><div class="section-title">Из карточки</div>
+          ${card.length ? `<div class="list">${card.map(c => row(c, 'card-char')).join('')}</div>` : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">В карточке нет персонажей — только мир.</div>'}
+        </div>
+        <div class="section"><div class="section-title">Появились в истории${story.length ? ' · ' + story.length : ''}</div>
+          ${story.length ? `<div class="list">${story.map(c => row(c, 'story-char')).join('')}</div>`
+            : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Пока никого. Когда модель введёт важного персонажа блоком &lt;new_character name="…"&gt;, он появится здесь: полное описание уйдёт в &lt;character_persona&gt;, а в ответе останется короткое. Формат блока задаёт ваш системный промпт.</div>'}
+        </div>`;
+    };
+
+    const layer = openSheet({ title: 'Персонажи', full: true, body: render() });
+    layer.chatId = chatId;
+    layer.refresh = () => {
+      const body = $('.sheet-body', layer.el);
+      const scroll = body.scrollTop;
+      layer.setBody(render());
+      body.scrollTop = scroll;
+    };
+    bindActs(layer, {
+      world: () => {
+        const d = data();
+        if (!d || !d.character.card) return;
+        openTextSheet('Настройки мира', applyMacros(d.character.card.world || '', castMacros(d.character, d.persona, d.messages)));
+      },
+      'card-char': (el) => openCardCharacter(Number(el.dataset.n)),
+      'story-char': (el) => openStoryCharacter(Number(el.dataset.msg), Number(el.dataset.n)),
+    });
+  }
+
+  /** A character of the chat's card, read-only (the card editor changes it). */
+  function openCardCharacter(n) {
+    const room = state.room;
+    if (!room) return;
+    const d = room.data;
+    const ch = d.character || {};
+    const c = cardCast(ch).find(x => x.n === n);
+    if (!c) return;
+    const text = applyMacros(c.text, castMacros(ch, d.persona, d.messages)).trim();
+    const layer = openSheet({
+      title: c.name,
+      full: true,
+      body: `<div class="cast-meta"><span class="cast-num">{{char${n}}}</span><span>из карточки «${escapeHtml(cardLabel(ch))}»</span></div>
+        ${text ? `<div class="prose">${escapeHtml(text)}</div>` : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Описание не заполнено.</div>'}`,
+      footer: findChar(ch.id) ? `<button class="btn btn-secondary btn-block" data-act="edit">${ic('edit')}Изменить карточку</button>` : '',
+    });
+    bindActs(layer, { edit: () => openCharacterEditor(ch.id) });
+  }
+
+  /** A character a reply introduced: rename, rewrite or delete its full description. */
+  function openStoryCharacter(msgId, n) {
+    const room = state.room;
+    if (!room) return;
+    const chatId = room.chatId;
+    const find = () => {
+      const d = state.room && state.room.chatId === chatId ? state.room.data : null;
+      const m = d && d.messages.find(x => x.id === msgId);
+      const c = m && Array.isArray(m.cast) ? m.cast.find(x => Number(x.n) === n) : null;
+      return { m, c };
+    };
+    const found = find();
+    if (!found.c) {
+      toast('Персонаж не найден: у ответа выбран другой вариант');
+      return;
+    }
+    const init = { name: found.c.name, text: found.c.text || '' };
+    const cur = Object.assign({}, init);
+    const dirty = () => cur.name !== init.name || cur.text !== init.text;
+    const busy = () => Boolean(state.generations[chatId]);
+    const layer = openSheet({
+      title: 'Персонаж из истории',
+      full: true,
+      body: `<div class="cast-meta"><span class="cast-num">{{char${n}}}</span><span>появился в ответе модели</span></div>
+        <label class="field"><span class="field-label">Имя</span><input class="input" data-field="name" value="${escapeHtml(cur.name)}" maxlength="80" autocomplete="off" /></label>
+        <label class="field"><span class="field-label">Полное описание · попадает в &lt;character_persona&gt;</span><textarea class="textarea" data-field="text">${escapeHtml(cur.text)}</textarea></label>
+        <div class="list"><button class="row" data-act="goto"><span class="row-icon">${ic('chat')}</span><div class="row-body"><div class="row-title">К сообщению</div><div class="row-sub">Ответ, в котором появился персонаж</div></div>${ic('chevron-right', 'row-chevron')}</button></div>
+        <div class="danger-zone"><button class="btn btn-danger btn-block" data-act="delete">${ic('trash')}Удалить персонажа</button>
+          <p class="section-hint">Полное описание удалится и больше не попадёт к модели. Короткое упоминание в ответе останется.</p></div>`,
+      footer: `<div class="btn-row"><button class="btn btn-secondary" data-action="layer-close">Закрыть</button><button class="btn btn-primary" data-act="save">Сохранить</button></div>`,
+      onBack: () => {
+        if (!dirty()) return true;
+        confirmDialog({ title: 'Выйти без сохранения?', message: 'Изменения будут потеряны.', confirmText: 'Выйти', cancelText: 'Остаться', danger: true })
+          .then(ok => ok && layer.close());
+        return false;
+      },
+    });
+    layer.chatId = chatId;
+    $$('textarea', layer.el).forEach(t => autoGrow(t));
+    layer.el.addEventListener('input', (e) => {
+      const f = e.target.dataset.field;
+      if (!f) return;
+      cur[f] = e.target.value;
+      if (e.target.tagName === 'TEXTAREA') autoGrow(e.target);
+    });
+    const putCast = async (cast) => {
+      const res = await api(`/api/messages/${msgId}`, { method: 'PUT', body: { cast } });
+      replaceMessage(chatId, res.message);
+      if (state.room && state.room.chatId === chatId) syncFeed({ scroll: 'keep' });
+      refreshLayers();
+    };
+    bindActs(layer, {
+      save: async (btn) => {
+        const name = cur.name.trim();
+        if (!name) {
+          toast('Введите имя персонажа');
+          return;
+        }
+        const { m } = find();
+        if (!m || busy()) {
+          toast(busy() ? 'Дождитесь окончания генерации' : 'Сообщение не найдено');
+          return;
+        }
+        btn.disabled = true;
+        try {
+          await putCast(m.cast.map(x => (Number(x.n) === n ? { n, name, text: cur.text } : x)));
+          Object.assign(init, cur);
+          layer.close();
+          toast('Персонаж сохранён', { type: 'success' });
+        } catch (e) {
+          btn.disabled = false;
+          toast(e.message, { type: 'error' });
+        }
+      },
+      delete: async () => {
+        const ok = await confirmDialog({
+          title: `Удалить «${init.name}»?`,
+          message: 'Полное описание удалится и больше не попадёт к модели. Короткое упоминание в ответе останется.',
+          confirmText: 'Удалить',
+          danger: true,
+        });
+        if (!ok) return;
+        const { m } = find();
+        if (!m || busy()) {
+          toast(busy() ? 'Дождитесь окончания генерации' : 'Сообщение не найдено');
+          return;
+        }
+        try {
+          await putCast(m.cast.filter(x => Number(x.n) !== n));
+          Object.assign(cur, init);
+          layer.close();
+          toast('Персонаж удалён');
+        } catch (e) {
+          toast(e.message, { type: 'error' });
+        }
+      },
+      goto: () => {
+        if (dirty()) {
+          toast('Сначала сохраните изменения или закройте без сохранения');
+          return;
+        }
+        closeLayersAbove(null);
+        scrollToMessage(msgId);
+      },
+    });
   }
 
   // --- chat settings sheet --------------------------------------------------
@@ -2316,25 +2702,27 @@
       const ch = d.character || {};
       const chat = d.chat;
       const prov = providerOf(chat.model_id);
-      const custom = isDefaultChatTitle(chat.title, ch.name) ? '' : chat.title;
+      const custom = isDefaultChatTitle(chat.title, ch.name, ch.title) ? '' : chat.title;
       const msgCount = (d.messages || []).length;
+      const castCount = cardCast(ch).length + storyCast(d.messages).length;
       return `
         <div style="display:flex;align-items:center;gap:14px;padding:4px 0 14px">
-          <img class="avatar avatar-52" src="${escapeHtml(resolveAvatarUrl(ch.avatar_url, ch.name))}" alt="" />
-          <div class="row-body"><div class="row-title" style="font-size:var(--fs-lg)">${escapeHtml(ch.name || 'Персонаж')}</div><div class="row-sub">${msgCount} ${pluralRu(msgCount, 'сообщение', 'сообщения', 'сообщений')}</div></div>
+          <img class="avatar avatar-52" src="${escapeHtml(resolveAvatarUrl(ch.avatar_url, cardLabel(ch)))}" alt="" />
+          <div class="row-body"><div class="row-title" style="font-size:var(--fs-lg)">${escapeHtml(cardLabel(ch))}</div><div class="row-sub">${msgCount} ${pluralRu(msgCount, 'сообщение', 'сообщения', 'сообщений')}</div></div>
         </div>
-        <label class="field"><span class="field-label">Название чата</span><input class="input" data-role="title" value="${escapeHtml(custom)}" placeholder="${escapeHtml(ch.name || 'Без названия')}" maxlength="120" autocomplete="off" /><span class="field-hint">Помогает различать несколько историй с одним персонажем.</span></label>
+        <label class="field"><span class="field-label">Название чата</span><input class="input" data-role="title" value="${escapeHtml(custom)}" placeholder="${escapeHtml(cardLabel(ch))}" maxlength="120" autocomplete="off" /><span class="field-hint">Помогает различать несколько историй с одним персонажем.</span></label>
         <div class="section">
           <div class="section-title">Модель этого чата</div>
           <div class="list"><button class="row" data-act="model"><span class="row-icon">${ic(PROVIDERS[prov].icon)}</span><div class="row-body"><div class="row-title">${escapeHtml(modelName(chat.model_id))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effectiveEffort(chat.model_id, chat.effort, state.models) ? ' · ' + EFFORT_LABELS[effectiveEffort(chat.model_id, chat.effort, state.models)] : ''}</div></div>${ic('chevron-right', 'row-chevron')}</button></div>
         </div>
         <div class="section">
           <div class="section-title">Вы играете за</div>
-          ${state.personas.length ? `<div class="chips wrap">${state.personas.map(p => `<button class="chip${p.id === Number(chat.persona_id) ? ' active' : ''}" data-act="persona" data-id="${p.id}"><img class="avatar avatar-24" src="${escapeHtml(resolveAvatarUrl(p.avatar_url, p.name))}" alt="" />${escapeHtml(p.name)}</button>`).join('')}</div>` : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Персон пока нет. Создайте её во вкладке «Персоны».</div>'}
+          ${state.personas.length ? personaChipsHtml(chat.persona_id) : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Персон пока нет. Создайте её во вкладке «Персоны».</div>'}
         </div>
         <div class="section">
           <div class="section-title">Контекст</div>
           <div class="list">
+            <button class="row" data-act="cast"><span class="row-icon">${ic('users')}</span><div class="row-body"><div class="row-title">Персонажи · ${castCount}</div><div class="row-sub">Из карточки и появившиеся в истории</div></div>${ic('chevron-right', 'row-chevron')}</button>
             <button class="row" data-act="memory"><span class="row-icon">${ic('book')}</span><div class="row-body"><div class="row-title">Память чата</div><div class="row-sub">Заметки для модели в &lt;chat_memory&gt;</div></div>${ic('chevron-right', 'row-chevron')}</button>
             <button class="row" data-act="prompt"><span class="row-icon">${ic('eye')}</span><div class="row-body"><div class="row-title">Итоговый системный промпт</div><div class="row-sub">Ровно то, что получает модель</div></div>${ic('chevron-right', 'row-chevron')}</button>
             <button class="row" data-act="diag"><span class="row-icon">${ic('activity')}</span><div class="row-body"><div class="row-title">Последняя генерация</div><div class="row-sub">Журнал, мысли, параметры запроса</div></div>${ic('chevron-right', 'row-chevron')}</button>
@@ -2364,7 +2752,7 @@
       const value = input.value.trim();
       const d = state.room && state.room.data;
       if (!d) return;
-      const current = isDefaultChatTitle(d.chat.title, d.character.name) ? '' : d.chat.title;
+      const current = isDefaultChatTitle(d.chat.title, d.character.name, d.character.title) ? '' : d.chat.title;
       if (value === current) return;
       try {
         await patchChat(chatId, { title: value });
@@ -2404,6 +2792,7 @@
           toast(e.message, { type: 'error' });
         }
       },
+      cast: () => openCastSheet(),
       memory: () => {
         const chat = state.room.data.chat;
         openMemoryEditor(chat.memory_file_path || `memories/chat_${chatId}.md`);
@@ -2419,18 +2808,29 @@
     });
   }
 
-  /** What a model gets besides the system prompt; nothing else is added or changed. */
-  function deliveryNote(modelId) {
+  /**
+   * What a model gets besides the system prompt; nothing else is added or
+   * changed. Mirrors buildClaudeTranscript() / generateRoleplayReply() in
+   * LocalBackendServer.java (character: the chat's card).
+   */
+  function deliveryNote(modelId, character) {
+    const card = cardCast(character || null);
+    const single = card.length === 1 ? card[0].name : '';
+    const shared = ' Макросы {{user}} и {{charN}} в сообщениях заменяются именами. Блоки <new_character name="…"> из ответов модели вынимаются: полное описание уходит в <character_persona>, а в истории остаётся остальной текст ответа.';
     if (isClaudeCliModel(modelId)) {
-      return 'Claude Code получает историю чата одним сообщением: каждая реплика с именем говорящего, а в конце задание — «Продолжи ролевую игру одной следующей репликой за персонажа «…». Выведи только сам ответ персонажа без служебных пометок, имени в начале и мета-комментариев.»';
+      const task = single
+        ? `Продолжи ролевую игру одной следующей репликой за персонажа «${single}». Выведи только сам ответ персонажа без имени в начале и мета-комментариев.`
+        : 'Продолжи ролевую игру одной следующей репликой. Выведи только сам ответ без имени в начале и мета-комментариев.';
+      return `Claude Code получает историю чата одним сообщением: каждая реплика с именем говорящего (ответы модели подписаны «${single || 'Рассказчик'}»), а в конце задание — «${task}»` + shared;
     }
-    return 'История чата передаётся целиком и без изменений. Если чат начинается с приветствия персонажа, перед ним стоит служебная реплика «[Начало ролевой игры]»: API требует, чтобы первой шла реплика игрока.';
+    return 'История чата передаётся целиком, текст сообщений не переписывается. Если чат начинается с приветствия персонажа, перед ним стоит служебная реплика «[Начало ролевой игры]»: API требует, чтобы первой шла реплика игрока.' + shared;
   }
 
   async function openPromptPreview(chatId) {
     const layer = openSheet({ title: 'Системный промпт чата', full: true, body: '<div class="empty"><span class="spinner"></span></div>' });
-    const chat = state.room && state.room.chatId === chatId ? state.room.data.chat : null;
-    const note = `<details class="disclosure" style="margin:0 0 12px"><summary>Что ещё получает модель ${ic('chevron-down', 'ic-sm')}</summary><p class="section-hint" style="margin:6px 0 0">${escapeHtml(deliveryNote(chat && chat.model_id))}</p></details>`;
+    const room = state.room && state.room.chatId === chatId ? state.room.data : null;
+    const chat = room ? room.chat : null;
+    const note = `<details class="disclosure" style="margin:0 0 12px"><summary>Что ещё получает модель ${ic('chevron-down', 'ic-sm')}</summary><p class="section-hint" style="margin:6px 0 0">${escapeHtml(deliveryNote(chat && chat.model_id, room && room.character))}</p></details>`;
     try {
       const res = await api(`/api/chats/${chatId}/system-prompt`);
       const text = res.systemPrompt || '';
@@ -2534,12 +2934,14 @@
     const { chat, character, persona } = src.data;
     const messages = src.data.messages || [];
     const ext = o.format === 'json' ? 'json' : 'md';
-    const filename = `chat_${chat.id}_${sanitizeFilenamePart(character && character.name)}.${ext}`;
+    const filename = `chat_${chat.id}_${sanitizeFilenamePart(cardLabel(character))}.${ext}`;
+    // As the chat shows it: names instead of {{user}} / {{charN}}.
+    const macros = castMacros(character, persona, messages);
     const variants = (m) => {
-      const swipes = Array.isArray(m.swipes) && m.swipes.length ? m.swipes : [m.content || ''];
+      const swipes = (Array.isArray(m.swipes) && m.swipes.length ? m.swipes : [m.content || '']).map(t => applyMacros(t, macros));
       const idx = Math.min(Math.max(0, Number(m.swipe_index) || 0), swipes.length - 1);
       const thoughtSwipes = Array.isArray(m.thought_swipes) ? m.thought_swipes : [];
-      return { swipes, idx, text: swipes[idx] || m.content || '', thoughts: m.thoughts || thoughtSwipes[idx] || '', thoughtSwipes };
+      return { swipes, idx, text: swipes[idx] || applyMacros(m.content || '', macros), thoughts: m.thoughts || thoughtSwipes[idx] || '', thoughtSwipes };
     };
 
     if (o.format === 'json') {
@@ -2547,15 +2949,16 @@
         exportedAt: new Date().toISOString(),
         appVersion: state.webVersion || (state.updateInfo && state.updateInfo.currentVersion) || '',
         chat: { id: chat.id, title: chat.title, model_id: chat.model_id, model_label: modelName(chat.model_id), effort: chat.effort, created_at: chat.created_at || '' },
-        character: { id: character && character.id, name: character && character.name, file_path: character && character.file_path, first_message: character && character.first_message },
-        persona: { id: persona && persona.id, name: persona && persona.name, file_path: persona && persona.file_path },
+        character: { id: character && character.id, name: character && character.name, title: character && character.title, file_path: character && character.file_path, first_message: character && character.first_message },
+        persona: { id: persona && persona.id, name: persona && persona.name, title: persona && persona.title, file_path: persona && persona.file_path },
       };
       if (o.prompts) {
         payload.context = { systemPrompt: src.systemPrompt };
       }
       payload.messages = messages.map((m, i) => {
         const v = variants(m);
-        const out = { index: i + 1, id: m.id, role: m.role, author: m.role === 'user' ? (persona && persona.name) : (character && character.name), created_at: m.created_at, content: v.text };
+        const out = { index: i + 1, id: m.id, role: m.role, author: m.role === 'user' ? (persona && persona.name) : cardLabel(character), created_at: m.created_at, content: v.text };
+        if (Array.isArray(m.cast) && m.cast.length) out.new_characters = m.cast;
         if (o.thoughts && v.thoughts) out.thoughts = v.thoughts;
         if (o.variants && v.swipes.length > 1) {
           out.swipe_index = v.idx;
@@ -2569,9 +2972,9 @@
     }
 
     const lines = [];
-    const charName = (character && character.name) || 'Персонаж';
+    const charName = cardLabel(character);
     const personaName = (persona && persona.name) || 'Игрок';
-    lines.push(`# ${isDefaultChatTitle(chat.title, charName) ? charName : chat.title}`);
+    lines.push(`# ${isDefaultChatTitle(chat.title, character && character.name, character && character.title) ? charName : chat.title}`);
     lines.push('');
     lines.push(`- **Персонаж:** ${charName}`);
     lines.push(`- **Персона:** ${personaName}`);
@@ -2599,6 +3002,9 @@
         lines.push('<details>', `<summary>Мысли (${v.thoughts.length} симв.)</summary>`, '', '```text', v.thoughts.trim(), '```', '</details>', '');
       }
       lines.push(v.text || '*(пусто)*', '');
+      if (Array.isArray(m.cast) && m.cast.length) {
+        lines.push(`*${m.cast.length > 1 ? 'Новые персонажи' : 'Новый персонаж'}: ${m.cast.map(c => `${c.name} ({{char${c.n}}})`).join(', ')}*`, '');
+      }
       if (o.variants && v.swipes.length > 1) {
         lines.push('<details>', `<summary>Все варианты (${v.swipes.length})</summary>`, '');
         v.swipes.forEach((s, si) => lines.push(`#### Вариант ${si + 1}${si === v.idx ? ' (выбран)' : ''}`, '', s || '*(пусто)*', ''));
@@ -2741,30 +3147,33 @@
     }
     if (!state.characters.length) {
       toolbar.innerHTML = '';
-      host.innerHTML = emptyHtml('mask', 'Персонажей пока нет', 'Персонаж — это имя, портрет, описание (оно попадает в &lt;character_persona&gt;) и приветствие, с которого начинается чат.',
+      host.innerHTML = emptyHtml('mask', 'Персонажей пока нет', 'Карточка — это портрет, настройки мира и один или несколько персонажей (всё попадает в &lt;character_persona&gt;) и приветствие, с которого начинается чат.',
         `<button class="btn btn-primary" data-action="new-character">${ic('plus')}Создать персонажа</button>`);
       return;
     }
     toolbar.innerHTML = state.characters.length > 1
       ? `<div class="chips" style="margin-bottom:12px"><button class="chip sm${state.charsSort === 'name' ? ' active' : ''}" data-action="chars-sort" data-sort="name">По имени</button><button class="chip sm${state.charsSort === 'recent' ? ' active' : ''}" data-action="chars-sort" data-sort="recent">Недавние</button></div>`
       : '';
-    const q = state.charsQuery.trim().toLowerCase();
-    let list = state.characters.filter(c => !q || c.name.toLowerCase().includes(q) || String(c.description_preview || '').toLowerCase().includes(q));
+    let list = state.characters.filter(c => cardMatches(c, state.charsQuery));
+    const byLabel = (a, b) => cardLabel(a).localeCompare(cardLabel(b), 'ru');
     if (state.charsSort === 'recent') {
       const lastOf = (c) => {
         const t = chatActivityTime(chatsOfCharacter(c.id)[0]);
         return t ? t.getTime() : 0;
       };
-      list = list.slice().sort((a, b) => lastOf(b) - lastOf(a) || a.name.localeCompare(b.name, 'ru'));
+      list = list.slice().sort((a, b) => lastOf(b) - lastOf(a) || byLabel(a, b));
     } else {
-      list = list.slice().sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+      list = list.slice().sort(byLabel);
     }
     host.innerHTML = list.length
       ? `<div class="char-grid">${list.map(c => {
         const n = chatsOfCharacter(c.id).length;
-        const desc = stripMarkdownPreview(c.description_preview || c.fileContent || '') || 'Без описания';
+        // A card of several characters lists them; one of a single character shows its description.
+        const cast = c.card ? cardCast(c) : [];
+        const desc = (cast.length > 1 ? cast.map(m => m.name).join(', ') + ' · ' : '')
+          + (stripMarkdownPreview(c.description_preview || (c.card ? '' : c.fileContent) || '') || (cast.length > 1 ? '' : 'Без описания'));
         return `<div class="char-card" role="button" tabindex="0" data-action="open-character" data-id="${c.id}">
-          <div class="char-portrait"><img src="${escapeHtml(resolveAvatarUrl(c.avatar_url, c.name))}" alt="" /><div class="char-portrait-name">${escapeHtml(c.name)}</div></div>
+          <div class="char-portrait"><img src="${escapeHtml(resolveAvatarUrl(c.avatar_url, cardLabel(c)))}" alt="" /><div class="char-portrait-name">${escapeHtml(cardLabel(c))}</div></div>
           <div class="char-card-body"><div class="char-card-desc">${escapeHtml(desc)}</div><div class="char-card-meta">${ic('chat')}${n ? `${n} ${pluralRu(n, 'чат', 'чата', 'чатов')}` : 'Нет чатов'}</div></div>
         </div>`;
       }).join('')}</div>`
@@ -2774,38 +3183,53 @@
   function openCharacterPage(charId) {
     const id = Number(charId);
     if (!findChar(id)) return;
-    let showFullDesc = false;
-    let showFullGreeting = false;
+    // Long texts are folded; these are the open ones: 'greeting', 'world', 'desc' or a character's number.
+    const open = new Set();
+
+    const foldable = (key, text, html) => `<div class="card card-pad"><div class="prose${key === 'greeting' ? ' msg-text' : ''}${!open.has(key) && text.length > 420 ? ' clamp' : ''}">${html}</div>${text.length > 420 ? `<button class="btn btn-ghost btn-sm" style="margin-top:6px;padding:0" data-act="more" data-key="${key}">${open.has(key) ? 'Свернуть' : 'Показать полностью'}</button>` : ''}</div>`;
 
     const render = () => {
       const c = findChar(id);
       if (!c) return emptyHtml('mask', 'Персонаж удалён', '');
       const chats = chatsOfCharacter(id);
-      const desc = String(c.fileContent || c.description_preview || '').trim();
       const greeting = String(c.first_message || '').trim();
+      const cast = cardCast(c);
+      const names = cast.map(m => m.name).join(', ');
+      let body;
+      if (c.card) {
+        // Structured: world settings, then each character with its macro.
+        const world = String(c.card.world || '').trim();
+        body = `${world ? `<div class="section"><div class="section-title">Настройки мира · &lt;world_settings&gt;</div>${foldable('world', world, escapeHtml(world))}</div>` : ''}
+          <div class="section"><div class="section-title">Персонажи · ${cast.length}</div>
+            ${cast.length ? cast.map(m => `<div class="cast-card"><div class="cast-card-head"><span class="cast-card-name">${escapeHtml(m.name)}</span><span class="cast-num">{{char${m.n}}}</span></div>
+              ${m.text.trim() ? foldable(String(m.n), m.text.trim(), escapeHtml(m.text.trim())) : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Описание не заполнено.</div>'}</div>`).join('')
+              : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Только мир — персонажи появятся по ходу истории.</div>'}
+          </div>`;
+      } else {
+        const desc = String(c.fileContent || c.description_preview || '').trim();
+        body = `<div class="section">
+          <div class="section-title">Описание · попадает в &lt;character_persona&gt;</div>
+          ${desc ? foldable('desc', desc, escapeHtml(desc))
+            : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Описание не заполнено — модель почти ничего не знает о персонаже.</div>'}
+        </div>`;
+      }
       return `
-        <div class="hero" data-act="view"><img src="${escapeHtml(resolveAvatarUrl(c.avatar_url, c.name))}" alt="" /></div>
-        <h1 class="hero-name">${escapeHtml(c.name)}</h1>
-        <div class="hero-meta">${chats.length ? `${chats.length} ${pluralRu(chats.length, 'чат', 'чата', 'чатов')}` : 'Ещё нет чатов'}</div>
+        <div class="hero" data-act="view"><img src="${escapeHtml(resolveAvatarUrl(c.avatar_url, cardLabel(c)))}" alt="" /></div>
+        <h1 class="hero-name">${escapeHtml(cardLabel(c))}</h1>
+        <div class="hero-meta">${c.card && names && names !== cardLabel(c) ? escapeHtml(names) + ' · ' : ''}${chats.length ? `${chats.length} ${pluralRu(chats.length, 'чат', 'чата', 'чатов')}` : 'Ещё нет чатов'}</div>
         <div class="section">
           <div class="section-title">Приветствие</div>
-          ${greeting
-            ? `<div class="card card-pad"><div class="prose msg-text${!showFullGreeting && greeting.length > 360 ? ' clamp' : ''}">${formatRoleplayHtml(greeting, { dialogue: prefs.dialogue })}</div>${greeting.length > 360 ? `<button class="btn btn-ghost btn-sm" style="margin-top:6px;padding:0" data-act="more-greeting">${showFullGreeting ? 'Свернуть' : 'Показать полностью'}</button>` : ''}</div>`
+          ${greeting ? foldable('greeting', greeting, formatRoleplayHtml(greeting, { dialogue: prefs.dialogue }))
             : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Нет приветствия — первым пишет игрок.</div>'}
         </div>
-        <div class="section">
-          <div class="section-title">Описание · попадает в &lt;character_persona&gt;</div>
-          ${desc
-            ? `<div class="card card-pad"><div class="prose${!showFullDesc && desc.length > 420 ? ' clamp' : ''}">${escapeHtml(desc)}</div>${desc.length > 420 ? `<button class="btn btn-ghost btn-sm" style="margin-top:6px;padding:0" data-act="more-desc">${showFullDesc ? 'Свернуть' : 'Показать полностью'}</button>` : ''}</div>`
-            : '<div class="card card-pad muted" style="font-size:var(--fs-sm)">Описание не заполнено — модель почти ничего не знает о персонаже.</div>'}
-        </div>
-        ${chats.length ? `<div class="section"><div class="section-title">Чаты</div><div class="list">${chats.map(ch => `<button class="row" data-act="chat" data-id="${ch.id}"><span class="row-icon">${ic('chat')}</span><div class="row-body"><div class="row-title">${escapeHtml(isDefaultChatTitle(ch.title, c.name) ? (ch.persona_name || 'Чат') : ch.title)}</div><div class="row-sub">${escapeHtml(stripMarkdownPreview(ch.last_message) || 'Без сообщений')}</div></div><span class="row-value">${escapeHtml(formatRelativeTime(chatActivityTime(ch)))}</span></button>`).join('')}</div></div>` : ''}
+        ${body}
+        ${chats.length ? `<div class="section"><div class="section-title">Чаты</div><div class="list">${chats.map(ch => `<button class="row" data-act="chat" data-id="${ch.id}"><span class="row-icon">${ic('chat')}</span><div class="row-body"><div class="row-title">${escapeHtml(isDefaultChatTitle(ch.title, c.name, c.title) ? (ch.persona_title || ch.persona_name || 'Чат') : ch.title)}</div><div class="row-sub">${escapeHtml(chatPreview(ch) || 'Без сообщений')}</div></div><span class="row-value">${escapeHtml(formatRelativeTime(chatActivityTime(ch)))}</span></button>`).join('')}</div></div>` : ''}
       `;
     };
 
     const c0 = findChar(id);
     const layer = openPage({
-      title: c0.name,
+      title: cardLabel(c0),
       body: render(),
       actions: `<button class="icon-btn" data-act="edit" aria-label="Изменить">${ic('edit')}</button>`,
       footer: `<button class="btn btn-primary btn-block" data-act="start">${ic('chat-plus')}Начать новый чат</button>`,
@@ -2814,7 +3238,7 @@
     layer.cardKind = 'character';
     layer.refresh = () => {
       const c = findChar(id);
-      if (c) layer.setTitle(escapeHtml(c.name));
+      if (c) layer.setTitle(escapeHtml(cardLabel(c)));
       const body = $('.page-body', layer.el);
       const scroll = body.scrollTop;
       layer.setBody(render());
@@ -2823,7 +3247,7 @@
     bindActs(layer, {
       view: () => {
         const c = findChar(id);
-        if (c) openImageViewer(resolveAvatarUrl(c.avatar_url, c.name), c.name);
+        if (c) openImageViewer(resolveAvatarUrl(c.avatar_url, cardLabel(c)), cardLabel(c));
       },
       edit: () => openCharacterEditor(id),
       start: () => openNewChat(id),
@@ -2832,12 +3256,10 @@
         closeLayersAbove(null);
         openChatRoom(Number(el.dataset.id));
       },
-      'more-desc': () => {
-        showFullDesc = !showFullDesc;
-        layer.refresh();
-      },
-      'more-greeting': () => {
-        showFullGreeting = !showFullGreeting;
+      more: (el) => {
+        const key = el.dataset.key;
+        if (open.has(key)) open.delete(key);
+        else open.add(key);
         layer.refresh();
       },
     });
@@ -2876,51 +3298,102 @@
 
   /**
    * Shared editor for characters (kind='character') and personas (kind='persona').
-   * The description is saved verbatim as the card file (rawFileContent) — that
-   * exact text is what the model receives inside <character_persona>/<user_persona>.
+   * A character card has a title only the user sees, world settings and
+   * numbered characters ({{char1}}, {{char2}}…), sent as card; the engine turns
+   * them into <world_settings> and <character name="…"> blocks. A free-text card
+   * from before 1.9 opens as its character 1. A persona is a title, a name
+   * ({{user}}) and a description saved verbatim (rawFileContent).
    */
   function openCardEditor(kind, id) {
     const isChar = kind === 'character';
     const item = id ? (isChar ? findChar(id) : findPersona(id)) : null;
+    const legacy = Boolean(isChar && item && !item.card);
     const init = {
-      name: item ? item.name : '',
-      description: item ? String(item.fileContent ?? item.description_preview ?? '') : '',
+      title: item ? String(item.title || '') : '',
+      name: item && !isChar ? item.name : '',
+      description: item && !isChar ? String(item.fileContent ?? item.description_preview ?? '') : '',
+      world: isChar && item && item.card ? String(item.card.world || '') : '',
+      chars: isChar ? (item ? cardCast(item).map(c => ({ n: c.n, name: c.name, text: c.text })) : [{ n: 1, name: '', text: '' }]) : [],
       greeting: item && isChar ? (item.first_message || '') : '',
       avatarUrl: item ? (item.avatar_url || '') : '',
       filePath: item ? (item.file_path || '') : '',
     };
-    const cur = Object.assign({}, init);
+    const cur = JSON.parse(JSON.stringify(init));
+    // The number the next added character gets. For a saved card the engine
+    // also counts the characters its chats' replies introduced (GET below).
+    let nextNum = Math.max(1, ...init.chars.map(c => c.n + 1), item && item.card ? Number(item.card.next) || 1 : (item ? 2 : 1));
+    let numbersReady = !(isChar && item);
     let saving = false;
-    const dirty = () => Object.keys(init).some(k => init[k] !== cur[k]);
-    const noun = isChar ? 'персонажа' : 'персону';
-    const tag = isChar ? '&lt;character_persona&gt;' : '&lt;user_persona&gt;';
+    const dirty = () => JSON.stringify(init) !== JSON.stringify(cur);
+    const noun = isChar ? 'карточку' : 'персону';
     const chatsCount = item && isChar ? chatsOfCharacter(item.id).length : 0;
+    const label = () => (isChar ? (cur.title.trim() || (cur.chars.find(c => c.name.trim()) || {}).name || '') : (cur.title.trim() || cur.name.trim()));
 
-    const body = `
+    const charBlockHtml = (c) => `<div class="char-block" data-n="${c.n}">
+        <div class="char-block-head"><span class="cast-num">{{char${c.n}}}</span><span class="char-block-label">Персонаж</span>
+          <button class="icon-btn sm" data-act="remove-char" data-n="${c.n}" aria-label="Удалить персонажа">${ic('trash', 'ic-sm')}</button></div>
+        <label class="field"><span class="field-label">Имя</span>
+          <input class="input" data-char-field="name" data-n="${c.n}" value="${escapeHtml(c.name)}" placeholder="Например, Кира" maxlength="80" autocomplete="off" /></label>
+        <label class="field"><span class="field-label">Описание</span>
+          <textarea class="textarea" data-char-field="text" data-n="${c.n}" data-macro-target="1" placeholder="Внешность, характер, манера речи, прошлое, отношения с {{user}} и другими персонажами…">${escapeHtml(c.text)}</textarea></label>
+      </div>`;
+    const macroNames = () => {
+      const names = {};
+      cur.chars.forEach(c => {
+        names[c.n] = c.name.trim();
+      });
+      return { names };
+    };
+
+    const body = isChar ? `
       <div class="avatar-picker">
-        <button class="avatar-picker-btn${isChar ? '' : ' round'}" data-act="avatar" aria-label="Изменить изображение">
-          <img data-role="avatar" src="${escapeHtml(resolveAvatarUrl(cur.avatarUrl, cur.name))}" alt="" />
+        <button class="avatar-picker-btn" data-act="avatar" aria-label="Изменить изображение">
+          <img data-role="avatar" src="${escapeHtml(resolveAvatarUrl(cur.avatarUrl, label()))}" alt="" />
           <span class="avatar-picker-badge">${ic('camera')}</span>
         </button>
         <input type="file" accept="image/*" class="hidden" data-role="file" />
       </div>
-      <label class="field"><span class="field-label">Имя</span>
-        <input class="input" data-field="name" value="${escapeHtml(cur.name)}" placeholder="${isChar ? 'Например, Кира' : 'Как вас зовут в истории'}" maxlength="80" autocomplete="off" /></label>
-      <label class="field"><span class="field-label">${isChar ? 'Описание персонажа' : 'Описание персоны'}</span>
-        <textarea class="textarea" data-field="description" placeholder="${isChar ? 'Кто это: внешность, характер, манера речи, прошлое, отношения с {{user}}…' : 'Кто вы: внешность, характер, навыки, цели…'}">${escapeHtml(cur.description)}</textarea>
-        <span class="field-hint">Текст целиком попадает в системный промпт внутри ${tag}. Макросы {{char}} и {{user}} подставляются.</span></label>
-      ${isChar ? `<label class="field"><span class="field-label">Приветствие</span>
-        <textarea class="textarea" data-field="greeting" placeholder="Первое сообщение персонажа в новом чате. Можно оставить пустым.">${escapeHtml(cur.greeting)}</textarea>
-        <div class="macro-chips"><button class="chip sm" data-act="macro" data-macro="{{char}}">{{char}}</button><button class="chip sm" data-act="macro" data-macro="{{user}}">{{user}}</button></div></label>` : ''}
+      <label class="field"><span class="field-label">Название · видите только вы</span>
+        <input class="input" data-field="title" value="${escapeHtml(cur.title)}" placeholder="Например, Таверна «Сломанный меч»" maxlength="120" autocomplete="off" />
+        <span class="field-hint">Для списков и чатов, модели не отправляется. Пусто — будет имя первого персонажа.</span></label>
+      ${legacy ? `<div class="inline-note">${ic('info', 'ic-xs')}<span>Карточка старого формата: весь её текст стал описанием персонажа {{char1}}. Если в нём несколько персонажей или мир, разнесите их по полям ниже.</span></div>` : ''}
+      <label class="field"><span class="field-label">Настройки мира</span>
+        <textarea class="textarea" data-field="world" data-macro-target="1" placeholder="Мир, место действия, эпоха, правила, общая обстановка. Можно оставить пустым.">${escapeHtml(cur.world)}</textarea>
+        <span class="field-hint">Попадает к модели в &lt;world_settings&gt;.</span></label>
+      <div class="section-title" style="margin-top:20px">Персонажи</div>
+      <div data-role="chars">${cur.chars.map(charBlockHtml).join('')}</div>
+      <button class="btn btn-secondary btn-block" data-act="add-char"${numbersReady ? '' : ' disabled'}>${ic('plus')}Добавить персонажа</button>
+      <p class="section-hint">Каждый персонаж уходит к модели блоком &lt;character name="Имя"&gt;. В любом поле карточки пишите {{char1}}, {{char2}}… и {{user}} — подставятся имена, поэтому персонажа достаточно переименовать здесь. Номер навсегда закреплён за персонажем.</p>
+      <label class="field"><span class="field-label">Приветствие</span>
+        <textarea class="textarea" data-field="greeting" data-macro-target="1" placeholder="Первое сообщение в новом чате. Можно оставить пустым.">${escapeHtml(cur.greeting)}</textarea></label>
       ${item ? `<div class="danger-zone"><button class="btn btn-danger btn-block" data-act="delete">${ic('trash')}Удалить ${noun}</button>
-        ${chatsCount ? `<p class="section-hint">${chatsCount} ${pluralRu(chatsCount, 'чат останется', 'чата останутся', 'чатов останутся')} без карточки персонажа.</p>` : ''}</div>` : ''}`;
+        ${chatsCount ? `<p class="section-hint">${chatsCount} ${pluralRu(chatsCount, 'чат останется', 'чата останутся', 'чатов останутся')} без карточки.</p>` : ''}</div>` : ''}`
+    : `
+      <div class="avatar-picker">
+        <button class="avatar-picker-btn round" data-act="avatar" aria-label="Изменить изображение">
+          <img data-role="avatar" src="${escapeHtml(resolveAvatarUrl(cur.avatarUrl, label()))}" alt="" />
+          <span class="avatar-picker-badge">${ic('camera')}</span>
+        </button>
+        <input type="file" accept="image/*" class="hidden" data-role="file" />
+      </div>
+      <label class="field"><span class="field-label">Название · видите только вы</span>
+        <input class="input" data-field="title" value="${escapeHtml(cur.title)}" placeholder="Например, Кадзума — маг" maxlength="120" autocomplete="off" />
+        <span class="field-hint">Чтобы не путать похожие персоны. Модели не отправляется.</span></label>
+      <label class="field"><span class="field-label">Имя</span>
+        <input class="input" data-field="name" value="${escapeHtml(cur.name)}" placeholder="Как вас зовут в истории" maxlength="80" autocomplete="off" />
+        <span class="field-hint">Подставляется вместо {{user}}.</span></label>
+      <label class="field"><span class="field-label">Описание персоны</span>
+        <textarea class="textarea" data-field="description" placeholder="Кто вы: внешность, характер, навыки, цели…">${escapeHtml(cur.description)}</textarea>
+        <span class="field-hint">Текст целиком попадает в системный промпт внутри &lt;user_persona&gt;. Макросы {{user}} и {{charN}} подставляются.</span></label>
+      ${item ? `<div class="danger-zone"><button class="btn btn-danger btn-block" data-act="delete">${ic('trash')}Удалить ${noun}</button></div>` : ''}`;
 
-    const title = item ? (isChar ? 'Изменить персонажа' : 'Изменить персону') : (isChar ? 'Новый персонаж' : 'Новая персона');
+    const title = item ? (isChar ? 'Изменить карточку' : 'Изменить персону') : (isChar ? 'Новая карточка' : 'Новая персона');
     const layer = openPage({
       title,
       backIcon: 'x',
       body,
       actions: `<button class="btn btn-ghost" data-act="save">Сохранить</button>`,
+      footer: isChar ? `<div class="macro-bar" data-role="macros">${macroBarHtml(macroNames())}</div>` : '',
       onBack: () => {
         if (!dirty() || saving) return true;
         confirmDialog({ title: 'Выйти без сохранения?', message: 'Изменения будут потеряны.', confirmText: 'Выйти', cancelText: 'Остаться', danger: true })
@@ -2931,15 +3404,29 @@
 
     const updateTitle = () => layer.setTitle(escapeHtml(title) + (dirty() ? '<span class="dirty-dot" title="Есть несохранённые изменения"></span>' : ''));
     const updateAvatar = () => {
-      $('[data-role="avatar"]', layer.el).src = resolveAvatarUrl(cur.avatarUrl, cur.name);
+      $('[data-role="avatar"]', layer.el).src = resolveAvatarUrl(cur.avatarUrl, label());
+    };
+    const updateMacros = () => {
+      const bar = $('[data-role="macros"]', layer.el);
+      if (bar) bar.innerHTML = macroBarHtml(macroNames());
     };
     $$('textarea', layer.el).forEach(t => autoGrow(t));
     layer.el.addEventListener('input', (e) => {
-      const f = e.target.dataset.field;
-      if (!f) return;
-      cur[f] = e.target.value;
-      if (e.target.tagName === 'TEXTAREA') autoGrow(e.target);
-      if (f === 'name' && !cur.avatarUrl) updateAvatar();
+      const t = e.target;
+      const f = t.dataset.field;
+      const cf = t.dataset.charField;
+      if (f) {
+        cur[f] = t.value;
+      } else if (cf) {
+        const c = cur.chars.find(x => x.n === Number(t.dataset.n));
+        if (!c) return;
+        c[cf] = t.value;
+        if (cf === 'name') updateMacros();
+      } else {
+        return;
+      }
+      if (t.tagName === 'TEXTAREA') autoGrow(t);
+      if (!cur.avatarUrl && (f === 'title' || f === 'name' || cf === 'name')) updateAvatar();
       updateTitle();
     });
     const fileInput = $('[data-role="file"]', layer.el);
@@ -2955,13 +3442,23 @@
         toast('Не удалось загрузить изображение: ' + e.message, { type: 'error' });
       }
     });
+    if (isChar && item) {
+      api(`/api/characters/${item.id}`).then((res) => {
+        nextNum = Math.max(nextNum, Number(res.character && res.character.next_char_num) || 0);
+      }).catch(() => {}).then(() => {
+        numbersReady = true;
+        const add = $('[data-act="add-char"]', layer.el);
+        if (add) add.disabled = false;
+      });
+    }
+    if (isChar) bindMacroBar(layer);
 
     bindActs(layer, {
       avatar: () => actionSheet({
         title: 'Изображение',
         items: [
           { icon: 'image', label: 'Выбрать с устройства', onSelect: () => fileInput.click() },
-          { icon: 'eye', label: 'Посмотреть', hidden: !cur.avatarUrl, onSelect: () => openImageViewer(resolveAvatarUrl(cur.avatarUrl, cur.name), cur.name) },
+          { icon: 'eye', label: 'Посмотреть', hidden: !cur.avatarUrl, onSelect: () => openImageViewer(resolveAvatarUrl(cur.avatarUrl, label()), label()) },
           {
             icon: 'trash',
             label: 'Заменить на инициалы',
@@ -2975,35 +3472,84 @@
           },
         ],
       }),
-      macro: (el) => {
-        const ta = $('[data-field="greeting"]', layer.el);
-        const s = ta.selectionStart || ta.value.length;
-        const e2 = ta.selectionEnd || s;
-        ta.value = ta.value.slice(0, s) + el.dataset.macro + ta.value.slice(e2);
-        ta.focus();
-        ta.setSelectionRange(s + el.dataset.macro.length, s + el.dataset.macro.length);
-        cur.greeting = ta.value;
-        autoGrow(ta);
+      'add-char': () => {
+        if (!numbersReady) return;
+        const c = { n: nextNum++, name: '', text: '' };
+        cur.chars.push(c);
+        const host = $('[data-role="chars"]', layer.el);
+        const el = htmlToElement(charBlockHtml(c));
+        host.appendChild(el);
+        autoGrow($('textarea', el));
+        updateMacros();
+        updateTitle();
+        const input = $('input', el);
+        input.focus();
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      },
+      'remove-char': async (el) => {
+        const n = Number(el.dataset.n);
+        const c = cur.chars.find(x => x.n === n);
+        if (!c) return;
+        if (c.name.trim() || c.text.trim()) {
+          const ok = await confirmDialog({
+            title: `Удалить {{char${n}}}${c.name.trim() ? ` «${c.name.trim()}»` : ''}?`,
+            message: `Описание персонажа удалится из карточки после сохранения. Номер {{char${n}}} больше никому не достанется — уберите его и из текстов.`,
+            confirmText: 'Удалить',
+            danger: true,
+          });
+          if (!ok) return;
+        }
+        cur.chars = cur.chars.filter(x => x.n !== n);
+        const block = $(`.char-block[data-n="${n}"]`, layer.el);
+        if (block) block.remove();
+        updateMacros();
+        updateAvatar();
         updateTitle();
       },
       save: async (btn) => {
         if (saving) return;
-        const name = cur.name.trim();
-        if (!name) {
-          toast(isChar ? 'Введите имя персонажа' : 'Введите имя персоны');
-          $('[data-field="name"]', layer.el).focus();
-          return;
+        let payload;
+        if (isChar) {
+          const unnamed = cur.chars.find(c => !c.name.trim() && c.text.trim());
+          if (unnamed) {
+            toast(`У персонажа {{char${unnamed.n}}} нет имени`);
+            const input = $(`input[data-char-field="name"][data-n="${unnamed.n}"]`, layer.el);
+            if (input) input.focus();
+            return;
+          }
+          const chars = cur.chars.filter(c => c.name.trim() || c.text.trim()).map(c => ({ n: c.n, name: c.name.trim(), text: c.text }));
+          if (!cur.title.trim() && !chars.length) {
+            toast('Введите название карточки или имя хотя бы одного персонажа');
+            $('[data-field="title"]', layer.el).focus();
+            return;
+          }
+          payload = {
+            title: cur.title.trim(),
+            filePath: cur.filePath.trim(),
+            avatarUrl: cur.avatarUrl,
+            firstMessage: cur.greeting,
+            // No "next": the engine keeps the saved card's one, so only numbers
+            // that were saved stay retired (an unsaved empty block's does not).
+            card: { world: cur.world, chars },
+          };
+        } else {
+          const name = cur.name.trim();
+          if (!name) {
+            toast('Введите имя персоны');
+            $('[data-field="name"]', layer.el).focus();
+            return;
+          }
+          payload = {
+            title: cur.title.trim(),
+            name,
+            filePath: cur.filePath.trim(),
+            avatarUrl: cur.avatarUrl,
+            description: cur.description,
+            rawFileContent: cur.description,
+          };
         }
         saving = true;
         btn.disabled = true;
-        const payload = {
-          name,
-          filePath: cur.filePath.trim(),
-          avatarUrl: cur.avatarUrl,
-          description: cur.description,
-          rawFileContent: cur.description,
-        };
-        if (isChar) payload.firstMessage = cur.greeting;
         try {
           const base = isChar ? '/api/characters' : '/api/personas';
           await api(item ? `${base}/${item.id}` : base, { method: item ? 'PUT' : 'POST', body: payload });
@@ -3014,12 +3560,13 @@
               state.room.data = withCardImages(await api(`/api/chats/${state.room.chatId}`));
               renderRoomHeader();
               syncFeed({ scroll: 'keep' });
+              refreshLayers();
             } catch (e) {
               // room refresh is best-effort
             }
           }
           layer.close();
-          toast(isChar ? 'Персонаж сохранён' : 'Персона сохранена', { type: 'success' });
+          toast(isChar ? 'Карточка сохранена' : 'Персона сохранена', { type: 'success' });
         } catch (e) {
           saving = false;
           btn.disabled = false;
@@ -3027,10 +3574,11 @@
         }
       },
       delete: async () => {
+        const name = isChar ? cardLabel(item) : personaLabel(item);
         const ok = await confirmDialog({
-          title: isChar ? `Удалить «${item.name}»?` : `Удалить персону «${item.name}»?`,
+          title: isChar ? `Удалить «${name}»?` : `Удалить персону «${name}»?`,
           message: isChar && chatsCount
-            ? `Карточка и её файл будут удалены. ${chatsCount} ${pluralRu(chatsCount, 'чат останется', 'чата останутся', 'чатов останутся')} без персонажа.`
+            ? `Карточка и её файл будут удалены. ${chatsCount} ${pluralRu(chatsCount, 'чат останется', 'чата останутся', 'чатов останутся')} без карточки.`
             : 'Карточка и её файл будут удалены.',
           confirmText: 'Удалить',
           danger: true,
@@ -3046,7 +3594,7 @@
           });
           await loadCards();
           loadChats();
-          toast(isChar ? 'Персонаж удалён' : 'Персона удалена');
+          toast(isChar ? 'Карточка удалена' : 'Персона удалена');
         } catch (e) {
           toast(e.message, { type: 'error' });
         }
@@ -3079,9 +3627,9 @@
       const active = state.settings.activePersonaId;
       body = `<p class="section-hint" style="margin:0 4px 12px">Отмеченная персона выбирается по умолчанию в новых чатах. В открытом чате персону можно сменить в его настройках.</p>
         <div class="list">${state.personas.map(p => `<div class="row pressable" role="button" tabindex="0" data-action="open-persona" data-id="${p.id}">
-            <img class="avatar avatar-48" src="${escapeHtml(resolveAvatarUrl(p.avatar_url, p.name))}" alt="" />
-            <div class="row-body"><div class="row-title">${escapeHtml(p.name)}${p.id === active ? ' <span class="pill accent" style="margin-left:6px">По умолчанию</span>' : ''}</div>
-              <div class="row-sub wrap">${escapeHtml(stripMarkdownPreview(p.description_preview || p.fileContent) || 'Без описания')}</div></div>
+            <img class="avatar avatar-48" src="${escapeHtml(resolveAvatarUrl(p.avatar_url, personaLabel(p)))}" alt="" />
+            <div class="row-body"><div class="row-title">${escapeHtml(personaLabel(p))}${p.id === active ? ' <span class="pill accent" style="margin-left:6px">По умолчанию</span>' : ''}</div>
+              <div class="row-sub wrap">${String(p.title || '').trim() ? `Имя: ${escapeHtml(p.name)} · ` : ''}${escapeHtml(stripMarkdownPreview(p.description_preview || p.fileContent) || 'Без описания')}</div></div>
             <button class="icon-btn sm" data-action="activate-persona" data-id="${p.id}" aria-label="Сделать персоной по умолчанию"><span class="radio${p.id === active ? ' on' : ''}"></span></button>
           </div>`).join('')}</div>`;
     }
@@ -3095,7 +3643,7 @@
       state.settings.activePersonaId = id;
       renderPersonasTab();
       const p = findPersona(id);
-      toast(`По умолчанию: ${p ? p.name : 'персона'}`);
+      toast(`По умолчанию: ${p ? personaLabel(p) : 'персона'}`);
     } catch (e) {
       toast(e.message, { type: 'error' });
     }
@@ -3221,19 +3769,22 @@
           <div style="font-size:var(--fs-sm);line-height:1.55;color:var(--text-2);margin-top:10px">Встроенных скрытых инструкций нет. Под вашим текстом автоматически идут:</div>
           <pre class="prompt-schema" style="margin-top:10px">ваш текст
 <b>&lt;character_persona&gt;</b>
-  описание персонажа чата
+  <b>&lt;world_settings&gt;</b> настройки мира <b>&lt;/world_settings&gt;</b>
+  <b>&lt;character name="Имя"&gt;</b> описание <b>&lt;/character&gt;</b>
+  … по блоку на каждого персонажа карточки
+  и на каждого, кто появился в истории
 <b>&lt;/character_persona&gt;</b>
-<b>&lt;user_persona&gt;</b>
+<b>&lt;user_persona name="Имя"&gt;</b>
   описание вашей персоны
 <b>&lt;/user_persona&gt;</b>
 <b>&lt;chat_memory&gt;</b> — если память чата заполнена</pre>
         </details>
-        <textarea class="textarea tall" data-role="text" placeholder="Например: Ты — ведущий ролевой игры. Пиши от третьего лица, живо и образно. Отвечай только за {{char}}, никогда не пиши действия и реплики {{user}}…">${escapeHtml(initial)}</textarea>
+        <textarea class="textarea tall" data-role="text" placeholder="Например: Ты — ведущий ролевой игры. Пиши от третьего лица, живо и образно. Отвечай за персонажей из &lt;character_persona&gt;, никогда не пиши действия и реплики {{user}}…">${escapeHtml(initial)}</textarea>
         <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
-          <div class="macro-chips" style="margin:0"><button class="chip sm" data-act="macro" data-macro="{{char}}">{{char}}</button><button class="chip sm" data-act="macro" data-macro="{{user}}">{{user}}</button></div>
+          <div class="macro-chips" style="margin:0"><button class="chip sm" data-act="macro" data-macro="{{user}}">{{user}}</button><button class="chip sm" data-act="macro" data-macro="{{char1}}">{{char1}}</button><button class="chip sm" data-act="macro" data-macro="{{char2}}">{{char2}}</button></div>
           <span class="char-count" data-role="count" style="margin-left:auto"></span>
         </div>
-        <p class="section-hint">{{char}} — имя персонажа чата, {{user}} — имя вашей персоны.</p>`,
+        <p class="section-hint">{{user}} — имя вашей персоны, {{char1}}, {{char2}}… — имена персонажей чата по номерам ({{char}} = {{char1}}). Чтобы модель вводила новых персонажей отдельными карточками, опишите здесь блок &lt;new_character name="Имя"&gt;…&lt;/new_character&gt;: приложение вынет его из ответа и добавит персонажа в чат.</p>`,
       actions: `<button class="btn btn-ghost" data-act="save">Сохранить</button>`,
       onBack: () => {
         if (saving || $('[data-role="text"]', layer.el).value === initial) return true;
@@ -4632,8 +5183,8 @@
     const layer = openPage({
       title: 'Память чата',
       backIcon: 'x',
-      body: `<p class="section-hint" style="margin:0 4px 12px">Важные факты, договорённости и события, которые модель должна помнить. Текст попадает в системный промпт внутри &lt;chat_memory&gt;; {{char}} и {{user}} подставляются.</p>
-        <textarea class="textarea tall" data-role="text" placeholder="Например: {{user}} обещал вернуться к рассвету. {{char}} не доверяет гильдии.">${escapeHtml(initial)}</textarea>`,
+      body: `<p class="section-hint" style="margin:0 4px 12px">Важные факты, договорённости и события, которые модель должна помнить. Текст попадает в системный промпт внутри &lt;chat_memory&gt;; макросы {{user}} и {{charN}} подставляются.</p>
+        <textarea class="textarea tall" data-role="text" placeholder="Например: {{user}} обещал вернуться к рассвету. {{char1}} не доверяет гильдии.">${escapeHtml(initial)}</textarea>`,
       actions: `<button class="btn btn-ghost" data-act="save">Сохранить</button>`,
       onBack: () => {
         if (saved || $('[data-role="text"]', layer.el).value === initial) return true;
@@ -4958,6 +5509,8 @@
 
     'close-chat': () => closeChatRoom(),
     'chat-settings': () => openChatSettings(),
+    'chat-cast': () => openCastSheet(),
+    'story-character': (el) => openStoryCharacter(Number(el.dataset.msg), Number(el.dataset.n)),
     send: () => sendMessage(),
     stop: () => stopGeneration(),
     'insert-action': () => insertAsterisks(),
@@ -4976,8 +5529,10 @@
     'open-provider-settings': (el) => openProviderSettings(el.dataset.provider),
     'view-avatar': (el) => {
       if (!state.room) return;
-      const who = el.dataset.who === 'persona' ? state.room.data.persona : state.room.data.character;
-      if (who) openImageViewer(resolveAvatarUrl(who.avatar_url, who.name), who.name);
+      const isPersona = el.dataset.who === 'persona';
+      const who = isPersona ? state.room.data.persona : state.room.data.character;
+      const name = isPersona ? personaLabel(who) : cardLabel(who);
+      if (who) openImageViewer(resolveAvatarUrl(who.avatar_url, name), name);
     },
 
     'open-character': (el) => openCharacterPage(Number(el.dataset.id)),
@@ -5149,6 +5704,14 @@
     sortChats,
     filterChats,
     isDefaultChatTitle,
+    cardLabel,
+    personaLabel,
+    cardCast,
+    storyCast,
+    castMacros,
+    applyMacros,
+    splitLiveText,
+    castLossNote,
     updateAction,
     deliveryNote,
     passwordStrength,

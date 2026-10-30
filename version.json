@@ -1,12 +1,27 @@
 {
     "appName":  "AGY Roleplay Studio",
-    "version":  "1.8.0",
-    "build":  26,
-    "releaseDate":  "2026-10-26",
+    "version":  "1.9.0",
+    "build":  27,
+    "releaseDate":  "2026-10-30",
     "gitRepo":  "Kuka001/111",
     "gitBranch":  "main",
     "apkPath":  "agy-roleplay-android16.apk",
     "releases":  [
+                     {
+                         "version":  "1.9.0",
+                         "build":  27,
+                         "date":  "2026-10-30",
+                         "title":  "Карточки миров и нескольких персонажей, персонажи из истории",
+                         "ref":  "main",
+                         "changelog":  [
+                                           "Карточка теперь из частей: «Настройки мира» и отдельные блоки персонажей {{char1}}, {{char2}}… с именем и описанием (кнопка «Добавить персонажа»). Модель получает их как \u003cworld_settings\u003e и \u003ccharacter name=\"…\"\u003e. Имя достаточно поменять в поле — оно сменится везде, где стоит макрос",
+                                           "Персонажи из истории: когда модель вводит нового важного персонажа блоком \u003cnew_character\u003e (инструкция — в вашем системном промпте), приложение вынимает блок из ответа и добавляет персонажа в чат как {{charN}}; короткое представление остаётся в ответе",
+                                           "Лист «Персонажи» в чате (кнопка в шапке): мир, персонажи карточки и появившиеся в истории — просмотр, правка, удаление. Персонаж привязан к варианту ответа: перегенерация, перелистывание, удаление и откат меняют список вместе с ответом",
+                                           "Названия карточек и персон — только для вас: в списках и чатах, модели не отправляются",
+                                           "Макросы {{user}}, {{char}}, {{charN}} в сообщениях хранятся как есть: в правке видны макросы, в ленте и для модели — имена. Раньше приветствие сохранялось уже с именами, а Gemini получал макросы из сообщений неподставленными",
+                                           "Claude Code: из задания убрано «без служебных пометок» (иначе модель выбрасывала бы блок нового персонажа); в карточках с несколькими персонажами ответы модели в истории подписаны «Рассказчик»"
+                                       ]
+                     },
                      {
                          "version":  "1.8.0",
                          "build":  26,
@@ -151,25 +166,9 @@
                                            "Исправлено: смена модели больше не переписывает все чаты; создание персонажа с тем же именем не затирает старого",
                                            "Восстановление бэкапа из файла .json, подтверждения перед удалением, кнопка «Назад» закрывает все слои"
                                        ]
-                     },
-                     {
-                         "version":  "1.5.0",
-                         "build":  17,
-                         "date":  "2026-10-25",
-                         "title":  "Claude Code CLI на устройстве (proot) + полный системный промпт из .md",
-                         "ref":  "main",
-                         "changelog":  [
-                                           "НОВОЕ: провайдер Claude Code CLI, работающий полностью на смартфоне через proot (без ПК и LAN)",
-                                           "Среда выполнения (proot + musl-rootfs + бинарник CLI) скачивается при первом запуске и проверяется по SHA-256",
-                                           "Полная замена системного промпта содержимым выбранного .md из workspace",
-                                           "Начальное сообщение персонажа берётся из выбранного .md",
-                                           "Поле «путь проекта» (рабочая папка CLI, относительно workspace)",
-                                           "Авторизация по подписке Claude (setup-token)",
-                                           "targetSdk понижен до 28 для запуска нативного бинарника на устройстве"
-                                       ]
                      }
                  ],
-    "apkSha256":  "6e31429f918f1f83679033b50623ceb0976ec914f067b8d5ccd03c22d8410b4b",
-    "apkSize":  226486,
-    "otaSignature":  "HuNcXsKGRJJmW5IjcYfgJxAo5qFjzcihemWGe3LUzSM67h/OIJxiJ+wZ2j6Efjc0bZV8o+ibVwPoT6Huqf5JNc+X4mgIBCNZu77LgxXHscKrnCUHgNkTtigpYHCfwOI7Bquy7GPX2xOe1yIVFKKU3MsbpYQXeP0tKCzIIGo1aHWg0xinBhrlCYZB/zgYF5tKxCw+LQBVSJQCjEf+NlUaKMDOIZpMNp05RukFrDh6Tii42C+qULVn9P2ofxDPTRHBGnLsl9asymJVzakWGM+ouBDViXzsCfkNadRgI/6c5xNZbj85ejtPoD50mkIYYTUf5qcQash6PLv0k6uxk7ucMg=="
+    "apkSha256":  "9961a77261d5f001db1563d90cd1efd7006d95c0be13eb3fda73adbd04016db3",
+    "apkSize":  242872,
+    "otaSignature":  "D08SwPRoHK/kTJFBZOCXZ5NRx7dhDAYYmTysYJk4IRBl3DKZ/L4m02kmbADm9uIZdHHGGrqQOb5mDlG3p3MBUQ15uRlGjfNRInrJBVU6bTe05k7S4NW26/ZfrluAbuj88/mkjYaSfWnGgipQ35lqDYmdrEebYQOecR0J9eGg2JPWCS/NvmntshwxqHPDXA3fnAvJ/KDM8dfzDOepPxulCW/NSb6aa+c0J8kC0SloMZBLJs5RNhGm6AAjtGByqrh7cm4g+sdym4GeR8FqHxRnID+MqP/VXI9kKbnamUsZkVT/VBIghB2QQGE2sBI4kqdjvkMIiYKCxFfylVC3PnjCsQ=="
 }

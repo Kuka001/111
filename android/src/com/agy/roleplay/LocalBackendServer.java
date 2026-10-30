@@ -568,6 +568,13 @@ public class LocalBackendServer {
             // Thoughts per swipe, parallel to swipes_json, so switching variants
             // also switches the reasoning shown for that variant.
             addColumnIfMissing("messages", "thought_swipes_json", "TEXT DEFAULT '[]'");
+            // 1.9: a card's and a persona's own label (never sent to the model),
+            // a card's structure (world settings + numbered characters, '' for a
+            // free-text card), and per reply variant the characters it introduced.
+            addColumnIfMissing("characters", "title", "TEXT DEFAULT ''");
+            addColumnIfMissing("characters", "card_json", "TEXT DEFAULT ''");
+            addColumnIfMissing("personas", "title", "TEXT DEFAULT ''");
+            addColumnIfMissing("messages", "cast_swipes_json", "TEXT DEFAULT '[]'");
             // Every chat read (list, open, history for a reply) filters by chat.
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, id)");
             // Cloud sync: a row's sync_id is the same on every device (local
@@ -1202,6 +1209,13 @@ public class LocalBackendServer {
 
         if (path.startsWith("/api/characters/")) {
             int charId = Integer.parseInt(path.substring("/api/characters/".length()));
+            if (method.equals("GET")) {
+                // For the card editor: the number a character added now gets.
+                JSONObject c = getCharacterByIdJson(charId);
+                if (c == null) return errorJson(404, "Персонаж не найден");
+                c.put("next_char_num", Math.max(cardNextNum(c), maxCastNumForCard(charId) + 1));
+                return new JSONObject().put("character", c);
+            }
             if (method.equals("PUT")) {
                 return saveOrUpdateCharacter(charId, body);
             }
@@ -1337,7 +1351,7 @@ public class LocalBackendServer {
                 if (details.has("__status")) return details;
                 JSONObject chat = details.getJSONObject("chat");
                 String sp = buildSystemPrompt(details.getJSONObject("character"), details.getJSONObject("persona"),
-                    chat.optString("memory_file_path", ""));
+                    chat.optString("memory_file_path", ""), details.getJSONArray("messages"));
                 JSONObject res = new JSONObject();
                 res.put("systemPrompt", sp);
                 res.put("chars", sp.length());
@@ -1354,26 +1368,25 @@ public class LocalBackendServer {
             }
             int msgId = Integer.parseInt(rem);
             if (method.equals("PUT")) {
-                String newContent = body.optString("content", "");
-                Cursor c = db.rawQuery("SELECT swipes_json, swipe_index FROM messages WHERE id = ?", new String[]{String.valueOf(msgId)});
-                if (!c.moveToFirst()) {
-                    c.close();
-                    return errorJson(404, "Сообщение не найдено");
-                }
-                String swipesStr = c.getString(0);
-                int swipeIdx = c.getInt(1);
-                c.close();
-
-                JSONArray swipes = new JSONArray(swipesStr != null && !swipesStr.isEmpty() ? swipesStr : "[]");
-                if (swipes.length() == 0) {
-                    swipes.put(newContent);
-                } else {
-                    swipes.put(Math.max(0, Math.min(swipeIdx, swipes.length() - 1)), newContent);
-                }
+                // The current variant's text and/or the characters it introduced
+                // (edited or removed in the chat's character list).
+                JSONObject msg = getMessageByIdJson(msgId);
+                if (msg == null) return errorJson(404, "Сообщение не найдено");
+                JSONArray swipes = msg.getJSONArray("swipes");
+                int swipeIdx = Math.max(0, Math.min(msg.optInt("swipe_index", 0), Math.max(0, swipes.length() - 1)));
                 ContentValues cv = new ContentValues();
-                cv.put("content", newContent);
-                cv.put("swipes_json", swipes.toString());
-                db.update("messages", cv, "id = ?", new String[]{String.valueOf(msgId)});
+                if (body.has("content")) {
+                    String newContent = body.optString("content", "");
+                    swipes.put(swipeIdx, newContent);
+                    cv.put("content", newContent);
+                    cv.put("swipes_json", swipes.toString());
+                }
+                if (body.has("cast")) {
+                    JSONArray castSwipes = alignedCastSwipes(msg, Math.max(1, swipes.length()));
+                    castSwipes.put(swipeIdx, sanitizeCast(body.optJSONArray("cast")));
+                    cv.put("cast_swipes_json", castSwipes.toString());
+                }
+                if (cv.size() > 0) db.update("messages", cv, "id = ?", new String[]{String.valueOf(msgId)});
 
                 JSONObject res = okJson();
                 res.put("message", getMessageByIdJson(msgId));
@@ -2044,18 +2057,23 @@ public class LocalBackendServer {
         Cursor c = null;
         try {
             switch (kind) {
-                case "character":
-                    c = db.rawQuery("SELECT name, file_path, avatar_url, first_message, created_at, updated_at "
+                case "character": {
+                    c = db.rawQuery("SELECT name, file_path, avatar_url, first_message, created_at, updated_at, title, card_json "
                         + "FROM characters WHERE sync_id = ?", new String[]{sid});
                     if (!c.moveToFirst()) return null;
-                    return cardPayload(str(c, 0), str(c, 1), str(c, 2)).put("firstMessage", str(c, 3))
-                        .put("createdAt", str(c, 4)).put("updatedAt", str(c, 5));
+                    JSONObject out = cardPayload(str(c, 0), str(c, 1), str(c, 2)).put("firstMessage", str(c, 3))
+                        .put("createdAt", str(c, 4)).put("updatedAt", str(c, 5)).put("title", str(c, 6));
+                    // Without "card" (a free-text card, or an older version) the text is the whole card.
+                    JSONObject card = parseCardJson(str(c, 7));
+                    if (card != null) out.put("card", card);
+                    return out;
+                }
                 case "persona":
-                    c = db.rawQuery("SELECT name, file_path, avatar_url, is_default, created_at FROM personas WHERE sync_id = ?",
+                    c = db.rawQuery("SELECT name, file_path, avatar_url, is_default, created_at, title FROM personas WHERE sync_id = ?",
                         new String[]{sid});
                     if (!c.moveToFirst()) return null;
                     return cardPayload(str(c, 0), str(c, 1), str(c, 2)).put("isDefault", c.getInt(3))
-                        .put("createdAt", str(c, 4));
+                        .put("createdAt", str(c, 4)).put("title", str(c, 5));
                 case "chat":
                     // A card this chat waits for (it came from the cloud first) is still referenced by sync_id.
                     c = db.rawQuery("SELECT c.title, c.model_id, c.effort, c.provider, c.created_at, c.updated_at, "
@@ -2068,13 +2086,13 @@ public class LocalBackendServer {
                         .put("characterSid", str(c, 6)).put("personaSid", str(c, 7));
                 case "message":
                     c = db.rawQuery("SELECT m.role, m.content, m.thoughts, m.swipes_json, m.swipe_index, "
-                        + "m.thought_swipes_json, m.sort_key, m.created_at, ch.sync_id FROM messages m "
+                        + "m.thought_swipes_json, m.sort_key, m.created_at, ch.sync_id, m.cast_swipes_json FROM messages m "
                         + "JOIN chats ch ON ch.id = m.chat_id WHERE m.sync_id = ?", new String[]{sid});
                     if (!c.moveToFirst()) return null;
                     return new JSONObject().put("chatSid", str(c, 8)).put("role", str(c, 0)).put("content", str(c, 1))
                         .put("thoughts", str(c, 2)).put("swipes", jsonArrayOr(str(c, 3))).put("swipeIndex", c.getInt(4))
                         .put("thoughtSwipes", jsonArrayOr(str(c, 5))).put("sortKey", c.getLong(6))
-                        .put("createdAt", str(c, 7));
+                        .put("createdAt", str(c, 7)).put("castSwipes", jsonArrayOr(str(c, 9)));
                 case "memory": {
                     c = db.rawQuery("SELECT memory_file_path FROM chats WHERE sync_id = ?", new String[]{sid});
                     if (!c.moveToFirst()) return null;
@@ -2210,9 +2228,22 @@ public class LocalBackendServer {
         cv.put("file_path", relPath);
         cv.put("avatar_url", cleanAvatarUrl(p.optString("avatar", "")));
         cv.put("description_preview", parsePreview(text));
+        // Older versions know no title: their records leave it as it is.
+        if (p.has("title")) cv.put("title", cleanTitle(p.optString("title", "")));
         if (isChar) {
             cv.put("first_message", clip(p.optString("firstMessage", ""), 200_000));
             putTimestamp(cv, "updated_at", p.optString("updatedAt", ""));
+            JSONObject card = p.optJSONObject("card");
+            String cardJson = card != null ? sanitizeCard(card).toString() : "";
+            // No structure: an older version wrote the record. If it changed the
+            // text, the card is free text from now on; if not, it stays structured.
+            if (card == null && id > 0) {
+                JSONObject kept = parseCardJson(cardJsonOf(id));
+                if (kept != null && renderCardFile(kept).equals(text)) cardJson = kept.toString();
+            }
+            cv.put("card_json", cardJson);
+            JSONObject structured = parseCardJson(cardJson);
+            if (structured != null) cv.put("description_preview", cardPreview(structured));
         } else {
             cv.put("is_default", p.optInt("isDefault", 0) != 0 ? 1 : 0);
         }
@@ -2322,6 +2353,15 @@ public class LocalBackendServer {
         cv.put("swipes_json", swipes.toString());
         cv.put("thought_swipes_json", stringArray(p.optJSONArray("thoughtSwipes")).toString());
         cv.put("swipe_index", Math.max(0, Math.min(p.optInt("swipeIndex", 0), swipes.length() - 1)));
+        // Older versions send no characters: what is here stays.
+        if (p.has("castSwipes")) {
+            JSONArray src = p.optJSONArray("castSwipes");
+            JSONArray castSwipes = new JSONArray();
+            for (int i = 0; src != null && i < src.length() && i < swipes.length(); i++) {
+                castSwipes.put(sanitizeCast(src.optJSONArray(i)));
+            }
+            cv.put("cast_swipes_json", castSwipes.toString());
+        }
         long sortKey = p.optLong("sortKey", 0L);
         // Without a key the insert trigger puts the message last.
         if (sortKey > 0) cv.put("sort_key", sortKey);
@@ -2451,45 +2491,54 @@ public class LocalBackendServer {
     // =========================================================================
     // DATABASE HELPERS FOR CHARACTERS, PERSONAS, CHATS & MESSAGES
     // =========================================================================
+    private static final String CHARACTER_COLUMNS =
+        "id, name, file_path, avatar_url, first_message, description_preview, title, card_json";
+
     private JSONArray queryCharactersArray() throws Exception {
         JSONArray arr = new JSONArray();
-        Cursor c = db.rawQuery("SELECT id, name, file_path, avatar_url, first_message, description_preview FROM characters ORDER BY id ASC", null);
-        while (c.moveToNext()) {
-            JSONObject o = new JSONObject();
-            int id = c.getInt(0);
-            String fp = c.getString(2);
-            File f = new File(workspaceDir, fp);
-            String fileContent = f.exists() ? readTextFile(f) : "";
-            o.put("id", id);
-            o.put("name", c.getString(1));
-            o.put("file_path", fp);
-            o.put("avatar_url", c.getString(3));
-            o.put("first_message", c.getString(4));
-            o.put("description_preview", c.getString(5));
-            o.put("fileContent", fileContent);
-            arr.put(o);
+        Cursor c = db.rawQuery("SELECT " + CHARACTER_COLUMNS + " FROM characters ORDER BY id ASC", null);
+        try {
+            while (c.moveToNext()) arr.put(cursorToCharacterJson(c));
+        } finally {
+            c.close();
         }
-        c.close();
         return arr;
     }
 
     private JSONObject getCharacterByIdJson(int id) throws Exception {
-        Cursor c = db.rawQuery("SELECT id, name, file_path, avatar_url, first_message, description_preview FROM characters WHERE id = ?", new String[]{String.valueOf(id)});
-        JSONObject o = null;
-        if (c.moveToFirst()) {
-            o = new JSONObject();
-            String fp = c.getString(2);
-            File f = new File(workspaceDir, fp);
-            o.put("id", c.getInt(0));
-            o.put("name", c.getString(1));
-            o.put("file_path", fp);
-            o.put("avatar_url", c.getString(3));
-            o.put("first_message", c.getString(4));
-            o.put("description_preview", c.getString(5));
-            o.put("fileContent", f.exists() ? readTextFile(f) : "");
+        Cursor c = db.rawQuery("SELECT " + CHARACTER_COLUMNS + " FROM characters WHERE id = ?", new String[]{String.valueOf(id)});
+        try {
+            return c.moveToFirst() ? cursorToCharacterJson(c) : null;
+        } finally {
+            c.close();
         }
-        c.close();
+    }
+
+    /** A card for the UI: card is the structure, or null for a free-text card (fileContent is then the whole card). */
+    private JSONObject cursorToCharacterJson(Cursor c) throws Exception {
+        JSONObject o = new JSONObject();
+        String fp = str(c, 2);
+        File f = new File(workspaceDir, fp);
+        o.put("id", c.getInt(0));
+        o.put("name", str(c, 1));
+        o.put("file_path", fp);
+        o.put("avatar_url", str(c, 3));
+        o.put("first_message", str(c, 4));
+        o.put("description_preview", str(c, 5));
+        o.put("title", str(c, 6));
+        JSONObject card = parseCardJson(str(c, 7));
+        o.put("card", card != null ? card : JSONObject.NULL);
+        o.put("fileContent", !fp.isEmpty() && f.exists() ? readTextFile(f) : "");
         return o;
+    }
+
+    private String cardJsonOf(int id) {
+        Cursor c = db.rawQuery("SELECT card_json FROM characters WHERE id = ?", new String[]{String.valueOf(id)});
+        try {
+            return c.moveToFirst() ? str(c, 0) : "";
+        } finally {
+            c.close();
+        }
     }
 
     /**
@@ -2513,10 +2562,35 @@ public class LocalBackendServer {
     }
 
     private JSONObject saveOrUpdateCharacter(Integer editId, JSONObject body) throws Exception {
-        String name = body.optString("name", "").trim();
-        if (name.isEmpty()) return errorJson(400, "Введите имя персонажа");
+        String title = cleanTitle(body.optString("title", ""));
+        // A structured card (world settings + numbered characters) comes as
+        // "card"; without it the description is the whole free-text card.
+        JSONObject card = null;
+        String name;
+        if (body.optJSONObject("card") != null) {
+            JSONArray chars = body.getJSONObject("card").optJSONArray("chars");
+            if (chars != null && chars.length() > CARD_MAX_CHARS) {
+                return errorJson(400, "В карточке может быть не больше " + CARD_MAX_CHARS + " персонажей");
+            }
+            for (int i = 0; chars != null && i < chars.length(); i++) {
+                JSONObject ch = chars.optJSONObject(i);
+                if (ch != null && cleanCastName(ch.optString("name", "")).isEmpty() && !ch.optString("text", "").trim().isEmpty()) {
+                    return errorJson(400, "У персонажа {{char" + ch.optInt("n", i + 1) + "}} нет имени");
+                }
+            }
+            card = sanitizeCard(body.getJSONObject("card"));
+            // A number once given is not given again, even after its character is removed.
+            JSONObject stored = editId != null ? parseCardJson(cardJsonOf(editId)) : null;
+            if (stored != null) card.put("next", Math.max(card.optInt("next", 1), stored.optInt("next", 1)));
+            JSONArray kept = card.getJSONArray("chars");
+            name = kept.length() > 0 ? kept.getJSONObject(0).getString("name") : title;
+            if (name.isEmpty()) return errorJson(400, "Введите название карточки или имя хотя бы одного персонажа");
+        } else {
+            name = body.optString("name", "").trim();
+            if (name.isEmpty()) return errorJson(400, "Введите имя персонажа");
+        }
 
-        String relPath = "characters/" + cardFileName(body.optString("filePath", ""), name, "char");
+        String relPath = "characters/" + cardFileName(body.optString("filePath", ""), title.isEmpty() ? name : title, "char");
         String previousPath = editId != null ? lookupFilePath("characters", editId) : "";
         if (editId == null || !relPath.equals(previousPath)) {
             relPath = uniqueCardPath("characters", relPath, editId);
@@ -2532,7 +2606,10 @@ public class LocalBackendServer {
         boolean verbatim = body.has("rawFileContent") && !body.isNull("rawFileContent");
 
         String fileText;
-        if (verbatim || !rawFileContent.isEmpty()) {
+        if (card != null) {
+            // What the model gets, for older versions and a restore by file; this version reads card_json.
+            fileText = renderCardFile(card);
+        } else if (verbatim || !rawFileContent.isEmpty()) {
             fileText = rawFileContent;
         } else {
             StringBuilder fb = new StringBuilder("# Имя: ").append(name).append("\n\n### Описание и Характер\n").append(desc).append("\n");
@@ -2549,10 +2626,12 @@ public class LocalBackendServer {
 
         ContentValues cv = new ContentValues();
         cv.put("name", name);
+        cv.put("title", title);
+        cv.put("card_json", card != null ? card.toString() : "");
         cv.put("file_path", relPath);
         cv.put("avatar_url", avatarUrl);
         cv.put("first_message", firstMsg);
-        cv.put("description_preview", parsePreview(fileText));
+        cv.put("description_preview", card != null ? cardPreview(card) : parsePreview(fileText));
 
         int finalId;
         if (editId != null) {
@@ -2569,7 +2648,7 @@ public class LocalBackendServer {
 
     private JSONArray queryPersonasArray() throws Exception {
         JSONArray arr = new JSONArray();
-        Cursor c = db.rawQuery("SELECT id, name, file_path, avatar_url, description_preview, is_default FROM personas ORDER BY id ASC", null);
+        Cursor c = db.rawQuery("SELECT id, name, file_path, avatar_url, description_preview, is_default, title FROM personas ORDER BY id ASC", null);
         while (c.moveToNext()) {
             JSONObject o = new JSONObject();
             String fp = c.getString(2);
@@ -2580,6 +2659,7 @@ public class LocalBackendServer {
             o.put("avatar_url", c.getString(3));
             o.put("description_preview", c.getString(4));
             o.put("is_default", c.getInt(5));
+            o.put("title", str(c, 6));
             o.put("fileContent", f.exists() ? readTextFile(f) : "");
             arr.put(o);
         }
@@ -2588,7 +2668,7 @@ public class LocalBackendServer {
     }
 
     private JSONObject getPersonaByIdJson(int id) throws Exception {
-        Cursor c = db.rawQuery("SELECT id, name, file_path, avatar_url, description_preview, is_default FROM personas WHERE id = ?", new String[]{String.valueOf(id)});
+        Cursor c = db.rawQuery("SELECT id, name, file_path, avatar_url, description_preview, is_default, title FROM personas WHERE id = ?", new String[]{String.valueOf(id)});
         JSONObject o = null;
         if (c.moveToFirst()) {
             o = new JSONObject();
@@ -2600,6 +2680,7 @@ public class LocalBackendServer {
             o.put("avatar_url", c.getString(3));
             o.put("description_preview", c.getString(4));
             o.put("is_default", c.getInt(5));
+            o.put("title", str(c, 6));
             o.put("fileContent", f.exists() ? readTextFile(f) : "");
         }
         c.close();
@@ -2610,7 +2691,8 @@ public class LocalBackendServer {
         String name = body.optString("name", "").trim();
         if (name.isEmpty()) return errorJson(400, "Введите имя персоны");
 
-        String relPath = "personas/" + cardFileName(body.optString("filePath", ""), name, "persona");
+        String title = cleanTitle(body.optString("title", ""));
+        String relPath = "personas/" + cardFileName(body.optString("filePath", ""), title.isEmpty() ? name : title, "persona");
         String previousPath = editId != null ? lookupFilePath("personas", editId) : "";
         if (editId == null || !relPath.equals(previousPath)) {
             relPath = uniqueCardPath("personas", relPath, editId);
@@ -2631,6 +2713,7 @@ public class LocalBackendServer {
 
         ContentValues cv = new ContentValues();
         cv.put("name", name);
+        cv.put("title", title);
         cv.put("file_path", relPath);
         cv.put("avatar_url", avatarUrl);
         cv.put("description_preview", parsePreview(fileText));
@@ -2693,7 +2776,7 @@ public class LocalBackendServer {
             "(SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id), " +
             "MAX(COALESCE(c.updated_at, c.created_at, ''), " +
             "COALESCE((SELECT m.created_at FROM messages m WHERE m.chat_id = c.id ORDER BY m.sort_key DESC, m.id DESC LIMIT 1), '')) AS last_activity, " +
-            "c.created_at " +
+            "c.created_at, ch.title, p.title " +
             "FROM chats c " +
             "LEFT JOIN characters ch ON ch.id = c.character_id " +
             "LEFT JOIN personas p ON p.id = c.persona_id " +
@@ -2714,6 +2797,8 @@ public class LocalBackendServer {
                 o.put("message_count", cur.getInt(9));
                 o.put("last_activity", cur.getString(10) != null ? cur.getString(10) : "");
                 o.put("created_at", cur.getString(11) != null ? cur.getString(11) : "");
+                o.put("character_title", str(cur, 12));
+                o.put("persona_title", str(cur, 13));
                 arr.put(o);
             }
         } finally {
@@ -2738,8 +2823,9 @@ public class LocalBackendServer {
             if (persona == null) persona = new JSONObject().put("id", 0).put("name", "Игрок");
         }
 
+        String cardTitle = character.optString("title", "");
         ContentValues cv = new ContentValues();
-        cv.put("title", "Чат: " + character.optString("name"));
+        cv.put("title", "Чат: " + (cardTitle.isEmpty() ? character.optString("name") : cardTitle));
         cv.put("character_id", charId);
         cv.put("persona_id", persona.optInt("id", 0));
         cv.put("model_id", modelId);
@@ -2757,9 +2843,11 @@ public class LocalBackendServer {
             writeTextFile(memFile, "# Память чата #" + chatId + "\n\n");
         }
 
-        String rawGreeting = character.optString("first_message", "").trim();
-        if (!rawGreeting.isEmpty()) {
-            String greeting = applyMacros(rawGreeting, character.optString("name", "Персонаж"), persona.optString("name", "Игрок"));
+        // The greeting keeps its macros: names are filled in when it is shown or
+        // sent to the model, so editing it shows {{user}} / {{charN}}, and a
+        // renamed character or persona is renamed in it too.
+        String greeting = character.optString("first_message", "").trim();
+        if (!greeting.isEmpty()) {
             JSONArray swipes = new JSONArray();
             swipes.put(greeting);
 
@@ -2806,6 +2894,8 @@ public class LocalBackendServer {
                 .put("avatar_url", "")
                 .put("first_message", "")
                 .put("description_preview", "")
+                .put("title", "")
+                .put("card", JSONObject.NULL)
                 .put("fileContent", "");
         }
         JSONObject persona = getPersonaByIdJson(personaId);
@@ -2819,6 +2909,7 @@ public class LocalBackendServer {
                     .put("file_path", "")
                     .put("avatar_url", "")
                     .put("description_preview", "")
+                    .put("title", "")
                     .put("fileContent", "");
             }
         }
@@ -2836,10 +2927,13 @@ public class LocalBackendServer {
         return res;
     }
 
+    private static final String MESSAGE_COLUMNS =
+        "id, chat_id, role, content, thoughts, swipes_json, swipe_index, created_at, thought_swipes_json, cast_swipes_json";
+
     private JSONArray getChatMessagesArray(int chatId) throws Exception {
         JSONArray arr = new JSONArray();
         // sort_key, not id: messages that came from the cloud got local ids in arrival order.
-        Cursor c = db.rawQuery("SELECT id, chat_id, role, content, thoughts, swipes_json, swipe_index, created_at, thought_swipes_json FROM messages WHERE chat_id = ? ORDER BY sort_key ASC, id ASC", new String[]{String.valueOf(chatId)});
+        Cursor c = db.rawQuery("SELECT " + MESSAGE_COLUMNS + " FROM messages WHERE chat_id = ? ORDER BY sort_key ASC, id ASC", new String[]{String.valueOf(chatId)});
         while (c.moveToNext()) {
             arr.put(cursorToMessageJson(c));
         }
@@ -2848,7 +2942,7 @@ public class LocalBackendServer {
     }
 
     private JSONObject getMessageByIdJson(int msgId) throws Exception {
-        Cursor c = db.rawQuery("SELECT id, chat_id, role, content, thoughts, swipes_json, swipe_index, created_at, thought_swipes_json FROM messages WHERE id = ?", new String[]{String.valueOf(msgId)});
+        Cursor c = db.rawQuery("SELECT " + MESSAGE_COLUMNS + " FROM messages WHERE id = ?", new String[]{String.valueOf(msgId)});
         JSONObject o = null;
         if (c.moveToFirst()) {
             o = cursorToMessageJson(c);
@@ -2883,6 +2977,11 @@ public class LocalBackendServer {
             thoughtSwipes = new JSONArray();
         }
         o.put("thought_swipes", thoughtSwipes);
+        // Characters each variant introduced; "cast" is the shown variant's.
+        JSONArray castSwipes = jsonArrayOr(str(c, 9));
+        o.put("cast_swipes", castSwipes);
+        JSONArray cast = castSwipes.optJSONArray(c.getInt(6));
+        o.put("cast", cast != null ? cast : new JSONArray());
         return o;
     }
 
@@ -2950,20 +3049,23 @@ public class LocalBackendServer {
 
             String[] result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, history, chat.optString("memory_file_path", ""), prog);
             prog.throwIfCancelled();
+            NewCharacters introduced = extractNewCharacters(result[0]);
 
             synchronized (chatWriteLock) {
                 if (!chatExists(chatId)) throw new Exception("Чат удалён во время генерации");
+                JSONArray newCast = numberNewCharacters(chatId, character, history, introduced, prog);
                 JSONArray aiSwipes = new JSONArray();
-                aiSwipes.put(result[0]);
+                aiSwipes.put(introduced.text);
                 JSONArray aiThoughtSwipes = new JSONArray();
                 aiThoughtSwipes.put(result[1] != null ? result[1] : "");
                 ContentValues aCv = new ContentValues();
                 aCv.put("chat_id", chatId);
                 aCv.put("role", "assistant");
-                aCv.put("content", result[0]);
+                aCv.put("content", introduced.text);
                 aCv.put("thoughts", result[1] != null ? result[1] : "");
                 aCv.put("swipes_json", aiSwipes.toString());
                 aCv.put("thought_swipes_json", aiThoughtSwipes.toString());
+                aCv.put("cast_swipes_json", new JSONArray().put(newCast).toString());
                 aCv.put("swipe_index", 0);
                 aiMsgId = (int) db.insert("messages", null, aCv);
                 touchChat(chatId);
@@ -3086,6 +3188,7 @@ public class LocalBackendServer {
 
                 String[] result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, historyBefore, chat.optString("memory_file_path", ""), prog);
                 prog.throwIfCancelled();
+                NewCharacters introduced = extractNewCharacters(result[0]);
 
                 synchronized (chatWriteLock) {
                     // Re-read: the message may have been edited or deleted meanwhile.
@@ -3093,15 +3196,19 @@ public class LocalBackendServer {
                     if (current == null) throw new Exception("Сообщение удалено во время генерации");
                     JSONArray curSwipes = current.getJSONArray("swipes");
                     JSONArray thoughtSwipes = alignedThoughtSwipes(current, curSwipes.length());
+                    // The new variant has its own characters; the other variants keep theirs.
+                    JSONArray castSwipes = alignedCastSwipes(current, curSwipes.length());
                     String newThoughts = result[1] != null ? result[1] : "";
-                    curSwipes.put(result[0]);
+                    curSwipes.put(introduced.text);
                     thoughtSwipes.put(newThoughts);
+                    castSwipes.put(numberNewCharacters(chatId, character, historyBefore, introduced, prog));
 
                     ContentValues cv = new ContentValues();
-                    cv.put("content", result[0]);
+                    cv.put("content", introduced.text);
                     cv.put("thoughts", newThoughts);
                     cv.put("swipes_json", curSwipes.toString());
                     cv.put("thought_swipes_json", thoughtSwipes.toString());
+                    cv.put("cast_swipes_json", castSwipes.toString());
                     cv.put("swipe_index", curSwipes.length() - 1);
                     db.update("messages", cv, "id = ?", new String[]{String.valueOf(msgId)});
                     touchChat(chatId);
@@ -4309,14 +4416,20 @@ public class LocalBackendServer {
 
     /**
      * Builds the single stdin prompt handed to `claude -p`: the full transcript
-     * plus a short directive to continue as the character. The character card,
-     * persona and chat memory travel in the system prompt (buildSystemPrompt),
-     * exactly as for the Vertex providers. The UI's prompt preview describes
-     * this wrapping, so it is not hidden from the user.
+     * plus a short directive to continue the story. The card, persona and chat
+     * memory travel in the system prompt (buildSystemPrompt), exactly as for
+     * the Vertex providers. The UI's prompt preview describes this wrapping
+     * (deliveryNote in app.js), so it is not hidden from the user.
+     *
+     * The model's turns are signed with the character's name when the card has
+     * exactly one character, otherwise "Рассказчик". The directive does not ask
+     * to leave out "service marks": that would drop <new_character> blocks.
      */
     private String buildClaudeTranscript(JSONObject character, JSONObject persona, JSONArray history) throws Exception {
-        String charName = character.optString("name", "Персонаж");
+        List<CastMember> card = cardCast(character);
+        String charName = card.size() == 1 ? card.get(0).name : "";
         String userName = persona.optString("name", "Игрок");
+        Macros macros = macrosFor(character, persona, history);
 
         StringBuilder sb = new StringBuilder();
         sb.append("=== История диалога ===\n");
@@ -4324,18 +4437,21 @@ public class LocalBackendServer {
             JSONObject m = history.optJSONObject(i);
             if (m == null) continue;
             String role = m.optString("role", "user");
-            String text = m.optString("content", "").trim();
+            String text = macros.apply(m.optString("content", "")).trim();
             if (text.isEmpty()) continue;
-            String speaker = "user".equals(role) ? userName : charName;
+            String speaker = "user".equals(role) ? userName : (charName.isEmpty() ? "Рассказчик" : charName);
             sb.append(speaker).append(":\n")
-              .append(applyMacros(text, charName, userName))
+              .append(text)
               .append("\n\n---\n\n");
         }
 
         sb.append("=== Задание ===\n");
-        sb.append("Продолжи ролевую игру одной следующей репликой за персонажа «")
-          .append(charName).append("». Выведи только сам ответ персонажа без служебных пометок, ")
-          .append("имени в начале и мета-комментариев.");
+        if (!charName.isEmpty()) {
+            sb.append("Продолжи ролевую игру одной следующей репликой за персонажа «").append(charName)
+              .append("». Выведи только сам ответ персонажа без имени в начале и мета-комментариев.");
+        } else {
+            sb.append("Продолжи ролевую игру одной следующей репликой. Выведи только сам ответ без имени в начале и мета-комментариев.");
+        }
         return sb.toString();
     }
 
@@ -4376,7 +4492,7 @@ public class LocalBackendServer {
         // --system-prompt-file, so the CLI never falls back to its own default
         // coding-assistant prompt. The CLI runs in HOME: no workspace folder is
         // involved or exposed.
-        String systemPrompt = buildSystemPrompt(character, persona, memoryRelPath);
+        String systemPrompt = buildSystemPrompt(character, persona, memoryRelPath, history);
         String sysPromptPath = claudeRuntime.writeHomeFile(cliPromptFile(chatId), systemPrompt);
 
         String transcript = buildClaudeTranscript(character, persona, history);
@@ -4606,42 +4722,425 @@ public class LocalBackendServer {
         return sb.toString().trim();
     }
 
+    // =========================================================================
+    // CARDS, CAST & MACROS
+    // =========================================================================
+    // A character card is free text (its file, sent as it is) or structured
+    // (card_json): world settings plus characters numbered {{char1}},
+    // {{char2}}…; a number stays with its character for good. A reply can
+    // introduce more characters with a <new_character name="…">…</new_character>
+    // block, which the user's own system prompt asks for. The block is taken
+    // out of the reply and kept with that reply variant (cast_swipes_json), so
+    // swiping, rerolling, deleting or rewinding the reply changes the cast with
+    // it. mobile/tests/system-prompt.test.js and story-characters.test.js
+    // mirror this logic.
+    private static final int CARD_MAX_CHARS = 50;
+    private static final int CAST_MAX_PER_REPLY = 20;
+    private static final int CAST_NAME_MAX = 80;
+    private static final int CAST_TEXT_MAX = 200_000;
+    private static final int CAST_NUM_MAX = 99_999;
+    private static final String UNNAMED = "Без имени";
+
+    /** A character the model plays: from the card, or introduced by a reply. */
+    static final class CastMember {
+        final int n;
+        final String name;
+        final String text;
+
+        CastMember(int n, String name, String text) {
+            this.n = n;
+            this.name = name;
+            this.text = text;
+        }
+    }
+
+    /** {{user}}, {{char}} and {{charN}}, in any letter case. */
+    private static final Pattern MACRO = Pattern.compile("\\{\\{(user|char(\\d{0,5}))\\}\\}", Pattern.CASE_INSENSITIVE);
+
+    /** The names the macros stand for. A macro without a name (null) stays as written. */
+    static final class Macros {
+        final Map<Integer, String> names;
+        final String alias;
+        final String user;
+
+        Macros(Map<Integer, String> names, String alias, String user) {
+            this.names = names;
+            this.alias = alias;
+            this.user = user;
+        }
+
+        String apply(String text) {
+            if (text == null) return "";
+            if (text.indexOf("{{") < 0) return text;
+            Matcher m = MACRO.matcher(text);
+            StringBuffer sb = new StringBuffer();
+            while (m.find()) {
+                String value;
+                if (m.group(1).equalsIgnoreCase("user")) {
+                    value = user;
+                } else if (m.group(2).isEmpty()) {
+                    value = alias;
+                } else {
+                    value = names.get(Integer.parseInt(m.group(2)));
+                }
+                m.appendReplacement(sb, Matcher.quoteReplacement(value != null ? value : m.group()));
+            }
+            m.appendTail(sb);
+            return sb.toString();
+        }
+    }
+
+    /**
+     * {{user}} is the persona's name, {{charN}} the name of character N (the
+     * card's, then those the replies of the history introduced), {{char}} is
+     * {{char1}} or, without a character 1, the card's first character.
+     */
+    static Macros macrosFor(JSONObject character, JSONObject persona, JSONArray history) {
+        List<CastMember> card = cardCast(character);
+        Map<Integer, String> names = new HashMap<>();
+        for (CastMember m : card) if (!names.containsKey(m.n)) names.put(m.n, m.name);
+        for (CastMember m : storyCast(history)) if (!names.containsKey(m.n)) names.put(m.n, m.name);
+        String alias = names.containsKey(1) ? names.get(1) : (card.isEmpty() ? null : card.get(0).name);
+        return new Macros(names, alias, persona.optString("name", "Игрок"));
+    }
+
+    /** A card's or persona's title: one line of at most 120 characters. */
+    static String cleanTitle(String raw) {
+        String t = raw == null ? "" : raw.replaceAll("\\p{Cntrl}+", " ").replaceAll("\\s+", " ").trim();
+        return clip(t, 120).trim();
+    }
+
+    /** A character's name: one line without quotes or angle brackets (it goes into name="…"). */
+    static String cleanCastName(String raw) {
+        String t = raw == null ? "" : raw.replaceAll("[\\p{Cntrl}\"<>]+", " ").replaceAll("\\s+", " ").trim();
+        return clip(t, CAST_NAME_MAX).trim();
+    }
+
+    /** A name put inside name="…". */
+    private static String attrValue(String raw) {
+        return (raw == null ? "" : raw).replaceAll("\\p{Cntrl}+", " ").replace('"', '\'').trim();
+    }
+
+    /** A structured card from card_json, or null for a free-text card. */
+    static JSONObject parseCardJson(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return null;
+        try {
+            JSONObject card = new JSONObject(raw);
+            return card.optJSONArray("chars") != null ? card : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * A card structure checked and normalised: {v: 2, world, chars: [{n, name,
+     * text}], next}. Characters without a name and a text are dropped, one with
+     * a text only is "Без имени"; a missing or repeated number gets a free one;
+     * next is above every number used.
+     */
+    static JSONObject sanitizeCard(JSONObject in) throws Exception {
+        JSONArray src = in.optJSONArray("chars");
+        List<JSONObject> kept = new ArrayList<>();
+        java.util.Set<Integer> used = new java.util.HashSet<>();
+        int max = 0;
+        for (int i = 0; src != null && i < src.length() && kept.size() < CARD_MAX_CHARS; i++) {
+            JSONObject c = src.optJSONObject(i);
+            if (c == null) continue;
+            String name = cleanCastName(c.optString("name", ""));
+            String text = clip(c.optString("text", ""), CAST_TEXT_MAX);
+            if (name.isEmpty() && text.trim().isEmpty()) continue;
+            int n = c.optInt("n", 0);
+            if (n < 1 || n > CAST_NUM_MAX || !used.add(n)) {
+                n = 0;
+            } else {
+                max = Math.max(max, n);
+            }
+            kept.add(new JSONObject().put("n", n).put("name", name.isEmpty() ? UNNAMED : name).put("text", text));
+        }
+        int next = Math.min(Math.max(in.optInt("next", 1), max + 1), CAST_NUM_MAX + 1);
+        JSONArray chars = new JSONArray();
+        for (JSONObject c : kept) {
+            if (c.getInt("n") == 0) c.put("n", next++);
+            chars.put(c);
+        }
+        return new JSONObject().put("v", 2).put("world", clip(in.optString("world", ""), CAST_TEXT_MAX))
+            .put("chars", chars).put("next", next);
+    }
+
+    /** The characters of one reply variant, checked: at most 20, each with its own number and a name. */
+    static JSONArray sanitizeCast(JSONArray src) throws Exception {
+        JSONArray out = new JSONArray();
+        java.util.Set<Integer> used = new java.util.HashSet<>();
+        for (int i = 0; src != null && i < src.length() && out.length() < CAST_MAX_PER_REPLY; i++) {
+            JSONObject c = src.optJSONObject(i);
+            if (c == null) continue;
+            int n = c.optInt("n", 0);
+            if (n < 1 || n > CAST_NUM_MAX || !used.add(n)) continue;
+            String name = cleanCastName(c.optString("name", ""));
+            out.put(new JSONObject().put("n", n).put("name", name.isEmpty() ? UNNAMED : name)
+                .put("text", clip(c.optString("text", ""), CAST_TEXT_MAX)));
+        }
+        return out;
+    }
+
+    private static List<CastMember> cardMembers(JSONObject card) {
+        List<CastMember> out = new ArrayList<>();
+        JSONArray chars = card.optJSONArray("chars");
+        for (int i = 0; chars != null && i < chars.length(); i++) {
+            JSONObject c = chars.optJSONObject(i);
+            if (c != null) out.add(new CastMember(c.optInt("n", 0), c.optString("name", ""), c.optString("text", "")));
+        }
+        return out;
+    }
+
+    /** The card's characters in order: a structured card's list, or a free-text card as character 1. */
+    static List<CastMember> cardCast(JSONObject character) {
+        JSONObject card = character.optJSONObject("card");
+        if (card != null) return cardMembers(card);
+        List<CastMember> out = new ArrayList<>();
+        out.add(new CastMember(1, character.optString("name", "Персонаж"), character.optString("fileContent", "")));
+        return out;
+    }
+
+    /** The characters the replies of a history introduced, from the variant each reply shows. */
+    static List<CastMember> storyCast(JSONArray history) {
+        List<CastMember> out = new ArrayList<>();
+        for (int i = 0; history != null && i < history.length(); i++) {
+            JSONObject m = history.optJSONObject(i);
+            if (m == null || "user".equals(m.optString("role"))) continue;
+            JSONArray cast = m.optJSONArray("cast");
+            for (int j = 0; cast != null && j < cast.length(); j++) {
+                JSONObject c = cast.optJSONObject(j);
+                if (c != null) out.add(new CastMember(c.optInt("n", 0), c.optString("name", ""), c.optString("text", "")));
+            }
+        }
+        return out;
+    }
+
+    /** The number the card gives its next character (a free-text card has character 1 only). */
+    static int cardNextNum(JSONObject character) {
+        JSONObject card = character.optJSONObject("card");
+        if (card == null) return 2;
+        int next = Math.max(1, card.optInt("next", 1));
+        for (CastMember m : cardMembers(card)) next = Math.max(next, m.n + 1);
+        return next;
+    }
+
+    /** The highest number among the characters that replies introduced, every variant included. */
+    private int maxCastNum(String where, String arg) {
+        int max = 0;
+        Cursor c = db.rawQuery("SELECT m.cast_swipes_json FROM messages m WHERE " + where
+            + " AND m.cast_swipes_json LIKE '%\"n\"%'", new String[]{arg});
+        try {
+            while (c.moveToNext()) {
+                JSONArray variants = jsonArrayOr(str(c, 0));
+                for (int i = 0; i < variants.length(); i++) {
+                    JSONArray cast = variants.optJSONArray(i);
+                    for (int j = 0; cast != null && j < cast.length(); j++) {
+                        JSONObject e = cast.optJSONObject(j);
+                        if (e != null) max = Math.max(max, e.optInt("n", 0));
+                    }
+                }
+            }
+        } finally {
+            c.close();
+        }
+        return max;
+    }
+
+    private int maxCastNumInChat(int chatId) {
+        return maxCastNum("m.chat_id = ?", String.valueOf(chatId));
+    }
+
+    private int maxCastNumForCard(int charId) {
+        return maxCastNum("m.chat_id IN (SELECT id FROM chats WHERE character_id = ?)", String.valueOf(charId));
+    }
+
+    /** Characters as the model gets them: <character name="…">description</character>, one after another. */
+    static String renderCharacterBlocks(List<CastMember> members, Macros macros) {
+        StringBuilder sb = new StringBuilder();
+        for (CastMember m : members) {
+            if (sb.length() > 0) sb.append("\n\n");
+            String text = macros.apply(m.text).trim();
+            sb.append("<character name=\"").append(attrValue(m.name)).append("\">");
+            if (!text.isEmpty()) sb.append('\n').append(text).append('\n');
+            sb.append("</character>");
+        }
+        return sb.toString();
+    }
+
+    /** A structured card as the model gets it inside <character_persona>: world settings, then the characters. */
+    static String renderCard(JSONObject card, Macros macros) {
+        StringBuilder sb = new StringBuilder();
+        String world = macros.apply(card.optString("world", "")).trim();
+        if (!world.isEmpty()) sb.append("<world_settings>\n").append(world).append("\n</world_settings>");
+        String blocks = renderCharacterBlocks(cardMembers(card), macros);
+        if (!blocks.isEmpty()) {
+            if (sb.length() > 0) sb.append("\n\n");
+            sb.append(blocks);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * A structured card's file: the text the model gets, with the card's own
+     * {{charN}} filled in ({{user}} and {{char}} stay). This version reads
+     * card_json; the file is for older versions and a restore by file.
+     */
+    static String renderCardFile(JSONObject card) {
+        Map<Integer, String> names = new HashMap<>();
+        for (CastMember m : cardMembers(card)) if (!names.containsKey(m.n)) names.put(m.n, m.name);
+        return renderCard(card, new Macros(names, null, null));
+    }
+
+    /** The list preview of a structured card: its world settings, else its first character's description. */
+    private String cardPreview(JSONObject card) {
+        String world = card.optString("world", "").trim();
+        if (!world.isEmpty()) return parsePreview(world);
+        List<CastMember> members = cardMembers(card);
+        return members.isEmpty() ? "" : parsePreview(members.get(0).text);
+    }
+
+    /** The characters per variant, one list per swipe (rows from before 1.9 have none). */
+    private static JSONArray alignedCastSwipes(JSONObject msg, int swipeCount) {
+        JSONArray src = msg.optJSONArray("cast_swipes");
+        JSONArray out = new JSONArray();
+        for (int i = 0; i < swipeCount; i++) {
+            JSONArray cast = src != null ? src.optJSONArray(i) : null;
+            out.put(cast != null ? cast : new JSONArray());
+        }
+        return out;
+    }
+
+    /** A reply without its <new_character> blocks, and the {name, description} of each block. */
+    static final class NewCharacters {
+        final String text;
+        final List<String[]> blocks;
+
+        NewCharacters(String text, List<String[]> blocks) {
+            this.text = text;
+            this.blocks = blocks;
+        }
+    }
+
+    private static final Pattern NEW_CHARACTER_BLOCK = Pattern.compile(
+        "<\\s*new_character\\b([^>]*)>([\\s\\S]*?)(?:<\\s*/\\s*new_character\\s*>|\\z)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern NEW_CHARACTER_NAME = Pattern.compile(
+        "name\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|«([^»]*)»|“([^”]*)”|([^\\s>]+))", Pattern.CASE_INSENSITIVE);
+    private static final Pattern NEW_CHARACTER_NAME_LINE = Pattern.compile(
+        "^\\s*(?:Имя|Name)\\s*:\\s*(.+)$", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern EMPTY_CODE_FENCE = Pattern.compile("```[\\w-]*\\s*```");
+    private static final Pattern EXTRA_BLANK_LINES = Pattern.compile("\\n(?:[ \\t]*\\n){2,}");
+
+    /**
+     * Takes the <new_character name="…">…</new_character> blocks out of a
+     * reply. A block may stand anywhere; one left open runs to the end (the
+     * reply was cut off). Without a name attribute a first line "Имя: …" names
+     * the character. Only when blocks were taken out is the rest tidied: code
+     * fences left empty and runs of blank lines go.
+     */
+    static NewCharacters extractNewCharacters(String reply) {
+        String src = reply != null ? reply : "";
+        List<String[]> blocks = new ArrayList<>();
+        Matcher m = NEW_CHARACTER_BLOCK.matcher(src);
+        StringBuilder rest = new StringBuilder();
+        int last = 0;
+        while (m.find()) {
+            rest.append(src, last, m.start()).append("\n\n");
+            last = m.end();
+            String name = "";
+            Matcher nm = NEW_CHARACTER_NAME.matcher(m.group(1));
+            if (nm.find()) {
+                for (int g = 1; g <= 5 && name.isEmpty(); g++) {
+                    if (nm.group(g) != null) name = nm.group(g);
+                }
+            }
+            String body = m.group(2).trim();
+            if (cleanCastName(name).isEmpty()) {
+                int nl = body.indexOf('\n');
+                Matcher line = NEW_CHARACTER_NAME_LINE.matcher(nl >= 0 ? body.substring(0, nl) : body);
+                if (line.matches()) {
+                    name = line.group(1);
+                    body = nl >= 0 ? body.substring(nl + 1).trim() : "";
+                }
+            }
+            name = cleanCastName(name);
+            blocks.add(new String[]{name.isEmpty() ? UNNAMED : name, clip(body, CAST_TEXT_MAX)});
+        }
+        if (blocks.isEmpty()) return new NewCharacters(src, blocks);
+        rest.append(src.substring(last));
+        String text = EMPTY_CODE_FENCE.matcher(rest.toString()).replaceAll("");
+        text = EXTRA_BLANK_LINES.matcher(text).replaceAll("\n\n").trim();
+        return new NewCharacters(text, blocks);
+    }
+
+    /**
+     * Numbers the characters a reply introduced; the result is that variant's
+     * list. A name the cast already has (the card's, or one an earlier reply
+     * introduced) is skipped: a character is described once. Numbers continue
+     * after the card's and after every number used in this chat, all variants
+     * included, so no two characters of a chat share one. Runs under
+     * chatWriteLock.
+     */
+    private JSONArray numberNewCharacters(int chatId, JSONObject character, JSONArray history, NewCharacters found,
+                                          GenerationProgress prog) throws Exception {
+        JSONArray out = new JSONArray();
+        if (found.blocks.isEmpty()) return out;
+        java.util.Set<String> taken = new java.util.HashSet<>();
+        for (CastMember m : cardCast(character)) taken.add(m.name.trim().toLowerCase(Locale.ROOT));
+        for (CastMember m : storyCast(history)) taken.add(m.name.trim().toLowerCase(Locale.ROOT));
+        int next = Math.max(cardNextNum(character), maxCastNumInChat(chatId) + 1);
+        for (String[] b : found.blocks) {
+            if (out.length() >= CAST_MAX_PER_REPLY) break;
+            if (!UNNAMED.equals(b[0]) && !taken.add(b[0].toLowerCase(Locale.ROOT))) {
+                prog.addLog("👤 Блок персонажа «" + b[0] + "» пропущен: такой персонаж уже есть");
+                continue;
+            }
+            out.put(new JSONObject().put("n", next).put("name", b[0]).put("text", b[1]));
+            prog.addLog("👤 Новый персонаж: " + b[0] + " ({{char" + next + "}})");
+            next++;
+        }
+        return out;
+    }
+
     /**
      * The complete system prompt of a chat, identical for every provider.
      *
      * The user's own instructions (workspace GEMINI.md, edited in the UI as
      * «Системный промпт») come first and fully define behaviour: nothing else is
-     * prepended or hidden. Below them, in fixed tags, the character card, the
-     * chat's persona and (if filled in) the chat memory are appended.
+     * prepended or hidden. Below them, in fixed tags: the card (a free-text card
+     * as it is; a structured one as <world_settings> and <character name="…">
+     * blocks), the characters the replies of {@code history} introduced, the
+     * chat's persona and (if filled in) the chat memory. The macros are filled
+     * in everywhere (macrosFor). Titles never reach the model.
      */
-    private String buildSystemPrompt(JSONObject character, JSONObject persona, String memoryRelPath) {
-        String charName = character.optString("name", "Персонаж");
-        String userName = persona.optString("name", "Игрок");
+    private String buildSystemPrompt(JSONObject character, JSONObject persona, String memoryRelPath, JSONArray history) {
+        Macros macros = macrosFor(character, persona, history);
         String rules = readTextFile(new File(workspaceDir, "GEMINI.md")).trim();
         // Older builds seeded the file with just this heading; it is not an instruction.
         if (rules.equals("# GEMINI.md")) rules = "";
-        String charCard = character.optString("fileContent", "").trim();
+        JSONObject card = character.optJSONObject("card");
+        String charCard = card != null ? renderCard(card, macros) : macros.apply(character.optString("fileContent", "").trim());
+        String story = renderCharacterBlocks(storyCast(history), macros);
+        if (!story.isEmpty()) charCard = charCard.isEmpty() ? story : charCard + "\n\n" + story;
         String personaCard = persona.optString("fileContent", "").trim();
         String memory = readChatMemory(memoryRelPath);
 
         StringBuilder sb = new StringBuilder();
         if (!rules.isEmpty()) {
-            sb.append(applyMacros(rules, charName, userName)).append("\n\n");
+            sb.append(macros.apply(rules)).append("\n\n");
         }
         if (!charCard.isEmpty()) {
-            sb.append("<character_persona>\n").append(applyMacros(charCard, charName, userName)).append("\n</character_persona>\n\n");
+            sb.append("<character_persona>\n").append(charCard).append("\n</character_persona>\n\n");
         }
         if (!personaCard.isEmpty()) {
-            sb.append("<user_persona>\n").append(applyMacros(personaCard, charName, userName)).append("\n</user_persona>\n\n");
+            sb.append("<user_persona name=\"").append(attrValue(persona.optString("name", "Игрок"))).append("\">\n")
+              .append(macros.apply(personaCard)).append("\n</user_persona>\n\n");
         }
         if (!memory.isEmpty()) {
-            sb.append("<chat_memory>\n").append(applyMacros(memory, charName, userName)).append("\n</chat_memory>\n\n");
+            sb.append("<chat_memory>\n").append(macros.apply(memory)).append("\n</chat_memory>\n\n");
         }
         return sb.toString().trim();
-    }
-
-    private static String applyMacros(String text, String charName, String userName) {
-        return text.replace("{{char}}", charName).replace("{{user}}", userName);
     }
 
     /** Chat memory text, or "" when the file only holds its auto-created heading. */
@@ -4718,10 +5217,11 @@ public class LocalBackendServer {
             return callClaudeCodeCli(chatId, baseModel, effort, character, persona, history, memoryRelPath, prog);
         }
 
-        String systemInstructionText = buildSystemPrompt(character, persona, memoryRelPath);
+        String systemInstructionText = buildSystemPrompt(character, persona, memoryRelPath, history);
+        Macros macros = macrosFor(character, persona, history);
 
         // The whole history as alternating user/model turns (consecutive
-        // messages of one side are joined).
+        // messages of one side are joined). Only the macros are filled in.
         JSONArray contents = new JSONArray();
         int historyChars = 0;
         for (int i = 0; i < history.length(); i++) {
@@ -4729,7 +5229,7 @@ public class LocalBackendServer {
             if (m == null) continue;
             String rawRole = m.optString("role", "user");
             String apiRole = "user".equals(rawRole) ? "user" : "model";
-            String msgText = m.optString("content", "").trim();
+            String msgText = macros.apply(m.optString("content", "")).trim();
             if (msgText.isEmpty()) continue;
 
             // The API wants the first turn from the user. When the chat opens with

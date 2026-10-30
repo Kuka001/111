@@ -22,24 +22,26 @@ function schemaStatements() {
     .filter(Boolean);
 }
 
-/** The app's own tables, as initWorkspaceAndDatabase() leaves them (with the 1.8 sync columns). */
+/** The app's own tables, as initWorkspaceAndDatabase() leaves them (with the 1.8 sync and 1.9 card columns). */
 function appDatabase() {
   const db = new DatabaseSync(':memory:');
   db.exec(`
     CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE characters (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, file_path TEXT NOT NULL UNIQUE,
       avatar_url TEXT DEFAULT '', first_message TEXT DEFAULT '', description_preview TEXT DEFAULT '',
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, sync_id TEXT);
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, sync_id TEXT,
+      title TEXT DEFAULT '', card_json TEXT DEFAULT '');
     CREATE TABLE personas (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, file_path TEXT NOT NULL UNIQUE,
       avatar_url TEXT DEFAULT '', description_preview TEXT DEFAULT '', is_default INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP, sync_id TEXT);
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP, sync_id TEXT, title TEXT DEFAULT '');
     CREATE TABLE chats (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, character_id INTEGER NOT NULL,
       persona_id INTEGER NOT NULL, model_id TEXT NOT NULL, effort TEXT DEFAULT 'high', memory_file_path TEXT DEFAULT '',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, provider TEXT DEFAULT '',
       sync_id TEXT, character_sid TEXT DEFAULT '', persona_sid TEXT DEFAULT '');
     CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, role TEXT NOT NULL,
       content TEXT NOT NULL, thoughts TEXT DEFAULT '', swipes_json TEXT DEFAULT '[]', swipe_index INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP, thought_swipes_json TEXT DEFAULT '[]', sync_id TEXT, sort_key INTEGER);
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP, thought_swipes_json TEXT DEFAULT '[]', sync_id TEXT, sort_key INTEGER,
+      cast_swipes_json TEXT DEFAULT '[]');
   `);
   return db;
 }
@@ -126,6 +128,20 @@ test('edits queue the record again; a reply bumping updated_at does not', () => 
   db.exec("UPDATE characters SET avatar_url = 'data:image/png;base64,AA'");
   db.exec("UPDATE personas SET is_default = 1");
   assert.deepStrictEqual(outbox(db).map(r => r.kind), ['character', 'chat', 'persona']);
+});
+
+test('1.9 fields queue their record: card title and structure, persona title, characters of reply variants', () => {
+  const db = linkedDatabase();
+  const chatId = addChat(db);
+  const msgId = addMessage(db, chatId, 'привет');
+  db.exec('DELETE FROM cloud_outbox');
+  db.exec("UPDATE characters SET card_json = '{\"v\":2,\"world\":\"\",\"chars\":[],\"next\":1}'");
+  db.exec("UPDATE personas SET title = 'Кадзума — маг'");
+  db.prepare("UPDATE messages SET cast_swipes_json = '[[{\"n\":2,\"name\":\"Лира\",\"text\":\"\"}]]' WHERE id = ?").run(msgId);
+  assert.deepStrictEqual(outbox(db).map(r => r.kind), ['character', 'message', 'persona']);
+  db.exec('DELETE FROM cloud_outbox');
+  db.exec("UPDATE characters SET title = 'Таверна'");
+  assert.deepStrictEqual(outbox(db).map(r => r.kind), ['character']);
 });
 
 test('a deleted message names its chat; deleting the chat queues the chat and its memory', () => {

@@ -84,7 +84,8 @@ END
 --;;
 DROP TRIGGER IF EXISTS cloud_characters_upd
 --;;
-CREATE TRIGGER cloud_characters_upd AFTER UPDATE OF name, file_path, avatar_url, first_message, description_preview
+CREATE TRIGGER cloud_characters_upd AFTER UPDATE OF name, file_path, avatar_url, first_message, description_preview,
+  title, card_json
 ON characters WHEN NEW.sync_id IS NOT NULL AND (SELECT tracking = 1 AND applying = 0 FROM cloud_ctl WHERE id = 1) BEGIN
   DELETE FROM cloud_outbox WHERE kind = 'character' AND sid = NEW.sync_id;
   INSERT INTO cloud_outbox (kind, sid, parent, queued_at)
@@ -114,7 +115,7 @@ END
 --;;
 DROP TRIGGER IF EXISTS cloud_personas_upd
 --;;
-CREATE TRIGGER cloud_personas_upd AFTER UPDATE OF name, file_path, avatar_url, description_preview, is_default
+CREATE TRIGGER cloud_personas_upd AFTER UPDATE OF name, file_path, avatar_url, description_preview, is_default, title
 ON personas WHEN NEW.sync_id IS NOT NULL AND (SELECT tracking = 1 AND applying = 0 FROM cloud_ctl WHERE id = 1) BEGIN
   DELETE FROM cloud_outbox WHERE kind = 'persona' AND sid = NEW.sync_id;
   INSERT INTO cloud_outbox (kind, sid, parent, queued_at)
@@ -184,7 +185,8 @@ END
 --;;
 DROP TRIGGER IF EXISTS cloud_messages_upd
 --;;
-CREATE TRIGGER cloud_messages_upd AFTER UPDATE OF role, content, thoughts, swipes_json, swipe_index, thought_swipes_json
+CREATE TRIGGER cloud_messages_upd AFTER UPDATE OF role, content, thoughts, swipes_json, swipe_index, thought_swipes_json,
+  cast_swipes_json
 ON messages WHEN NEW.sync_id IS NOT NULL AND (SELECT tracking = 1 AND applying = 0 FROM cloud_ctl WHERE id = 1) BEGIN
   DELETE FROM cloud_outbox WHERE kind = 'message' AND sid = NEW.sync_id;
   INSERT INTO cloud_outbox (kind, sid, parent, queued_at)

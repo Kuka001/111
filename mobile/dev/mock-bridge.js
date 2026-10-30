@@ -16,6 +16,8 @@
 //   ?hang=1       self-test: plain start hangs, the safe Bun mode works
 //   ?hang=2       self-test: every mode hangs
 //   ?engine=N     report another native engine build (older ones get a warning)
+//   /newchar      (in a message) the reply introduces a character with a
+//                 <new_character> block, as the user's system prompt asks
 //   ?cloud=…      cloud page state: none (default, not set up) | signedout |
 //                 novault | locked | ready | quota | error. Mock encryption
 //                 password: "мой кот любит зимний чай"; recovery code:
@@ -24,10 +26,10 @@
   'use strict';
 
   const params = new URLSearchParams(location.search);
-  const ENGINE = Number(params.get('engine') || 26);
+  const ENGINE = Number(params.get('engine') || 27);
   const LOGIN_HANG = params.get('loginhang') === '1';
   const DELAY = Number(params.get('delay') || 120);
-  const APP_VERSION = '1.8.0';
+  const APP_VERSION = '1.9.0';
   const MOCK_SNAPSHOT = ['pid 4242 ld-musl-agy.so.1 · S (sleeping) · потоков 9 · tracer 0',
     '  $ …/ld-musl-agy.so.1 …/claude --debug-to-stderr auth login --claudeai',
     '  · 4242 [claude] S ждёт · ep_poll · epoll_pwait(0x5, 0x7ffd, 0x400)',
@@ -44,6 +46,67 @@
     // btoa takes Latin-1 only: encode the UTF-8 bytes (the letters are Cyrillic).
     return 'data:image/svg+xml;base64,' + btoa(String.fromCharCode(...new TextEncoder().encode(svg)));
   }
+
+  // ---------------------------------------------------------------------------
+  // Cards, cast & macros: mirrors "CARDS, CAST & MACROS" in LocalBackendServer.java.
+  const MACRO_RE = /\{\{(user|char(\d{0,5}))\}\}/gi;
+  const cardMembers = (card) => (card && Array.isArray(card.chars) ? card.chars : []).map(c => ({ n: Number(c.n), name: c.name, text: c.text || '' }));
+  const cardCast = (ch) => (ch.card ? cardMembers(ch.card) : [{ n: 1, name: ch.name || 'Персонаж', text: ch.fileContent || '' }]);
+  const storyCast = (history) => history.filter(m => m.role !== 'user').flatMap(m => m.cast || []);
+  function macrosFor(ch, persona, history) {
+    const card = cardCast(ch);
+    const names = {};
+    card.concat(storyCast(history)).forEach(c => { if (!(c.n in names)) names[c.n] = c.name; });
+    return { names, user: persona ? persona.name : null, alias: (1 in names) ? names[1] : (card[0] ? card[0].name : null) };
+  }
+  function applyMacros(text, mac) {
+    return String(text || '').replace(MACRO_RE, (all, word, digits) => {
+      const v = word.toLowerCase() === 'user' ? mac.user : (!digits ? mac.alias : mac.names[Number(digits)]);
+      return v == null ? all : v;
+    });
+  }
+  const attr = (v) => String(v || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/"/g, "'").trim();
+  const renderBlocks = (members, mac) => members.map(m => {
+    const text = applyMacros(m.text, mac).trim();
+    return `<character name="${attr(m.name)}">` + (text ? `\n${text}\n` : '') + '</character>';
+  }).join('\n\n');
+  function renderCard(card, mac) {
+    const world = applyMacros(card.world, mac).trim();
+    return [world ? `<world_settings>\n${world}\n</world_settings>` : '', renderBlocks(cardMembers(card), mac)].filter(Boolean).join('\n\n');
+  }
+  function renderCardFile(card) {
+    const names = {};
+    cardMembers(card).forEach(c => { if (!(c.n in names)) names[c.n] = c.name; });
+    return renderCard(card, { names, user: null, alias: null });
+  }
+  function cardNextNum(ch) {
+    if (!ch.card) return 2;
+    return Math.max(Number(ch.card.next) || 1, ...cardMembers(ch.card).map(c => c.n + 1));
+  }
+  function extractNewCharacters(reply) {
+    const blocks = [];
+    const rest = reply.replace(/<\s*new_character\b([^>]*)>([\s\S]*?)(?:<\s*\/\s*new_character\s*>|$)/gi, (all, attrs, body) => {
+      const m = attrs.match(/name\s*=\s*(?:"([^"]*)"|'([^']*)'|«([^»]*)»|“([^”]*)”|([^\s>]+))/i);
+      blocks.push({ name: (m ? (m[1] || m[2] || m[3] || m[4] || m[5] || '') : '').trim() || 'Без имени', text: body.trim() });
+      return '\n\n';
+    });
+    if (!blocks.length) return { text: reply, blocks };
+    return { text: rest.replace(/```[\w-]*\s*```/g, '').replace(/\n(?:[ \t]*\n){2,}/g, '\n\n').trim(), blocks };
+  }
+  /** Numbers for the characters a reply introduced; a name the cast has is skipped. */
+  function numberNewCharacters(chatId, ch, history, blocks) {
+    const taken = new Set(cardCast(ch).concat(storyCast(history)).map(c => c.name.trim().toLowerCase()));
+    let next = Math.max(cardNextNum(ch), 1 + Math.max(0, ...db.messages.filter(m => m.chat_id === chatId)
+      .flatMap(m => (m.cast_swipes || []).flat()).map(c => c.n)));
+    const out = [];
+    for (const b of blocks) {
+      if (b.name !== 'Без имени' && taken.has(b.name.toLowerCase())) continue;
+      taken.add(b.name.toLowerCase());
+      out.push({ n: next++, name: b.name, text: b.text });
+    }
+    return out;
+  }
+  const castOf = (m) => ((m.cast_swipes || [])[m.swipe_index] || []);
 
   const db = {
     seq: 100,
@@ -78,14 +141,22 @@
         first_message: '*Кира отрывается от карты и медленно поднимает взгляд.* «Ты опоздал. Опять.»' },
       { id: 2, name: 'Елена', file_path: 'characters/elena.md', avatar_url: photoAvatar('Е', '#1f8a78', '#dcfff8'),
         first_message: '*Архив пахнет пылью и воском.* «Тише. Здесь даже книги умеют слушать.»' },
-      { id: 3, name: 'Ворон', file_path: 'characters/voron.md', avatar_url: '', first_message: '' }
+      { id: 3, name: 'Ворон', file_path: 'characters/voron.md', avatar_url: '', first_message: '' },
+      { id: 4, name: 'Юки', title: 'Таверна «Сломанный меч»', file_path: 'characters/tavern.md', avatar_url: photoAvatar('Т', '#7a4b1f', '#ffe9d6'),
+        first_message: '*Таверна у городских ворот, поздний вечер. {{char1}} протирает стойку, {{char2}} дремлет у камина.*\n\n{{char1}}: С возвращением, {{user}}~',
+        card: { v: 2, world: 'Таверна у ворот приграничного города, здесь собираются наёмники и торговцы. {{char1}} и {{char2}} — сёстры и хозяйки таверны.',
+          chars: [
+            { n: 1, name: 'Юки', text: 'Младшая сестра, двадцать лет. Весёлая, прилипчивая, обожает {{user}}.' },
+            { n: 2, name: 'Хана', text: 'Старшая сестра, двадцать три года. Строгая и стеснительная, ворчит на {{char1}}.' },
+          ], next: 3 } }
     );
     db.files['characters/kira.md'] = 'Кира — наёмница двадцати шести лет, бывший картограф гильдии.\nХарактер: язвительная, верная, ненавидит опоздания.\nМанера речи: короткие фразы, сухой юмор.';
     db.files['characters/elena.md'] = '# Имя: Елена\n\n### Описание и Характер\nХранительница архива. Говорит тихо, видит больше, чем говорит.\n\n### Начальное сообщение\n*Архив пахнет пылью и воском.* «Тише. Здесь даже книги умеют слушать.»\n';
     db.files['characters/voron.md'] = 'Ворон — говорящая птица-проводник.';
+    db.files['characters/tavern.md'] = renderCardFile(db.characters[3].card);
     db.personas.push(
-      { id: 1, name: 'Кадзума', file_path: 'personas/kazuma.md', avatar_url: photoAvatar('К', '#3b4a6b', '#dbe4ff'), is_default: 1 },
-      { id: 2, name: 'Странник', file_path: 'personas/wanderer.md', avatar_url: '', is_default: 0 }
+      { id: 1, name: 'Кадзума', title: 'Кадзума — маг', file_path: 'personas/kazuma.md', avatar_url: photoAvatar('К', '#3b4a6b', '#dbe4ff'), is_default: 1 },
+      { id: 2, name: 'Странник', title: '', file_path: 'personas/wanderer.md', avatar_url: '', is_default: 0 }
     );
     db.files['personas/kazuma.md'] = 'Кадзума — путешественник между мирами, носит потёртый плащ.';
     db.files['personas/wanderer.md'] = 'Безымянный странник без прошлого.';
@@ -98,7 +169,7 @@
     );
     const add = (chatId, role, content, extra) => {
       const m = Object.assign({ id: nextId(), chat_id: chatId, role, content, thoughts: '', swipes: [content],
-        thought_swipes: [''], swipe_index: 0, created_at: now() }, extra || {});
+        thought_swipes: [''], cast_swipes: [[]], swipe_index: 0, created_at: now() }, extra || {});
       db.messages.push(m);
       return m;
     };
@@ -117,6 +188,15 @@
     add(2, 'assistant', db.characters[1].first_message, { created_at: minutesAgo(3000) });
     add(2, 'user', '«Я ищу книгу без названия.»', { created_at: minutesAgo(2950) });
     add(2, 'assistant', '*Елена замирает, не оборачиваясь.* «Такие книги не ищут. Они находят сами.»', { created_at: minutesAgo(2949) });
+
+    db.chats.push({ id: 4, title: 'Чат: Таверна «Сломанный меч»', character_id: 4, persona_id: 1, model_id: 'claude-code-opus', effort: 'high',
+      memory_file_path: 'memories/chat_4.md', provider: 'claude-cli', created_at: minutesAgo(200), updated_at: minutesAgo(190) });
+    db.files['memories/chat_4.md'] = '# Память чата #4\n\n';
+    add(4, 'assistant', db.characters[3].first_message, { created_at: minutesAgo(200) });
+    add(4, 'user', '*Сажусь за стойку.* Налей чего-нибудь горячего.', { created_at: minutesAgo(195) });
+    const lira = { n: 3, name: 'Лира', text: 'Эльфийка-следопыт двадцати восьми лет. Высокая, серебряные волосы до лопаток, шрам на левой скуле. Немногословна, говорит прямо. Ищет брата, пропавшего на перевале.' };
+    add(4, 'assistant', '*{{char1}} ставит перед {{user}} кружку с глинтвейном. Дверь хлопает: на пороге высокая эльфийка с серебряными волосами и дорожной сумкой на плече.*\n\nЛира: Свободные комнаты есть?', {
+      created_at: minutesAgo(190), cast: [lira], cast_swipes: [[lira]] });
 
     if (params.get('long') === '1') {
       db.chats.push({ id: 3, title: 'Долгая кампания', character_id: 1, persona_id: 1, model_id: 'gemini-3.8-flash', effort: 'medium',
@@ -170,22 +250,25 @@
   function charJson(c) {
     if (!c) return null;
     const text = fileContent(c.file_path);
-    return Object.assign({}, c, { description_preview: preview(text), fileContent: text });
+    const card = c.card || null;
+    const desc = card ? (String(card.world || '').trim() || (card.chars[0] ? card.chars[0].text : '')) : text;
+    return Object.assign({ title: '' }, c, { card, description_preview: preview(desc), fileContent: text });
   }
   function personaJson(p) {
     if (!p) return null;
     const text = fileContent(p.file_path);
-    return Object.assign({}, p, { description_preview: preview(text), fileContent: text });
+    return Object.assign({ title: '' }, p, { description_preview: preview(text), fileContent: text });
   }
-  const chatMessages = (chatId) => db.messages.filter(m => m.chat_id === chatId).sort((a, b) => a.id - b.id).map(m => JSON.parse(JSON.stringify(m)));
+  const messageJson = (m) => Object.assign(JSON.parse(JSON.stringify(m)), { cast: JSON.parse(JSON.stringify(castOf(m))) });
+  const chatMessages = (chatId) => db.messages.filter(m => m.chat_id === chatId).sort((a, b) => a.id - b.id).map(messageJson);
 
   function chatDetails(chatId) {
     const chat = db.chats.find(c => c.id === chatId);
     if (!chat) return err(404, 'Чат не найден');
     const character = charJson(db.characters.find(c => c.id === chat.character_id)) ||
-      { id: 0, name: 'Персонаж', file_path: '', avatar_url: '', first_message: '', description_preview: '', fileContent: '' };
+      { id: 0, name: 'Персонаж', title: '', card: null, file_path: '', avatar_url: '', first_message: '', description_preview: '', fileContent: '' };
     const persona = personaJson(db.personas.find(p => p.id === chat.persona_id)) || personaJson(db.personas[0]) ||
-      { id: 0, name: 'Игрок', file_path: '', avatar_url: '', description_preview: '', fileContent: '' };
+      { id: 0, name: 'Игрок', title: '', file_path: '', avatar_url: '', description_preview: '', fileContent: '' };
     const c = Object.assign({}, chat);
     delete c.updated_at;
     // Like the engine: card images are not repeated in chat details.
@@ -204,6 +287,7 @@
       return {
         id: c.id, title: c.title, character_id: c.character_id, persona_id: c.persona_id, model_id: c.model_id,
         effort: c.effort, character_name: ch ? ch.name : 'Персонаж', persona_name: p ? p.name : 'Игрок',
+        character_title: ch ? ch.title || '' : '', persona_title: p ? p.title || '' : '',
         last_message: last ? last.content.slice(0, 300) : '', message_count: msgs.length,
         last_activity: lastActivity, created_at: c.created_at,
       };
@@ -211,17 +295,20 @@
     return rows.sort((a, b) => (b.last_activity || '').localeCompare(a.last_activity || '') || b.id - a.id);
   }
 
-  function buildSystemPrompt(character, persona, memPath) {
-    const sub = (t) => t.split('{{char}}').join(character.name).split('{{user}}').join(persona.name);
+  function buildSystemPrompt(character, persona, memPath, history) {
+    const mac = macrosFor(character, persona, history);
     let rules = fileContent('GEMINI.md').trim();
     if (rules === '# GEMINI.md') rules = '';
     let mem = fileContent(memPath).trim();
     if (mem.startsWith('# Память чата')) mem = mem.includes('\n') ? mem.slice(mem.indexOf('\n') + 1).trim() : '';
+    let card = character.card ? renderCard(character.card, mac) : applyMacros(character.fileContent.trim(), mac);
+    const story = renderBlocks(storyCast(history), mac);
+    if (story) card = card ? card + '\n\n' + story : story;
     const parts = [];
-    if (rules) parts.push(sub(rules));
-    if (character.fileContent.trim()) parts.push('<character_persona>\n' + sub(character.fileContent.trim()) + '\n</character_persona>');
-    if (persona.fileContent.trim()) parts.push('<user_persona>\n' + sub(persona.fileContent.trim()) + '\n</user_persona>');
-    if (mem) parts.push('<chat_memory>\n' + sub(mem) + '\n</chat_memory>');
+    if (rules) parts.push(applyMacros(rules, mac));
+    if (card) parts.push('<character_persona>\n' + card + '\n</character_persona>');
+    if (persona.fileContent.trim()) parts.push(`<user_persona name="${attr(persona.name)}">\n` + applyMacros(persona.fileContent.trim(), mac) + '\n</user_persona>');
+    if (mem) parts.push('<chat_memory>\n' + applyMacros(mem, mac) + '\n</chat_memory>');
     return parts.join('\n\n');
   }
 
@@ -305,7 +392,12 @@
       }
       g.phase = 'generating';
       g.statusText = '✍️ Печатает ответ...';
-      const reply = REPLIES[Math.floor(Math.random() * REPLIES.length)].split('{{char}}').join(ch.name);
+      const charName = ch.card ? (ch.card.chars[0] || {}).name || 'Рассказчик' : ch.name;
+      let reply = REPLIES[Math.floor(Math.random() * REPLIES.length)].split('{{char}}').join(charName);
+      if (/\/newchar/.test(userText)) {
+        const who = ['Лира', 'Мира', 'Тамар', 'Велена'][Math.floor(Math.random() * 4)];
+        reply += `\n\n*Дверь хлопает. На пороге стоит ${who}: высокая, в дорожном плаще, с сумкой на плече.*\n\n${who}: Свободные комнаты есть?\n\n<new_character name="${who}">\n${who} — путешественница двадцати восьми лет. Высокая, тёмные волосы собраны в косу, шрам на левой скуле. Немногословна, говорит прямо. Ищет брата, пропавшего на перевале.\n</new_character>`;
+      }
       for (let i = 0; i < reply.length; i += 6) {
         g.text = reply.slice(0, i + 6);
         g.textChars = g.text.length;
@@ -364,12 +456,35 @@
     }
 
     if (path === '/api/characters' && method === 'GET') return { characters: db.characters.map(charJson) };
+    let cm;
+    if ((cm = path.match(/^\/api\/characters\/(\d+)$/)) && method === 'GET') {
+      const c = db.characters.find(x => x.id === Number(cm[1]));
+      if (!c) return err(404, 'Персонаж не найден');
+      const chats = db.chats.filter(x => x.character_id === c.id).map(x => x.id);
+      const used = db.messages.filter(m => chats.includes(m.chat_id)).flatMap(m => (m.cast_swipes || []).flat()).map(x => x.n);
+      return { character: Object.assign(charJson(c), { next_char_num: Math.max(cardNextNum(c), 1 + Math.max(0, ...used)) }) };
+    }
     if (path === '/api/personas' && method === 'GET') return { personas: db.personas.map(personaJson), activePersonaId: db.settings.activePersonaId };
 
     const saveCard = (table, prefix, editId) => {
+      const title = String(body.title || '').trim().slice(0, 120);
+      if (table === 'characters' && body.card) {
+        // Structured card: the first character names it for older versions.
+        const chars = (body.card.chars || []).filter(c => String(c.name || '').trim() || String(c.text || '').trim());
+        const unnamed = chars.find(c => !String(c.name || '').trim());
+        if (unnamed) return err(400, `У персонажа {{char${unnamed.n}}} нет имени`);
+        if (!title && !chars.length) return err(400, 'Введите название карточки или имя хотя бы одного персонажа');
+        const old = editId ? (db.characters.find(x => x.id === editId) || {}).card : null;
+        const next = Math.max(Number(body.card.next) || 1, old ? Number(old.next) || 1 : 1, ...chars.map(c => Number(c.n) + 1));
+        body.card = { v: 2, world: String(body.card.world || ''), chars: chars.map(c => ({ n: Number(c.n), name: String(c.name).trim(), text: String(c.text || '') })), next };
+        body.name = chars.length ? body.card.chars[0].name : title;
+        body.rawFileContent = renderCardFile(body.card);
+      } else if (table === 'characters') {
+        body.card = null;
+      }
       if (!String(body.name || '').trim()) return err(400, table === 'characters' ? 'Введите имя персонажа' : 'Введите имя персоны');
       const list = db[table];
-      let name = String(body.filePath || '').split('/').pop() || (body.name.toLowerCase().replace(/[^a-zа-яё0-9_-]+/gi, '_') + '.md');
+      let name = String(body.filePath || '').split('/').pop() || ((title || body.name).toLowerCase().replace(/[^a-zа-яё0-9_-]+/gi, '_') + '.md');
       if (!/\.(md|txt)$/.test(name)) name += '.md';
       let fp = prefix + '/' + name;
       let n = 2;
@@ -383,12 +498,15 @@
         row = list.find(x => x.id === editId);
         if (!row) return err(404, 'Не найдено');
         if (row.file_path !== fp) delete db.files[row.file_path];
-        Object.assign(row, { name: body.name, file_path: fp, avatar_url: avatar });
+        Object.assign(row, { name: body.name, title, file_path: fp, avatar_url: avatar });
       } else {
-        row = { id: nextId(), name: body.name, file_path: fp, avatar_url: avatar };
+        row = { id: nextId(), name: body.name, title, file_path: fp, avatar_url: avatar };
         list.push(row);
       }
-      if (table === 'characters') row.first_message = body.firstMessage || '';
+      if (table === 'characters') {
+        row.first_message = body.firstMessage || '';
+        row.card = body.card || null;
+      }
       return table === 'characters' ? ok({ character: charJson(row) }) : ok({ persona: personaJson(row) });
     };
     if (path === '/api/characters' && method === 'POST') return saveCard('characters', 'characters', null);
@@ -426,12 +544,13 @@
       if (!character) return err(404, 'Персонаж не найден. Сначала создайте персонажа.');
       const persona = db.personas.find(p => p.id === Number(body.personaId)) || db.personas[0] || { id: 0, name: 'Игрок' };
       const id = nextId();
-      db.chats.push({ id, title: 'Чат: ' + character.name, character_id: character.id, persona_id: persona.id,
+      db.chats.push({ id, title: 'Чат: ' + (character.title || character.name), character_id: character.id, persona_id: persona.id,
         model_id: body.modelId || db.settings.selectedModel, effort: body.effort || db.settings.selectedEffort,
         memory_file_path: 'memories/chat_' + id + '.md', provider: body.provider || '', created_at: now(), updated_at: now() });
       db.files['memories/chat_' + id + '.md'] = '# Память чата #' + id + '\n\n';
-      const greet = (character.first_message || '').split('{{char}}').join(character.name).split('{{user}}').join(persona.name);
-      if (greet) db.messages.push({ id: nextId(), chat_id: id, role: 'assistant', content: greet, thoughts: '', swipes: [greet], thought_swipes: [''], swipe_index: 0, created_at: now() });
+      // Like the engine: the greeting keeps its macros.
+      const greet = String(character.first_message || '').trim();
+      if (greet) db.messages.push({ id: nextId(), chat_id: id, role: 'assistant', content: greet, thoughts: '', swipes: [greet], thought_swipes: [''], cast_swipes: [[]], swipe_index: 0, created_at: now() });
       return chatDetails(id);
     }
     if ((m = path.match(/^\/api\/chats\/(\d+)(?:\/(.*))?$/))) {
@@ -472,7 +591,7 @@
       if (sub === 'system-prompt' && method === 'GET') {
         const d = chatDetails(chatId);
         if (d.__status) return d;
-        const sp = buildSystemPrompt(d.character, d.persona, d.chat.memory_file_path);
+        const sp = buildSystemPrompt(d.character, d.persona, d.chat.memory_file_path, d.messages);
         return { systemPrompt: sp, chars: sp.length };
       }
       if (sub === 'messages' && method === 'DELETE') {
@@ -488,15 +607,18 @@
         if (!content) return err(400, 'Пустое сообщение');
         if (!chat) return err(404, 'Чат не найден');
         if (db.generations[chatId]) return err(409, 'В этом чате уже идёт генерация.');
-        const userMsg = { id: nextId(), chat_id: chatId, role: 'user', content, thoughts: '', swipes: [content], thought_swipes: [''], swipe_index: 0, created_at: now() };
+        const userMsg = { id: nextId(), chat_id: chatId, role: 'user', content, thoughts: '', swipes: [content], thought_swipes: [''], cast_swipes: [[]], swipe_index: 0, created_at: now() };
         db.messages.push(userMsg);
         try {
-          const r = await runGeneration(chatId, chatMessages(chatId));
+          const history = chatMessages(chatId);
+          const r = await runGeneration(chatId, history);
           if (!db.chats.some(c => c.id === chatId)) return err(502, 'Чат удалён во время генерации');
-          const ai = { id: nextId(), chat_id: chatId, role: 'assistant', content: r.reply, thoughts: r.thoughts, swipes: [r.reply], thought_swipes: [r.thoughts], swipe_index: 0, created_at: now() };
+          const found = extractNewCharacters(r.reply);
+          const cast = numberNewCharacters(chatId, chatDetails(chatId).character, history, found.blocks);
+          const ai = { id: nextId(), chat_id: chatId, role: 'assistant', content: found.text, thoughts: r.thoughts, swipes: [found.text], thought_swipes: [r.thoughts], cast_swipes: [cast], swipe_index: 0, created_at: now() };
           db.messages.push(ai);
           chat.updated_at = now();
-          return { userMessage: JSON.parse(JSON.stringify(userMsg)), assistantMessage: JSON.parse(JSON.stringify(ai)), generation: snapshot(db.lastGenerations[chatId]) };
+          return { userMessage: messageJson(userMsg), assistantMessage: messageJson(ai), generation: snapshot(db.lastGenerations[chatId]) };
         } catch (failure) {
           db.messages = db.messages.filter(x => x.id !== userMsg.id);
           return failure;
@@ -512,19 +634,22 @@
         msg.swipe_index = i;
         msg.content = msg.swipes[i];
         msg.thoughts = (msg.thought_swipes || [])[i] || '';
-        return { message: JSON.parse(JSON.stringify(msg)) };
+        return { message: messageJson(msg) };
       }
       if (body.action === 'regenerate') {
         const history = chatMessages(msg.chat_id).filter(x => x.id < msg.id);
         try {
           const r = await runGeneration(msg.chat_id, history);
           if (!db.messages.includes(msg)) return err(502, 'Сообщение удалено во время генерации');
-          msg.swipes.push(r.reply);
+          const found = extractNewCharacters(r.reply);
+          const cast = numberNewCharacters(msg.chat_id, chatDetails(msg.chat_id).character, history, found.blocks);
+          msg.cast_swipes = msg.swipes.map((x, i) => (msg.cast_swipes || [])[i] || []).concat([cast]);
+          msg.swipes.push(found.text);
           msg.thought_swipes = (msg.thought_swipes || []).concat([r.thoughts]);
           msg.swipe_index = msg.swipes.length - 1;
-          msg.content = r.reply;
+          msg.content = found.text;
           msg.thoughts = r.thoughts;
-          return { message: JSON.parse(JSON.stringify(msg)), generation: snapshot(db.lastGenerations[msg.chat_id]) };
+          return { message: messageJson(msg), generation: snapshot(db.lastGenerations[msg.chat_id]) };
         } catch (failure) {
           return failure;
         }
@@ -536,9 +661,15 @@
       const msg = db.messages.find(x => x.id === id);
       if (method === 'PUT') {
         if (!msg) return err(404, 'Сообщение не найдено');
-        msg.content = body.content;
-        msg.swipes[msg.swipe_index] = body.content;
-        return ok({ message: JSON.parse(JSON.stringify(msg)) });
+        if (body.content !== undefined) {
+          msg.content = body.content;
+          msg.swipes[msg.swipe_index] = body.content;
+        }
+        if (Array.isArray(body.cast)) {
+          msg.cast_swipes = msg.swipes.map((x, i) => (msg.cast_swipes || [])[i] || []);
+          msg.cast_swipes[msg.swipe_index] = body.cast.map(c => ({ n: Number(c.n), name: String(c.name || '').trim() || 'Без имени', text: String(c.text || '') }));
+        }
+        return ok({ message: messageJson(msg) });
       }
       if (method === 'DELETE') {
         db.messages = db.messages.filter(x => x.id !== id);

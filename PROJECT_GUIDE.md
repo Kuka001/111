@@ -2,7 +2,7 @@
 
 > Этот файл — «вводная» для нового чата с ИИ. Прочитав его, ассистент должен понимать, что за приложение,
 > из чего оно состоит, какой файл за что отвечает и какие файлы нужно менять вместе.
-> Актуально для **v1.8.0 (build 26)** — облако со сквозным шифрованием (§17); основа — коммит `b76b785`, 26.10.2026.
+> Актуально для **v1.9.0 (build 27)** — карточки «мир + несколько персонажей», названия, персонажи из истории, макросы в сообщениях (§18); облако со сквозным шифрованием (§17); основа — коммит `b448c1e`, 30.10.2026.
 > Названия функций и разделов даны точно (по ним удобно искать `grep`); номера строк меняются — не опирайтесь на них.
 
 ---
@@ -25,10 +25,10 @@
 
 ## 1. Назначение и возможности
 
-- Персонажи (character cards): имя, портрет, описание (идёт модели дословно в `<character_persona>`), приветствие (первое сообщение чата).
-- Персоны (кто «вы» в истории): имя, аватар, описание (`<user_persona>`). Одна персона — «по умолчанию» для новых чатов.
-- Чаты: у каждого свой персонаж, персона, модель и «глубина рассуждений» (effort), своя «память чата» (`<chat_memory>`), название.
-- Сообщения: Markdown для RP (`*действие*`, «реплики»), «мысли» модели (thinking), варианты ответа (свайпы), правка, удаление, откат, перегенерация, остановка генерации.
+- Карточки персонажей (character cards): название (видит только пользователь), портрет, «Настройки мира» и персонажи `{{char1}}`, `{{char2}}`… с именем и описанием (модели — в `<character_persona>` как `<world_settings>` и `<character name="…">`), приветствие (первое сообщение чата). Карточки до 1.9 — один свободный текст (§18).
+- Персоны (кто «вы» в истории): название (только для пользователя), имя (`{{user}}`), аватар, описание (`<user_persona name="…">`). Одна персона — «по умолчанию» для новых чатов.
+- Чаты: у каждого своя карточка, персона, модель и «глубина рассуждений» (effort), своя «память чата» (`<chat_memory>`), название; лист «Персонажи» — персонажи карточки и появившиеся в истории (§18).
+- Сообщения: Markdown для RP (`*действие*`, «реплики»), «мысли» модели (thinking), варианты ответа (свайпы), правка, удаление, откат, перегенерация, остановка генерации. Макросы `{{user}}`/`{{charN}}` хранятся как есть, в ленте и для модели заменяются именами.
 - Живой стриминг ответа (опрос прогресса), журнал генерации (диагностика).
 - Экспорт чата (Markdown/JSON), полная резервная копия/восстановление (JSON).
 - Оформление: темы (тёмная/AMOLED/светлая), акцентный цвет, размер шрифта, интервал, шрифт с засечками, подсветка реплик.
@@ -113,7 +113,8 @@ mobile_project/
         ├── ui-helpers.test.js      ← даты, склонения, инициалы, провайдеры, effort, сортировка, аватары
         ├── claude.test.js          ← определение моделей Claude Code CLI
         ├── claude-diag.test.js     ← скрипты claude-diag парсятся и работают под Node
-        ├── system-prompt.test.js   ← зеркало buildSystemPrompt() + шаблон старой памяти
+        ├── system-prompt.test.js   ← зеркало buildSystemPrompt() (теги карточки, макросы) + шаблон старой памяти
+        ├── story-characters.test.js ← зеркало extractNewCharacters/нумерации + макросы, живой текст, названия в UI
         ├── gemini-request.test.js  ← зеркало сборки истории для Gemini + текст deliveryNote
         ├── updates.test.js         ← compareSemver, решение «OTA/APK/нет», формат подписи OTA
         ├── cloud-format.test.js    ← зеркало CloudCrypto на Node crypto (те же векторы, что в JVM‑тесте)
@@ -217,12 +218,13 @@ mobile_project/
 | FULL BACKUP & RESTORE | `dumpTable`, `collectWorkspaceFiles`, `handleBackupExport` (без секретов и без `cloud_*`), `handleBackupImport` (транзакция; только известные колонки — `tableColumns`; настройки по белому списку `RESTORABLE_SETTINGS`; папки карточек/памяти заменяются целиком; затем sync и `tidyChatFiles`). При включённом облаке: сначала `cloudSync.pullBeforeRestore()`, после — `cloudQueueRestoredFiles()`; триггеры ставят в очередь удалённые и восстановленные строки, так что облако заменяется копией |
 | CLOUD SYNC: LOCAL RECORDS | `initCloudSchema` (выполняет `assets/cloud-schema.sql`; при ошибке облако выключено — `cloudSchemaReady`), `cloudSetTracking`/`cloudIsTracking`, `cloudQueueFile` (GEMINI.md и память — их триггеры не видят), `cloudQueueAll`, `cloudExportRecord(kind, sid)` (запись → JSON без конверта), `cloudApplying(work)` (chatWriteLock → транзакция → `applying=1`), `cloudApplyRecord` + `applyCloudCard/Chat/Memory/Message/Settings` (всё из облака проверяется: sid, даты, модели, аватары, имена файлов строятся локально), `cloudResolvePersona`, `cloudWipeLocalData`, `cloudNotifyChanged`/`cloudNotifyAuth`, класс `CloudApplied` |
 | CLOUD ROUTES | `handleCloud(method, action, body)` — все `/api/cloud/*` (§6); `CloudStore.CloudException` → HTTP‑код (`cloudErrorStatus`) |
-| DATABASE HELPERS | `queryCharactersArray`, `getCharacterByIdJson`, `saveOrUpdateCharacter` (+ `cardFileName`, `cleanAvatarUrl`, `uniqueCardPath`, `lookupFilePath`), то же для персон, `queryChatsListArray` (без аватаров; превью 300 символов), `createNewChat`, `getChatDetailsJson` (**без** `avatar_url` у персонажа/персоны), `getChatMessagesArray`, `getMessageByIdJson`, `cursorToMessageJson` |
-| SEND MESSAGE & SWIPE | `startGeneration` (409, если в чате уже идёт генерация), `handleSendChatMessage` (сообщение пользователя → `generateRoleplayReply` → под `chatWriteLock` проверка, что чат жив, → ответ; при ошибке сообщение пользователя удаляется), `generationFailure` (409 отмена / 401 вход — `AuthRequiredException` / 502 прочее), `touchChat`, `alignedThoughtSwipes`, `handleSwipeOrRegenerate` (select / regenerate) |
+| DATABASE HELPERS | `queryCharactersArray`, `getCharacterByIdJson` (оба через `cursorToCharacterJson`: + `title`, `card` или `null`), `cardJsonOf`, `saveOrUpdateCharacter` (`card` → структурная карточка, файл = `renderCardFile`; иначе свободный текст `rawFileContent`; + `cardFileName`, `cleanAvatarUrl`, `uniqueCardPath`, `lookupFilePath`), то же для персон (+ `title`), `queryChatsListArray` (без аватаров; превью 300 символов; + `character_title`, `persona_title`), `createNewChat` (приветствие — **с макросами**), `getChatDetailsJson` (**без** `avatar_url` у персонажа/персоны), `getChatMessagesArray`, `getMessageByIdJson`, `cursorToMessageJson` (+ `cast_swipes`, `cast`) |
+| SEND MESSAGE & SWIPE | `startGeneration` (409, если в чате уже идёт генерация), `handleSendChatMessage` (сообщение пользователя → `generateRoleplayReply` → `extractNewCharacters` → под `chatWriteLock` проверка, что чат жив, `numberNewCharacters`, → ответ; при ошибке сообщение пользователя удаляется), `generationFailure` (409 отмена / 401 вход — `AuthRequiredException` / 502 прочее), `touchChat`, `alignedThoughtSwipes`, `handleSwipeOrRegenerate` (select / regenerate: новый вариант получает своих персонажей) |
 | GOOGLE (AGY) OAUTH | `isAgyAuthenticated`, `handleAgyAuthStatus/Logout/Start/Exchange`, `startLocalOAuthCallbackServer` (ServerSocket 127.0.0.1:51121, проверка `state`, закрытие через 10 мин), `exchangeAuthorizationCodeForTokens` (PKCE, два клиента по очереди), `getValidAgyAccessToken` (обновление по refresh‑токену), `discoverAgyProjectAndEmail` |
 | CLAUDE CODE CLI: среда/вход/проверка | `handleClaudeStatus`, `handleClaudeRuntimeInstall` (→ `ClaudeRuntime.ensureReady`), `handleClaudeAuthStart` (`claude --debug-to-stderr auth login --claudeai`, `BROWSER`=шим, сторож 75 с без ссылки), `startLoginReader`, `refreshGuestDns`, `handleClaudeAuthExchange` (код `xxx#yyy` в stdin), `handleClaudeAuthLogout`, `stopPendingClaudeAuth`, `handleClaudeSelfTest` → `runClaudeSelfTest` (версия → `runProbe` → `runFullStart`; запасные: безопасный режим Bun, чистый профиль), `runStage`/`StageOutput`/`appendStage`/`describeExit`, `liveSandboxRuns`, `handleDevExec` (**только** debuggable) , `sandboxSnapshot` |
 | CLAUDE CODE CLI PROVIDER | `resolveClaudeCliModel`, `resolveClaudeCliEffort`, `buildClaudeTranscript` (вся история одним текстом + строка «=== Задание ===»), `callClaudeCodeCli` (аргументы и разбор `stream-json`, см. §8), `joinBlocks` |
-| Промпт | `buildSystemPrompt` (§8.1), `applyMacros` (`{{char}}`, `{{user}}`), `readChatMemory`, `tidyChatFiles` (шаблоны старой памяти, файлы удалённых чатов) |
+| CARDS, CAST & MACROS (§18) | `CastMember`, `Macros` (`apply`: `{{user}}`, `{{char}}`, `{{charN}}`), `macrosFor`, `cleanTitle`, `cleanCastName`, `parseCardJson`, `sanitizeCard`, `sanitizeCast`, `cardCast`, `storyCast`, `cardNextNum`, `maxCastNumInChat`/`ForCard`, `renderCard`, `renderCharacterBlocks`, `renderCardFile`, `cardPreview`, `alignedCastSwipes`, `extractNewCharacters`, `numberNewCharacters` |
+| Промпт | `buildSystemPrompt(character, persona, memory, history)` (§8.1), `readChatMemory`, `tidyChatFiles` (шаблоны старой памяти, файлы удалённых чатов) |
 | Gemini / Vertex | `generateRoleplayReply` (маршрутизация по модели + сборка `contents`), `callAntigravityGateway` (Claude на Vertex `rawPredict` или Gemini SSE), `resolveExactVertexModelId`, `resolveThinkingLevel`, `resolveThinkingBudget`, `vertexError` (понятные подсказки для 403/429), `extractReadableApiError`, `buildSafetySettingsArray`, `summarizeSafetyRatings`, `readHttpBody` |
 | FILE UTILITIES | `sanitizeRelPath`, `parseQueryParams`, `readTextFile`, `writeTextFile`, `deleteRecursive` |
 | GIT AUTO-UPDATE | `readBundledVersionManifest` (кэш), `readLocalVersionManifest`, `httpGetString`, `compareSemver`, `handleUpdatesCheck`, `sha256Hex`, `buildOtaManifestPayload`, `verifyOtaSignature`, `handleUpdatesApply`, `handleUpdatesReset`, `handleUpdatesConfig`; `errorJson` |
@@ -279,19 +281,19 @@ mobile_project/
 | GET `/api/models` | `getCleanBaseModelsJson` | список моделей с `efforts[]`, `legacy` | `loadAll` |
 | GET `/api/files/content?path=` | inline | текст файла workspace | системный промпт, память чата |
 | POST `/api/files/file` | inline | записать `GEMINI.md` или `memories/*.md` (другое — 400) | `openSystemPromptPage`, `openMemoryEditor` |
-| GET/POST `/api/characters` | `queryCharactersArray` / `saveOrUpdateCharacter` | список (с `fileContent`, `avatar_url`) / создать | `loadAll`, `loadCards`, `openCardEditor` |
-| PUT/DELETE `/api/characters/:id` | `saveOrUpdateCharacter` / `deleteCard` | изменить / удалить (чаты остаются) | `openCardEditor` |
-| GET/POST `/api/personas` | `queryPersonasArray` / `saveOrUpdatePersona` | + `activePersonaId` | то же |
+| GET/POST `/api/characters` | `queryCharactersArray` / `saveOrUpdateCharacter` | список (с `fileContent`, `avatar_url`, `title`, `card`) / создать (`title, avatarUrl, filePath, firstMessage, card{world, chars[{n,name,text}], next}`; без `card` — свободный текст `rawFileContent`) | `loadAll`, `loadCards`, `openCardEditor` |
+| GET/PUT/DELETE `/api/characters/:id` | `getCharacterByIdJson` / `saveOrUpdateCharacter` / `deleteCard` | одна карточка + `next_char_num` (номер следующего персонажа с учётом персонажей ИИ во всех её чатах) / изменить / удалить (чаты остаются) | `openCardEditor` |
+| GET/POST `/api/personas` | `queryPersonasArray` / `saveOrUpdatePersona` | + `activePersonaId`; поле `title` | то же |
 | PUT/DELETE `/api/personas/:id` | … / `deleteCard` | при удалении активной — активной становится первая | `openCardEditor` |
 | POST `/api/personas/:id/activate` | inline | персона по умолчанию | `activatePersona` |
-| GET/POST `/api/chats` | `queryChatsListArray` / `createNewChat` | список (без аватаров) / новый чат (+ файл памяти, приветствие) | `loadChats`, `openNewChat` |
+| GET/POST `/api/chats` | `queryChatsListArray` / `createNewChat` | список (без аватаров; + `character_title`, `persona_title`) / новый чат (+ файл памяти, приветствие с макросами) | `loadChats`, `openNewChat` |
 | GET/PATCH/DELETE `/api/chats/:id` | `getChatDetailsJson` / inline / `deleteChat` | детали (без аватаров) / модель, effort, персона, название / удаление (+ отмена генерации, файлы) | `openChatRoom`, `patchChat`, `deleteChat` |
 | POST `/api/chats/:id/messages` | `handleSendChatMessage` | отправить; ответ `{userMessage, assistantMessage, generation}` | `sendMessage` |
 | DELETE `/api/chats/:id/messages?after=ID` | inline | откат: удалить все сообщения после ID | `rewindTo` |
 | GET `/api/chats/:id/generation` | inline | `{active, generation, lastGeneration}` | `pollWatched`, `attachToRunningGeneration`, диагностика |
 | POST `/api/chats/:id/generation/cancel` | `GenerationProgress.cancel` | «Стоп» | `stopGeneration` |
-| GET `/api/chats/:id/system-prompt` | `buildSystemPrompt` | итоговый системный промпт | `openPromptPreview`, `openExport` |
-| PUT/DELETE `/api/messages/:id` | inline | правка текущего варианта / удаление | `openEditMessage`, `deleteMessage` |
+| GET `/api/chats/:id/system-prompt` | `buildSystemPrompt` | итоговый системный промпт (с персонажами из истории) | `openPromptPreview`, `openExport` |
+| PUT/DELETE `/api/messages/:id` | inline | правка текущего варианта: `content` и/или `cast` (персонажи этого варианта; меняется только переданное) / удаление | `openEditMessage`, `openStoryCharacter`, `deleteMessage` |
 | POST `/api/messages/:id/swipe` | `handleSwipeOrRegenerate` | `{action:'select', index}` или `{action:'regenerate'}` | `selectSwipe`, `regenerate` |
 | GET `/api/updates/check` | `handleUpdatesCheck` | версии, `nativeUpdateRequired`, `otaAvailable`, релизы, коммиты | `checkForUpdates` |
 | POST `/api/updates/apply`, `/reset`, `/config` | `handleUpdatesApply/Reset/Config` | установить OTA / вернуть UI из APK / ветка | страница «Обновления» |
@@ -330,10 +332,10 @@ mobile_project/
 | Таблица | Колонки |
 |---|---|
 | `settings` | `key` PK, `value` |
-| `characters` | `id`, `name`, `file_path` UNIQUE, `avatar_url` (data:image/… или ''), `first_message` (приветствие), `description_preview`, `created_at`, `updated_at` |
-| `personas` | `id`, `name`, `file_path` UNIQUE, `avatar_url`, `description_preview`, `is_default`, `created_at` |
+| `characters` | `id`, `name` (имя первого персонажа или название — для старых версий), `file_path` UNIQUE, `avatar_url` (data:image/… или ''), `first_message` (приветствие, с макросами), `description_preview`, `created_at`, `updated_at`; с 1.9: `title` (название, модели не уходит), `card_json` (структура карточки, '' — свободный текст; §18) |
+| `personas` | `id`, `name` (`{{user}}`), `file_path` UNIQUE, `avatar_url`, `description_preview`, `is_default`, `created_at`; с 1.9: `title` |
 | `chats` | `id`, `title` (по умолчанию «Чат: Имя»), `character_id`, `persona_id`, `model_id`, `effort`, `memory_file_path`, `provider`, `created_at`, `updated_at`; **не используются** (наследие): `system_prompt_path`, `first_message_path`, `project_path` |
-| `messages` | `id`, `chat_id`, `role` (`user`/`assistant`), `content` (текущий вариант), `thoughts`, `swipes_json` (все варианты), `swipe_index`, `thought_swipes_json` (мысли по вариантам), `created_at`, `sort_key`; индексы `idx_messages_chat(chat_id, id)`, `idx_messages_chat_sort(chat_id, sort_key, id)` |
+| `messages` | `id`, `chat_id`, `role` (`user`/`assistant`), `content` (текущий вариант, макросы как есть), `thoughts`, `swipes_json` (все варианты), `swipe_index`, `thought_swipes_json` (мысли по вариантам), `created_at`, `sort_key`; с 1.9: `cast_swipes_json` (по варианту — массив `{n, name, text}` персонажей, которых он ввёл; §18); индексы `idx_messages_chat(chat_id, id)`, `idx_messages_chat_sort(chat_id, sort_key, id)` |
 | облако: колонки | у `characters`, `personas`, `chats`, `messages` — `sync_id` (случайные 128 бит hex, одинаковые на всех устройствах, уникальный индекс); `chats.character_sid`/`persona_sid` — ссылка на карточку, пришедшую из облака позже чата; `messages.sort_key` — порядок (старые строки = `id`, новые — мс, всегда больше остальных в чате). **Порядок сообщений — `ORDER BY sort_key, id`**, не по `id` |
 | `cloud_ctl` | одна строка: `tracking` (облако привязано — триггеры пишут очередь), `applying` (идёт применение из облака — триггеры молчат) |
 | `cloud_outbox` | очередь выгрузки: `kind`, `sid`, `parent` (sid чата для сообщений/памяти), `queued_at` (мс изменения = версия записи) |
@@ -348,8 +350,10 @@ mobile_project/
 Облако: `cloud_config` (`projectId`, `apiKey`, `clientId`), `cloud_client_secret`*, `cloud_refresh_token`**, `cloud_dek`** (ключ данных, hex), `cloud_oauth_pending`** (state/verifier/порт входа, 10 мин), `cloud_uid`, `cloud_email`, `cloud_kid` (идентификатор хранилища), `cloud_watermark` (время последней принятой записи облака), `cloud_read_time` (время последнего полного чтения облака), `cloud_last_sync`, `cloud_usage` (расход квоты за тихоокеанские сутки), `cloud_quota_until`, `cloud_pending_persona`. (** — строгие секреты.) Все `cloud_*` не попадают в резервную копию. Синхронизируются (запись `settings`): `selected_model`, `selected_effort`, `safety_threshold`, `project_id`, `active_persona_id` — список совпадает в триггерах `cloud-schema.sql` и в `cloudExportRecord`/`applyCloudSettings`.
 
 ### 7.3 Карточки
-- Файл карточки = **ровно** описание (редактор отправляет `rawFileContent`), он целиком идёт модели в тег.
-- Приветствие — в БД (`first_message`), макросы `{{char}}`/`{{user}}` подставляются при создании чата.
+- **Структурная карточка (с 1.9):** источник истины — `characters.card_json` = `{"v":2,"world","chars":[{"n","name","text"}],"next"}`. Файл карточки — её отрисовка (`renderCardFile`: те же теги, что получает модель, с подставленными `{{charN}}` карточки; `{{user}}`/`{{char}}` остаются) — для старых версий, облака старых устройств и восстановления «файл без строки». Новая версия файл структурной карточки не читает.
+- **Свободный текст (карточки до 1.9):** `card_json = ''`, файл = **ровно** описание (редактор старых версий отправлял `rawFileContent`), он целиком идёт модели в тег. Новый редактор открывает такую карточку как персонажа `{{char1}}` (имя карточки, весь текст); после сохранения она становится структурной.
+- Название (`title`) — только для интерфейса (списки, чаты, файл карточки по умолчанию); модели не уходит.
+- Приветствие — в БД (`first_message`) и в первом сообщении чата **с макросами**; имена подставляются при показе и для модели.
 - Портрет — `data:image/...` (UI уменьшает до 640 px, `downscaleImage`); без картинки `avatar_url = ''`, UI рисует инициалы (`initialsAvatar`).
 
 ---
@@ -357,12 +361,12 @@ mobile_project/
 ## 8. Модели и генерация
 
 ### 8.1 Системный промпт (контракт, зеркало — `tests/system-prompt.test.js`)
-`buildSystemPrompt(character, persona, memoryRelPath)`:
+`buildSystemPrompt(character, persona, memoryRelPath, history)`:
 1. текст пользователя из `GEMINI.md` («Системный промпт» в UI); устаревшее содержимое `# GEMINI.md` = пусто;
-2. `<character_persona>` — файл карточки персонажа;
-3. `<user_persona>` — файл карточки персоны чата;
+2. `<character_persona>` — карточка: свободный текст как есть; структурная — `<world_settings>…</world_settings>` и по блоку `<character name="Имя">описание</character>` на персонажа; затем такие же блоки персонажей, которых ввели ответы `history` (вариант, который показан у каждого ответа; §18);
+3. `<user_persona name="Имя">` — файл карточки персоны чата;
 4. `<chat_memory>` — память чата без строки‑заголовка `# Память чата…` (только если не пусто).
-Везде подставляются `{{char}}` и `{{user}}`. Ничего скрытого не добавляется.
+Пустые части опускаются. Везде подставляются макросы (`macrosFor`): `{{user}}` — имя персоны, `{{charN}}` — имя персонажа №N (карточки, затем из истории), `{{char}}` = `{{char1}}` (без №1 — первый персонаж карточки); неизвестный номер остаётся как написан. Названия карточки и персоны не уходят. Ничего скрытого не добавляется.
 
 ### 8.2 Маршрутизация по `model_id`
 - начинается с `claude-code-` → **Claude Code CLI** (`callClaudeCodeCli`);
@@ -374,7 +378,7 @@ mobile_project/
 
 ### 8.3 Gemini (`callAntigravityGateway`, ветка Gemini)
 - `POST {AGY_VERTEX_ENDPOINT}/{v1beta1|v1}/projects/{proj}/locations/global/publishers/google/models/{model}:streamGenerateContent?alt=sse`, заголовки `Authorization: Bearer`, `x-goog-user-project`.
-- Тело: `systemInstruction` (= системный промпт дословно), `contents` (вся история; подряд идущие реплики одной стороны склеиваются; если чат начинается с приветствия — перед ним служебная реплика пользователя `[Начало ролевой игры]`), `safetySettings` (один порог для всех категорий), `generationConfig` (`maxOutputTokens 32768`, `temperature 0.85`, `topP 0.95`, `thinkingConfig` — `thinkingLevel` для gemini‑3/4 или `thinkingBudget`, `includeThoughts`).
+- Тело: `systemInstruction` (= системный промпт дословно), `contents` (вся история, в тексте подставлены только макросы; подряд идущие реплики одной стороны склеиваются; если чат начинается с приветствия — перед ним служебная реплика пользователя `[Начало ролевой игры]`), `safetySettings` (один порог для всех категорий), `generationConfig` (`maxOutputTokens 32768`, `temperature 0.85`, `topP 0.95`, `thinkingConfig` — `thinkingLevel` для gemini‑3/4 или `thinkingBudget`, `includeThoughts`).
 - Повторы (не меняют текст): v1beta1 → v1 при 400/404; при `MAX_TOKENS` из‑за мыслей — повтор с минимальным размышлением.
 - Блокировка Google → понятная ошибка с причиной и категориями.
 
@@ -384,7 +388,7 @@ mobile_project/
 ### 8.5 Claude Code CLI (`callClaudeCodeCli`)
 - Проверки: среда установлена, есть вход (иначе `AuthRequiredException` → HTTP 401 → кнопка «Настроить»).
 - Системный промпт пишется в `HOME/.agy/system_prompt_chat_<id>.md`.
-- Команда: `claude -p --output-format stream-json --verbose --include-partial-messages --model <alias|id> [--effort L] --tools "" --disable-slash-commands --permission-mode dontAsk --no-session-persistence --system-prompt-file <файл>`; env `CI=1`; в stdin — `buildClaudeTranscript` (история «Имя:\nреплика» + «=== Задание ===»).
+- Команда: `claude -p --output-format stream-json --verbose --include-partial-messages --model <alias|id> [--effort L] --tools "" --disable-slash-commands --permission-mode dontAsk --no-session-persistence --system-prompt-file <файл>`; env `CI=1`; в stdin — `buildClaudeTranscript` (история «Имя:\nреплика» с подставленными макросами + «=== Задание ===»). Ответы модели подписаны именем персонажа, если в карточке ровно один персонаж, иначе «Рассказчик». Задание: «Продолжи ролевую игру одной следующей репликой[ за персонажа «Имя»]. Выведи только сам ответ[ персонажа] без имени в начале и мета-комментариев.» (с 1.9 без «служебных пометок», иначе модель выбрасывает блок `<new_character>`).
 - Разбор `stream-json`: `stream_event` (`text_delta`/`thinking_delta` → живой текст), `assistant` (блоки собираются по `message.id`), `result` (`is_error`).
 - Сторож: нет **ни одной** строки вывода 90 с → процесс убивается, понятная ошибка.
 
@@ -432,22 +436,23 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 | Раздел | Ключевые функции / объекты |
 |---|---|
 | NATIVE BRIDGE CONTRACT | `hasBridge`, `api()`, `__onAndroidServerResponse`, `decodeBase64Utf8` |
-| PURE HELPERS (тестируются) | `escapeHtml`, `stripMarkdownPreview`, `formatRoleplayHtml`/`formatInlineMarkdown`/`highlightDialogue` (Markdown RP, всё экранируется до разметки), `parseServerTime`, `formatRelativeTime`, `formatMessageTime`, `pluralRu`, `formatCount`, `initialsOf`, `hueFromString`, `initialsAvatar`, `objectUrlFor` + `resolveAvatarUrl` (фото → кэшированный `blob:`), `isClaudeCliModel`, `providerOf`, `effortOptionsFor`, `effectiveEffort`, `sortChats`, `filterChats`, `isDefaultChatTitle`, `passwordStrength`, `formatBytes`, `agoText`, `cloudSummary` |
-| STATE, PREFERENCES | объект `state` (настройки, модели, карточки, чаты, `room`, `generations`, `drafts`, `updateInfo`…), `prefs` (`agy_ui_prefs_v1`), `MIN_ENGINE_BUILD = 25`, `THEMES`, `ACCENTS`, `applyTheme` |
-| DOM HELPERS | `$`, `$$`, `ic`, `htmlToElement`, `autoGrow`, `findChar`, `findPersona`, `modelName`, `PROVIDERS`, `modelSummary`, `providerStatus`, `copyText`, `openExternal`, `reloadApp`, `saveFile` |
+| PURE HELPERS (тестируются) | `escapeHtml`, `stripMarkdownPreview`, `formatRoleplayHtml`/`formatInlineMarkdown`/`highlightDialogue` (Markdown RP, всё экранируется до разметки), `parseServerTime`, `formatRelativeTime`, `formatMessageTime`, `pluralRu`, `formatCount`, `initialsOf`, `hueFromString`, `initialsAvatar`, `objectUrlFor` + `resolveAvatarUrl` (фото → кэшированный `blob:`), `isClaudeCliModel`, `providerOf`, `effortOptionsFor`, `effectiveEffort`, `sortChats`, `filterChats`, `isDefaultChatTitle` (имя или название карточки), **карточки и макросы (§18):** `cardLabel`, `personaLabel`, `cardCast`, `storyCast`, `castMacros`, `applyMacros`, `splitLiveText` (живой ответ без блоков `<new_character>`), `passwordStrength`, `formatBytes`, `agoText`, `cloudSummary` |
+| STATE, PREFERENCES | объект `state` (настройки, модели, карточки, чаты, `room`, `generations`, `drafts`, `updateInfo`…), `prefs` (`agy_ui_prefs_v1`), `MIN_ENGINE_BUILD = 27`, `THEMES`, `ACCENTS`, `applyTheme` |
+| DOM HELPERS | `$`, `$$`, `ic`, `htmlToElement`, `autoGrow`, `findChar`, `findPersona`, `cardMatches` (поиск по названию, именам, описанию), `personaChipsHtml`, `modelName`, `PROVIDERS`, `modelSummary`, `providerStatus`, `copyText`, `openExternal`, `reloadApp`, `saveFile` |
 | UI KIT: toasts | `toast(message, {type, action, duration})` |
 | UI KIT: layers | `openLayer`, `closeLayer`, `requestCloseLayer`, `topLayer`, `refreshLayers`, `bindActs`, `openSheet`, `openPage`, `confirmDialog`, `actionSheet`, `openTextSheet`, `emptyHtml` |
 | DATA LOADING | `applySettings`, `loadAll`, `warnOldEngine`, `loadChats`, `loadCards`, `refreshSettings`, `refreshClaudeStatus`, `refreshAgyStatus`, `refreshCloudStatus` (`state.cloud`); хуки `__onAgyOAuthSuccess`, `__onNativeFileSaved`, `__onCloudAuthDone`, `__onCloudSyncChanged` |
 | TABS & ROUTING | `openTab`, `renderTab`, `renderAllTabs`, **`handleBack`** |
-| CHATS TAB | `renderChatsTab`, `renderChatsList` (фильтр‑чипы по персонажам), `chatRowHtml`, свайп строки (экспорт/удалить), `deleteChat` |
+| CHATS TAB | `renderChatsTab`, `renderChatsList` (фильтр‑чипы по карточкам), `chatCardLabel`, `chatPreview` (превью с подставленными именами), `chatRowHtml`, свайп строки (экспорт/удалить), `deleteChat` |
 | NEW CHAT | `openNewChat` (персонаж, персона, модель) |
 | MODEL PICKER | `openModelPicker` (группы по провайдеру, «Предыдущие версии», effort) |
-| CHAT ROOM | `withCardImages` (аватары из списков карточек), `openChatRoom`, `closeChatRoom`, `renderRoomHeader`, `messageHtml`, `liveHtml`, `errorHtml`, **`syncFeed`** (обновляет только изменившиеся сообщения по `data-key`/`data-sig`), `patchLive` |
-| generation lifecycle | `startGeneration`, `ensurePolling`, `pollGenerations`/`pollWatched` (без наложения, пауза в фоне), `attachToRunningGeneration`, `endGeneration`, `generationError`, `sendMessage`, `regenerate`, `stopGeneration`, `retryGeneration`, `selectSwipe`, `swipeBy`, `insertAsterisks` |
-| message actions | `openMessageActions`, `openEditMessage`, `deleteMessage`, `rewindTo` |
-| chat settings | `patchChat`, `openChatSettings`, `deliveryNote` (что ещё получает модель), `openPromptPreview`, `openDiagnostics`/`renderDiagnostics` |
+| CHAT ROOM | `withCardImages` (аватары из списков карточек), `openChatRoom`, `closeChatRoom`, `renderRoomHeader`, `feedContext` (+ `macros` чата), `messageHtml` (текст с подставленными именами), `castChipsHtml` (значки персонажей ответа), `liveHtml`, `errorHtml`, **`syncFeed`** (обновляет только изменившиеся сообщения по `data-key`/`data-sig`), `patchLive` (блоки `<new_character>` → «Создаётся персонаж…») |
+| generation lifecycle | `startGeneration`, `ensurePolling`, `pollGenerations`/`pollWatched` (без наложения, пауза в фоне), `attachToRunningGeneration`, `endGeneration`, `generationError`, `sendMessage`, `regenerate`, `announceNewCharacters` (тост), `stopGeneration`, `retryGeneration`, `selectSwipe`, `swipeBy`, `insertAsterisks` |
+| message actions | `openMessageActions` (копирует текст с именами), `openEditMessage` (сырой текст + кнопки макросов), `deleteMessage`, `rewindTo` (оба предупреждают о персонажах — `castLossNote`) |
+| macros & cast (§18) | `macroBarHtml` + `bindMacroBar` (вставка макроса в поле, где был курсор), `scrollToMessage`, `openCastSheet` (лист «Персонажи»), `openCardCharacter`, `openStoryCharacter` (правка/удаление персонажа из истории через `PUT /api/messages/:id {cast}`) |
+| chat settings | `patchChat`, `openChatSettings` (+ строка «Персонажи»), `deliveryNote(modelId, character)` (что ещё получает модель), `openPromptPreview`, `openDiagnostics`/`renderDiagnostics` |
 | EXPORT | `buildExport` (md/json), `openExport` (длинный текст → «Сохранить файлом», а не «Поделиться») |
-| CHARACTERS TAB | `renderCharactersTab/List`, `openCharacterPage`, `downscaleImage`, **`openCardEditor`** (общий для персонажей и персон) |
+| CHARACTERS TAB | `renderCharactersTab/List`, `openCharacterPage` (мир, персонажи с `{{charN}}`, приветствие), `downscaleImage`, **`openCardEditor`** (общий: карточка — название, мир, блоки персонажей, «Добавить персонажа», приветствие, панель макросов в подвале; персона — название, имя, описание) |
 | PERSONAS TAB | `renderPersonasTab`, `activatePersona` |
 | SETTINGS TAB | `renderSettingsTab` (секция «Аккаунт» — строка облака из `cloudSummary`), `openSettingsPage(page)`: `openSystemPromptPage`, `openDefaultModelPicker`, `openVertexPage` (`SAFETY_OPTIONS`), `openClaudePage`, `openAppearancePage`, `openReadingPage`, `openBackupPage`, `openCloudPage` (+ `showRecoveryCode`, `openCloudPasswordSheet`, `openCloudRecoverySheet`, `openCloudSignOutSheet`, `openCloudWipeSheet`, `strengthHtml`, `cloudPasswordInput`), `openUpdatesPage` (+ `updateAction`, `checkForUpdates`, `applyGitUpdate`), `openMemoryEditor` |
 | IMAGE VIEWER | `openImageViewer` (pinch‑zoom, двойной тап) |
@@ -466,7 +471,7 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 
 - `npm test` — все `mobile/tests/*.test.js` (Node 24, без зависимостей).
 - `npm run check` — `node --check mobile/www/app.js` + тесты (то же запускает `build-apk.ps1`).
-- `npm run dev` → http://localhost:5173 — UI в браузере ПК с `mock-bridge.js`. Переключатели в URL: `?empty=1`, `?long=1`, `?delay=ms`, `?update=ota|apk`, `?loginhang=1`, `?loginfail=1`, `?hang=1|2`, `?engine=N`, `?cloud=none|signedout|novault|locked|ready|quota|error` (пароль мока «мой кот любит зимний чай», код `000G-40R4-0M30-E209-185G-R38E-1W81-24GK`; `&vault=1` — после входа хранилище уже есть).
+- `npm run dev` → http://localhost:5173 — UI в браузере ПК с `mock-bridge.js`. Переключатели в URL: `?empty=1`, `?long=1`, `?delay=ms`, `?update=ota|apk`, `?loginhang=1`, `?loginfail=1`, `?hang=1|2`, `?engine=N`, `?cloud=none|signedout|novault|locked|ready|quota|error`. В моке есть карточка мира «Таверна «Сломанный меч»» (Юки `{{char1}}`, Хана `{{char2}}`) и её чат с персонажем из истории (Лира `{{char3}}`); сообщение с `/newchar` даёт ответ с блоком `<new_character>` (пароль мока «мой кот любит зимний чай», код `000G-40R4-0M30-E209-185G-R38E-1W81-24GK`; `&vault=1` — после входа хранилище уже есть).
 - Облако: `cloud-format.test.js` и `android/tests/CloudCryptoTest.java` проверяют **одни и те же** векторы (Node ↔ JVM); `cloud-schema.test.js` выполняет `android/assets/cloud-schema.sql` на `node:sqlite`. JVM‑тест вручную: `javac -encoding UTF-8 -d <out> android/src/com/agy/roleplay/CloudCrypto.java android/tests/CloudCryptoTest.java` и `java -cp <out> com.agy.roleplay.CloudCryptoTest` (`--emit` печатает вектор Java для Node‑теста).
 - `harness.js` — загружает `app.js` в `vm` с заглушками DOM; тесты используют `window.__appInternals`. Новую чистую функцию для тестов надо добавить в `__appInternals`.
 - Тесты‑«зеркала» (system‑prompt, gemini‑request, updates) повторяют Java‑логику на JS: меняете Java — меняйте зеркало.
@@ -486,7 +491,7 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 
 ## 12. Правила и предпочтения пользователя (соблюдать!)
 
-1. **Один системный промпт, без скрытого.** Пользователь пишет промпт сам («Системный промпт» = `GEMINI.md`); ниже — только `<character_persona>`, `<user_persona>`, `<chat_memory>`. Не добавлять скрытые инструкции, не переписывать текст пользователя/истории, не внедрять новый авто‑контекст **без спроса**. Всё, что движок обязан добавить (реплика `[Начало ролевой игры]`, задание транскрипта Claude Code), показывается в окне «Итоговый системный промпт» → «Что ещё получает модель» (`deliveryNote`). Лор (lore) не используется.
+1. **Один системный промпт, без скрытого.** Пользователь пишет промпт сам («Системный промпт» = `GEMINI.md`); ниже — только `<character_persona>`, `<user_persona>`, `<chat_memory>`. Не добавлять скрытые инструкции, не переписывать текст пользователя/истории, не внедрять новый авто‑контекст **без спроса**. Всё, что движок обязан добавить (реплика `[Начало ролевой игры]`, задание транскрипта Claude Code), показывается в окне «Итоговый системный промпт» → «Что ещё получает модель» (`deliveryNote`). Структурные теги карточки (`<world_settings>`, `<character name>`, `<user_persona name>`), подстановка макросов и вынос блоков `<new_character>` из ответов (с 1.9, по просьбе пользователя) — тоже там; **инструкцию писать такие блоки модель получает только из системного промпта пользователя**, приложение её не добавляет. Лор (lore) не используется.
 2. Настройки живут там, где используются: приветствие — в карточке, модель/персона — в чате.
 3. UI‑тексты — по‑русски; комментарии/идентификаторы — по‑английски; стиль кода — как в окружающем коде.
 4. Переводы строк — LF; `.gitattributes` запрещает git менять байты (иначе ломается подпись OTA).
@@ -503,6 +508,7 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 | Любой `/api/*` (путь, поля запроса/ответа) | `LocalBackendServer.routeRequest` + обработчик; вызовы `api()` в `app.js`; `mobile/dev/mock-bridge.js → route()`; при необходимости зеркальные тесты; если старый UI/движок перестаёт понимать — поднять build и `MIN_ENGINE_BUILD` |
 | Список моделей / их effort | `VERTEX_MODELS` / `CLAUDE_CLI_MODELS` (Java); `MODELS` в `mock-bridge.js`; префиксы `claude-code-` / `claude-` критичны для маршрутизации (`generateRoleplayReply`, `providerOf`); `tests/ui-helpers.test.js` |
 | Сборка системного промпта / память | `buildSystemPrompt`, `readChatMemory`, `tidyChatFiles` (Java); `buildSystemPrompt` в `mock-bridge.js`; `tests/system-prompt.test.js`; тексты `openSystemPromptPage`, `openMemoryEditor` |
+| Карточки, макросы, персонажи из истории (§18) | Java «CARDS, CAST & MACROS» ↔ `app.js` (`cardCast`, `storyCast`, `castMacros`, `applyMacros`, `splitLiveText`, `deliveryNote`) ↔ мок (`mock-bridge.js`) ↔ зеркала `tests/system-prompt.test.js` и `tests/story-characters.test.js` — менять вместе; формат `card_json`/`cast_swipes_json` — ещё облако (`cloudExportRecord`/`applyCloudCard`/`applyCloudMessage`, триггеры) и правка `My_System_prompt.md` пользователя (формат блока `<new_character>`) |
 | Что уходит Gemini/Claude помимо промпта | `generateRoleplayReply`, `buildClaudeTranscript`; `deliveryNote` в `app.js`; `tests/gemini-request.test.js`. Спросить пользователя (см. §12) |
 | Формат подписи OTA | `buildOtaManifestPayload` (Java) **и** `$Payload` в `sign-ota.ps1` **и** зеркало в `tests/updates.test.js` — строго одинаково |
 | Логика «есть ли обновление» | `handleUpdatesCheck`, `handleUpdatesApply`, правило в `initWorkspaceAndDatabase`; `updateAction`/`checkForUpdates`/`openUpdatesPage` в `app.js`; `/api/updates/check` в моке; `tests/updates.test.js` |
@@ -516,7 +522,7 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 | `cloud-schema.sql` | `tests/cloud-schema.test.js`; это нативный asset → новый APK (build +1); триггеры пересоздаются при каждом старте (DROP + CREATE) |
 | Правила Firestore / поля документов | `firebase/firestore.rules` (поля `c, u, n`; хранилище `v, kdf, iter, salt, pw, rc, kid, u`) ↔ `CloudSync` (`vaultFields`, `prepare`) ↔ `CloudStore.putWrite`; пользователь публикует правила сам — обновить `firebase/README.md` |
 | Новая настройка | `setDefaultSetting` (init); GET/POST `/api/settings`; `applySettings` в `app.js`; `RESTORABLE_SETTINGS` (если должна восстанавливаться из копии); секрет — добавить в `SECRET_SETTING_KEYS` (секрет облака — ещё и в `STRICT_SECRET_KEYS`); если она общая для аккаунта — в синхронизируемые (строка выше) |
-| Карточки / аватары | `saveOrUpdateCharacter/Persona`, `cleanAvatarUrl`, `cardFileName`; `openCardEditor`, `downscaleImage`, `resolveAvatarUrl`, `withCardImages` в `app.js` (детали чата приходят **без** аватаров) |
+| Карточки / аватары | `saveOrUpdateCharacter/Persona` (`sanitizeCard`, `renderCardFile`, `cardPreview`), `cleanAvatarUrl`, `cardFileName`; `openCardEditor`, `downscaleImage`, `resolveAvatarUrl`, `withCardImages`, `cardLabel`/`personaLabel` в `app.js` (детали чата приходят **без** аватаров) |
 | Среда Claude Code (версии, части) | `ClaudeRuntime.PARTS` + **`RUNTIME_VERSION`** + `MUSL_LOADER_SHA256` (если меняется rootfs); тексты размера загрузки в `openClaudePage`; проверить «Проверить запуск» на телефоне |
 | Аргументы/разбор Claude Code CLI | `callClaudeCodeCli`, `handleClaudeAuthStart`, `runFullStart`; помнить: глобальные флаги до подкоманды |
 | Скрипты `assets/claude-diag/*` | константы `PRELOAD_*` в `ClaudeRuntime`; `runProbe`/`runFullStart`; `tests/claude-diag.test.js`; это нативные assets → нужен новый APK (build +1) |
@@ -600,7 +606,7 @@ users/{uid}/meta/vault          v, kdf = "pbkdf2-sha256", iter, salt, pw, rc, ki
 users/{uid}/records/{docId}     c (шифротекст), u (время сервера, REQUEST_TIME), n (частей, если > 1)
 users/{uid}/parts/{docId}-{i}   продолжение записи больше 900 КБ (максимум 6 частей)
 ```
-- Записи (JSON внутри шифротекста, конверт `{v: 1, k, sid, mt}`): `character`, `persona` (имя, имя файла, текст карточки, аватар, приветствие, даты), `chat` (название, `characterSid`, `personaSid`, модель, effort, provider, даты), `message` (`chatSid`, role, content, thoughts, swipes, thoughtSwipes, swipeIndex, sortKey, createdAt), `memory` (sid чата; текст без заголовка «# Память чата #N» — N локальный), `prompt` (GEMINI.md), `settings` (модель, effort, safety, projectId, `activePersonaSid`). Удаление — надгробие `{deleted: true}`. `mt` — время последнего локального изменения (= `queued_at`).
+- Записи (JSON внутри шифротекста, конверт `{v: 1, k, sid, mt}`): `character`, `persona` (имя, имя файла, текст карточки, аватар, приветствие, даты; с 1.9 — `title`, у карточки `card` = структура; запись без `card` от старой версии делает карточку свободным текстом, если текст изменился; без `title` — название не трогается), `chat` (название, `characterSid`, `personaSid`, модель, effort, provider, даты), `message` (`chatSid`, role, content, thoughts, swipes, thoughtSwipes, swipeIndex, sortKey, createdAt; с 1.9 — `castSwipes`, без него персонажи сообщения не стираются), `memory` (sid чата; текст без заголовка «# Память чата #N» — N локальный), `prompt` (GEMINI.md), `settings` (модель, effort, safety, projectId, `activePersonaSid`). Удаление — надгробие `{deleted: true}`. `mt` — время последнего локального изменения (= `queued_at`).
 
 ### 17.2 Шифрование (`CloudCrypto`)
 - Ключ данных (DEK) — 256 бит; подключи `HMAC-SHA256(DEK, "agy/enc/v1" | "agy/id/v1" | "agy/kid/v1")`.
@@ -640,3 +646,29 @@ users/{uid}/parts/{docId}-{i}   продолжение записи больше
 - Нужен настоящий проект Firebase (README). Debuggable‑APK + `devcall.js`: `GET /api/cloud/status`, `POST /api/cloud/config {config}`… Вход Google — только нажатием в браузере телефона.
 - Разрушающие проверки (`replace`, выход со стиранием) — только после `GET /api/backup/export`, сохранённого на ПК.
 - Для проверки «второго устройства» без второго телефона: выйти со стиранием и войти снова (тот же аккаунт) — данные должны вернуться в том же порядке.
+
+---
+
+## 18. Карточки, состав чата и макросы (с 1.9.0)
+
+Раздел Java «CARDS, CAST & MACROS» в `LocalBackendServer`; в `app.js` — помощники `cardCast`/`storyCast`/`castMacros`/`applyMacros`/`splitLiveText` и листы `openCastSheet`/`openStoryCharacter`. Зеркала — `tests/system-prompt.test.js`, `tests/story-characters.test.js`.
+
+### 18.1 Карточка
+- `card_json` = `{"v":2,"world":"…","chars":[{"n":1,"name":"Юки","text":"…"}],"next":3}` (`sanitizeCard`: до 50 персонажей, имя до 80 символов без `"<>` и переводов строк, текст до 200 000; пустые блоки отбрасываются; повтор/плохой номер получает свободный).
+- **Номер навсегда за персонажем.** `next` не уменьшается — номер удалённого персонажа карточки не достаётся другому. Для редактора `GET /api/characters/:id` отдаёт `next_char_num` = max(`next`, наибольший номер персонажей из истории во всех чатах карточки + 1) — новый персонаж карточки не совпадёт ни с кем в её чатах.
+- Свободный текст (до 1.9): персонаж №1 = имя карточки, `next` = 2.
+- `characters.name` = имя первого персонажа (или название) — его видят старые версии как `{{char}}`.
+
+### 18.2 Макросы
+`{{user}}` — имя персоны чата (не название); `{{charN}}` — имя персонажа №N: сначала карточки, затем из истории; `{{char}}` = `{{char1}}`, без №1 — первый персонаж карточки. Регистр не важен; неизвестный номер остаётся как написан (виден в превью промпта). Хранится всё **с макросами** (сообщения, приветствие, карточка, память, системный промпт); имена подставляются при показе (`applyMacros` в UI) и для модели (`Macros.apply`: системный промпт, история Gemini/Claude Vertex и транскрипт Claude Code). Java подставляет через `Matcher.quoteReplacement` (имена с `$` и `\`).
+
+### 18.3 Персонажи из истории
+- Модель (по инструкции в **системном промпте пользователя**) пишет в ответе короткое представление и блок `<new_character name="Имя">полное описание</new_character>`.
+- `extractNewCharacters`: блок в любом месте ответа, кавычки у `name` необязательны («», “”, '' или без), незакрытый — до конца ответа, без `name` — первая строка «Имя: …», иначе «Без имени». Текст ответа без блоков; только если блоки были — убираются опустевшие ```-обёртки и лишние пустые строки.
+- `numberNewCharacters` (под `chatWriteLock`): номер = max(`cardNextNum`, наибольший номер в этом чате по всем вариантам + 1); имя, которое уже есть в составе (карточка + история до этого ответа), пропускается (запись в журнал генерации). До 20 персонажей на ответ.
+- Хранение: `messages.cast_swipes_json` параллельно `swipes_json` (вариант → массив `{n, name, text}`); `cast` в JSON сообщения — персонажи показанного варианта. Поэтому выбор варианта, перегенерация («Другой вариант» — у нового варианта свои персонажи), удаление и откат меняют состав автоматически. Контекст перегенерации — история **до** ответа: его персонажи туда не попадают.
+- Правка/удаление: `PUT /api/messages/:id {cast}` (массив текущего варианта; `sanitizeCast`). Удалённый персонаж больше не уходит модели; короткое упоминание в ответе остаётся.
+- UI: значки «Имя · `{{charN}}`» под ответом, во время стриминга блок скрыт («Создаётся персонаж «…»…»), тост после ответа, лист «Персонажи» (кнопка в шапке чата и строка в «Настройках чата»), предупреждение при удалении/откате.
+
+### 18.4 Разовые исправления данных
+Старые данные пользователя (например, приветствия чатов до 1.9, сохранённые уже с именами) исправляются **разово на телефоне** через debuggable‑сборку и `devcall.js` (`PUT /api/messages/:id`), а не кодом миграции в приложении: сначала `/api/backup/export` на ПК, список изменений — на согласование пользователю.

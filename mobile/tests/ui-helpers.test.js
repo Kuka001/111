@@ -142,6 +142,16 @@ test('isDefaultChatTitle recognises the auto-generated title', () => {
   assert.strictEqual(isDefaultChatTitle('Чат: Кира', 'Кира'), true);
   assert.strictEqual(isDefaultChatTitle('', 'Кира'), true);
   assert.strictEqual(isDefaultChatTitle('Ночной рейд', 'Кира'), false);
+  // Since 1.9 new chats are named after the card's title; older ones after its name.
+  assert.strictEqual(isDefaultChatTitle('Чат: Таверна', 'Юки', 'Таверна'), true);
+  assert.strictEqual(isDefaultChatTitle('Чат: Юки', 'Юки', 'Таверна'), true);
+  assert.strictEqual(isDefaultChatTitle('Чат: ', '', ''), false);
+});
+
+test('filterChats also finds a chat by the card\'s and the persona\'s titles', () => {
+  const chats = [{ id: 1, character_name: 'Юки', character_title: 'Таверна', persona_name: 'Кадзума', persona_title: 'Маг', title: 'Чат: Таверна', last_message: '' }];
+  assert.deepStrictEqual(filterChats(chats, { query: 'таверн' }).map(c => c.id), [1]);
+  assert.deepStrictEqual(filterChats(chats, { query: 'маг' }).map(c => c.id), [1]);
 });
 
 test('dialogue highlighting wraps quoted speech and stays escaped', () => {
