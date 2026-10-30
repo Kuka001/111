@@ -1,9 +1,8 @@
 # AGY Roleplay Studio — руководство по проекту для ИИ‑ассистента
 
-> Этот файл — «вводная» для нового чата с ИИ. Прочитав его, ассистент должен понимать, что за приложение,
-> из чего оно состоит, какой файл за что отвечает и какие файлы нужно менять вместе.
-> Актуально для **v1.9.0 (build 27)** — карточки «мир + несколько персонажей», названия, персонажи из истории, макросы в сообщениях (§18); облако со сквозным шифрованием (§17); основа — коммит `b448c1e`, 30.10.2026.
-> Названия функций и разделов даны точно (по ним удобно искать `grep`); номера строк меняются — не опирайтесь на них.
+> Вводная для нового чата с ИИ: что за приложение, из чего оно состоит, какой файл за что отвечает и что менять вместе.
+> Описывает **v1.9.0 (build 27)** и только текущее состояние (как вести этот файл — §12, п. 8). История изменений — в git и `version.json → releases`.
+> Имена функций и разделов точные (ищите `grep`); номера строк не приводятся.
 
 ---
 
@@ -12,7 +11,7 @@
 - **Что это:** Android‑приложение для текстовых ролевых игр (RP) с ИИ‑персонажами. Пользователь — один (автор), приложение ставится вручную (sideload), Google Play не используется.
 - **Как устроено:** одна Activity (`MainActivity`) с **WebView**. Весь интерфейс — это обычные `index.html` + `app.js` + `styles.css` (без фреймворков). Весь «бэкенд» — Java‑класс **`LocalBackendServer`** внутри APK; интерфейс общается с ним через JS‑мост `window.AndroidServer.requestAsync(...)` по REST‑подобным путям `/api/...`.
 - **Данные:** SQLite (`agy_roleplay.db`) + текстовые файлы в папке `workspace` на телефоне (карточки персонажей/персон, память чатов, системный промпт `GEMINI.md`).
-- **Облако (с 1.8.0, необязательно):** зашифрованная на телефоне копия данных в **собственном проекте Firebase пользователя** (вход Google через Firebase Auth + Cloud Firestore, REST без SDK, бесплатный тариф Spark). Телефон остаётся рабочей копией, `CloudSync` синхронизирует; ключ — из пароля пользователя. См. §17.
+- **Облако (необязательно):** зашифрованная на телефоне копия данных в **собственном проекте Firebase пользователя** (вход Google через Firebase Auth + Cloud Firestore, REST без SDK, бесплатный тариф Spark). Телефон остаётся рабочей копией, `CloudSync` синхронизирует; ключ — из пароля пользователя. См. §17.
 - **Модели (3 провайдера):**
   1. **Gemini** через Google Vertex AI (вход Google OAuth от «Google Antigravity / AGY», без API‑ключа);
   2. **Claude на Vertex** (Anthropic через Vertex `rawPredict`);
@@ -25,7 +24,7 @@
 
 ## 1. Назначение и возможности
 
-- Карточки персонажей (character cards): название (видит только пользователь), портрет, «Настройки мира» и персонажи `{{char1}}`, `{{char2}}`… с именем и описанием (модели — в `<character_persona>` как `<world_settings>` и `<character name="…">`), приветствие (первое сообщение чата). Карточки до 1.9 — один свободный текст (§18).
+- Карточки персонажей (character cards): название (видит только пользователь), портрет, «Настройки мира» и персонажи `{{char1}}`, `{{char2}}`… с именем и описанием (модели — в `<character_persona>` как `<world_settings>` и `<character name="…">`), приветствие (первое сообщение чата). Карточки старого формата — один свободный текст (§18).
 - Персоны (кто «вы» в истории): название (только для пользователя), имя (`{{user}}`), аватар, описание (`<user_persona name="…">`). Одна персона — «по умолчанию» для новых чатов.
 - Чаты: у каждого своя карточка, персона, модель и «глубина рассуждений» (effort), своя «память чата» (`<chat_memory>`), название; лист «Персонажи» — персонажи карточки и появившиеся в истории (§18).
 - Сообщения: Markdown для RP (`*действие*`, «реплики»), «мысли» модели (thinking), варианты ответа (свайпы), правка, удаление, откат, перегенерация, остановка генерации. Макросы `{{user}}`/`{{charN}}` хранятся как есть, в ленте и для модели заменяются именами.
@@ -51,7 +50,7 @@
 | SQLite через `SQLiteDatabase.openOrCreateDatabase`, миграции вручную (`addColumnIfMissing`) | нет фреймворка миграций |
 | Токены Google шифруются ключом Android Keystore (AES‑GCM) | файл БД сам по себе не даёт доступа к аккаунту |
 | OTA подписывается RSA‑2048/SHA‑256, репозиторий «зашит» в APK | OTA‑бандл — исполняемый JS с доступом к мосту |
-| Claude Code запускается **напрямую**, без proot | под proot на ядре 4.14 телефона Bun зависает (clone → ERESTARTNOINTR). proot удалён в 1.7.0 |
+| Claude Code запускается **напрямую**, без proot | под proot (ptrace) на ядре 4.14 телефона Bun зависает (clone → ERESTARTNOINTR) — не возвращать |
 | Облако — Firebase (Auth + Firestore) на тарифе Spark, через REST без SDK | бесплатно без карты и не «засыпает» (Supabase засыпает через 7 дней); без Gradle/SDK. Firebase Storage не используется: с 2024 г. он требует Blaze |
 | Конфигурация Firebase вводится в приложении, а не зашивается в код | репозиторий и APK публичные; секрет клиента хранится в Keystore |
 | Local-first: SQLite остаётся рабочей копией, `CloudSync` синхронизирует записи | скорость, офлайн, квоты Spark (50 000 чтений/20 000 записей в сутки); при сквозном шифровании сервер всё равно не может искать |
@@ -101,8 +100,8 @@ mobile_project/
 └── mobile/                       ← ВЕБ‑ИНТЕРФЕЙС (то, что видит пользователь)
     ├── www/                      ← ИСТОЧНИК ИСТИНЫ UI; ровно эти файлы уходят в APK и в OTA
     │   ├── index.html              ← каркас: SVG‑спрайт иконок, вкладки, нижняя навигация, экран чата
-    │   ├── app.js                  ← ВСЯ логика UI (~4500 строк)
-    │   ├── styles.css              ← дизайн‑система, темы, все компоненты (~2800 строк)
+    │   ├── app.js                  ← ВСЯ логика UI
+    │   ├── styles.css              ← дизайн‑система, темы, все компоненты
     │   └── version.json            ← копия корневого version.json (должна совпадать байт‑в‑байт)
     ├── dev/
     │   ├── serve.js                ← dev‑сервер http://localhost:5173 (UI в браузере ПК)
@@ -126,7 +125,7 @@ mobile_project/
     └── firestore.rules           ← правила Firestore (шаблон: OWNER_EMAIL → Gmail пользователя)
 ```
 
-Чего в репозитории **нет** (и не должно быть в git): `android/agy-release.keystore` (ключ подписи APK), `android/ota-release-private.pem` / `.der` (ключ подписи OTA), `android/build/`, `android/assets/www/`.
+Не в git (`.gitignore`): `android/agy-release.keystore` (ключ подписи APK) и `android/ota-release-private.pem` (ключ подписи OTA; рядом публичный `ota-release-public.der`) — только на ПК пользователя; `android/build/`, `android/assets/www/` (артефакты сборки); `exports/` (резервные копии и выгрузки — личное). В папке проекта также лежит `My_System_prompt.md` — черновик системного промпта пользователя (не отслеживается; в приложение пользователь вставляет его сам).
 
 ---
 
@@ -153,7 +152,7 @@ mobile_project/
 1. `app.js → api(endpoint, {method, body})` создаёт `reqId`, кладёт Promise в `pendingAndroidRequests`, вызывает `AndroidServer.requestAsync`.
 2. `LocalBackendServer.requestAsync` (`@JavascriptInterface`) отдаёт работу в `executor`, там `routeRequest` разбирает путь/квери/тело и вызывает обработчик.
 3. Ответ — `JSONObject`. Если в нём есть `__status`, это HTTP‑код (ошибки создаются `errorJson(status, msg)`), ключ удаляется.
-4. `deliverResponse` вызывает в WebView `window.__onAndroidServerResponse(reqId, status, "<JSON‑текст>")` (с 1.7.0 — JSON как строковый литерал; движки до 1.7.0 слали base64 — `app.js` понимает оба формата).
+4. `deliverResponse` вызывает в WebView `window.__onAndroidServerResponse(reqId, status, "<JSON‑текст>")` (JSON‑текст строковым литералом; `app.js` понимает и base64 от старых движков).
 5. `app.js` резолвит/реджектит Promise; при ошибке `err.status`, `err.data` (тело), `err.message` (= `data.error`).
 
 **Генерация ответа (долгий запрос):** `POST /api/chats/:id/messages` висит, пока модель не ответит. Параллельно UI каждые 450 мс опрашивает `GET /api/chats/:id/generation` (объект `GenerationProgress`: фаза, текст/мысли «на лету», журнал) и рисует «живое» сообщение. «Стоп» — `POST /api/chats/:id/generation/cancel`.
@@ -177,7 +176,7 @@ mobile_project/
 ## 5. Нативная часть (android/)
 
 ### 5.1 `AndroidManifest.xml`
-- `package="com.agy.roleplay"`, `versionCode` = **build** (25), `versionName` = версия (1.7.0) — меняются при каждом релизе вместе с `version.json`/`package.json`.
+- `package="com.agy.roleplay"`, `versionCode` = **build**, `versionName` = версия — меняются при релизе вместе с `version.json`/`package.json` (§9).
 - `minSdk 26`, **`targetSdk 28`** (обязательно, см. §2; комментарий в манифесте).
 - Разрешения: `INTERNET`, `ACCESS_NETWORK_STATE` (DNS‑серверы сети для Claude Code).
 - `application`: `allowBackup="false"`, `networkSecurityConfig`, тема `@style/AppTheme`, иконка `@drawable/ic_launcher` (адаптивная).
@@ -199,7 +198,7 @@ mobile_project/
 
 Зависимости: `LocalBackendServer` (attach/detach, `VIRTUAL_HOST`, `serveVirtualAsset`, `virtualMimeType`), `app.js` (контракт колбэков выше).
 
-### 5.3 `LocalBackendServer.java` — бэкенд (~5000 строк)
+### 5.3 `LocalBackendServer.java` — бэкенд
 
 Разделы файла (по комментариям‑заголовкам) и ключевые методы:
 
@@ -234,8 +233,8 @@ mobile_project/
 ### 5.4 `ClaudeRuntime.java` — среда Claude Code
 - Описывает **только окружение**; потоковая логика (генерация/вход) — в `LocalBackendServer`.
 - `PARTS` — закреплённые (URL + SHA‑256) компоненты: Alpine minirootfs 3.24.3, `libgcc`, `libstdc++` (Alpine CDN) и `@anthropic-ai/claude-code-linux-arm64-musl` 2.1.310 (npm). Ничего не перезаливается на GitHub (Claude Code — проприетарный).
-- `RUNTIME_VERSION = "claude-2.1.310+alpine-3.24.3"` (маркер `.ready`; принимается и маркер 1.6.x `…+proot-5.4.0-r2`). **Сменили часть → смените версию** (это заставит перекачать).
-- Расположение на телефоне `files/claude_runtime/`: `rootfs/`, `claude` (~283 МБ), `ld-musl-agy.so.1`, `home/` (HOME и рабочая папка: `.claude/.credentials.json`, `.agy/system_prompt_chat_N.md`, `.agy-resolv.conf`), `tmp/`, `bin/agy-open` (шим браузера), `.compat` (`safe` = безопасный режим Bun).
+- `RUNTIME_VERSION = "claude-2.1.310+alpine-3.24.3"` (маркер `.ready`; принимается и старый маркер `…+proot-5.4.0-r2`). **Сменили часть → смените версию** (это заставит перекачать).
+- Расположение на телефоне `files/claude_runtime/`: `rootfs/`, `claude`, `ld-musl-agy.so.1`, `home/` (HOME и рабочая папка: `.claude/.credentials.json`, `.agy/system_prompt_chat_N.md`, `.agy-resolv.conf`), `tmp/`, `bin/agy-open` (шим браузера), `.compat` (`safe` = безопасный режим Bun).
 - Ключевые методы: `isReady`, `ensureReady(sink, force)` (скачать → проверить SHA → распаковать tar.gz → chmod), `cleanupLegacy` (остатки proot), `isAuthenticated` (токен в `.credentials.json`), `credentialsStamp`, `logout`, `ensureBrowserShim`, `browserShimPath`, `browserUrlFile`, `writeHomeFile`/`deleteHomeFile`/`homeFiles`, `setDnsServers`/`resolvConf`, **`ensureDirectLoader`** (копия musl‑загрузчика с заменой `/etc/resolv.conf` на `.agy-resolv.conf`, проверка SHA), `BUN_SAFE_FLAGS`, `RunOptions`, `defaultOptions`, `isSafeMode`/`setSafeMode`, `freshHome`/`resetHome`, **`newClaudeProcess(args, opts)`** (команда `ld-musl-agy.so.1 claude args`, env: `HOME`, `TMPDIR`, `LD_LIBRARY_PATH`, `AGY_DNS_SERVERS`, `BUN_OPTIONS=--preload …android.cjs`, `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`), `probeEnv`, `newHostProcess` (dev exec), `kill`/`killStray`/`pidOf` (SIGKILL всему дереву через `ProcSnapshot`), загрузчик с SHA и мини‑распаковщик tar.
 
 ### 5.5 `ProcSnapshot.java`
@@ -264,7 +263,7 @@ mobile_project/
 6. Release: пишет `agy-roleplay-android16.apk` в корень и записывает `apkSha256`/`apkSize` в `version.json` (+ копия в `mobile/www`). Debug: `%TEMP%\agy-roleplay-debug.apk`, `version.json` не трогает.
 
 **`android/sign-ota.ps1 [-Init]`**
-- `-Init` — однократно создаёт ключевую пару OTA (`android/ota-release-private.pem` / `.der`), печатает публичный ключ для `OTA_PUBLIC_KEY_B64`.
+- `-Init` — однократно создаёт ключевую пару OTA (`android/ota-release-private.pem` и `ota-release-public.der`), печатает публичный ключ для `OTA_PUBLIC_KEY_B64`.
 - Обычный запуск — считает SHA‑256 файлов `mobile/www/{index.html, app.js, styles.css}`, формирует payload (см. §9) и пишет `otaSignature` в **оба** `version.json`.
 
 ---
@@ -281,7 +280,7 @@ mobile_project/
 | GET `/api/models` | `getCleanBaseModelsJson` | список моделей с `efforts[]`, `legacy` | `loadAll` |
 | GET `/api/files/content?path=` | inline | текст файла workspace | системный промпт, память чата |
 | POST `/api/files/file` | inline | записать `GEMINI.md` или `memories/*.md` (другое — 400) | `openSystemPromptPage`, `openMemoryEditor` |
-| GET/POST `/api/characters` | `queryCharactersArray` / `saveOrUpdateCharacter` | список (с `fileContent`, `avatar_url`, `title`, `card`) / создать (`title, avatarUrl, filePath, firstMessage, card{world, chars[{n,name,text}], next}`; без `card` — свободный текст `rawFileContent`) | `loadAll`, `loadCards`, `openCardEditor` |
+| GET/POST `/api/characters` | `queryCharactersArray` / `saveOrUpdateCharacter` | список (с `fileContent`, `avatar_url`, `title`, `card`) / создать (`title, avatarUrl, filePath, firstMessage, card{world, chars[{n, name, text}]}`; без `card` — свободный текст: `name` + `rawFileContent`) | `loadAll`, `loadCards`, `openCardEditor` |
 | GET/PUT/DELETE `/api/characters/:id` | `getCharacterByIdJson` / `saveOrUpdateCharacter` / `deleteCard` | одна карточка + `next_char_num` (номер следующего персонажа с учётом персонажей ИИ во всех её чатах) / изменить / удалить (чаты остаются) | `openCardEditor` |
 | GET/POST `/api/personas` | `queryPersonasArray` / `saveOrUpdatePersona` | + `activePersonaId`; поле `title` | то же |
 | PUT/DELETE `/api/personas/:id` | … / `deleteCard` | при удалении активной — активной становится первая | `openCardEditor` |
@@ -322,7 +321,7 @@ mobile_project/
 
 Пути внутри `/data/user/0/com.agy.roleplay/`:
 - `databases/agy_roleplay.db` — SQLite.
-- `files/workspace/` — `GEMINI.md` (системный промпт), `characters/*.md`, `personas/*.md`, `memories/chat_<id>.md`, `exports/` (наследие старых версий, просто хранится).
+- `files/workspace/` — `GEMINI.md` (системный промпт), `characters/*.md`, `personas/*.md`, `memories/chat_<id>.md`, `exports/` (от старых версий, не используется).
 - `files/claude_runtime/` — среда Claude Code (§5.4).
 - `files/ota_www/` — установленный OTA‑бандл (если активен).
 - WebView localStorage `agy_ui_prefs_v1` — настройки оформления (тема, акцент, шрифт…). В облако не попадают.
@@ -332,10 +331,10 @@ mobile_project/
 | Таблица | Колонки |
 |---|---|
 | `settings` | `key` PK, `value` |
-| `characters` | `id`, `name` (имя первого персонажа или название — для старых версий), `file_path` UNIQUE, `avatar_url` (data:image/… или ''), `first_message` (приветствие, с макросами), `description_preview`, `created_at`, `updated_at`; с 1.9: `title` (название, модели не уходит), `card_json` (структура карточки, '' — свободный текст; §18) |
-| `personas` | `id`, `name` (`{{user}}`), `file_path` UNIQUE, `avatar_url`, `description_preview`, `is_default`, `created_at`; с 1.9: `title` |
-| `chats` | `id`, `title` (по умолчанию «Чат: Имя»), `character_id`, `persona_id`, `model_id`, `effort`, `memory_file_path`, `provider`, `created_at`, `updated_at`; **не используются** (наследие): `system_prompt_path`, `first_message_path`, `project_path` |
-| `messages` | `id`, `chat_id`, `role` (`user`/`assistant`), `content` (текущий вариант, макросы как есть), `thoughts`, `swipes_json` (все варианты), `swipe_index`, `thought_swipes_json` (мысли по вариантам), `created_at`, `sort_key`; с 1.9: `cast_swipes_json` (по варианту — массив `{n, name, text}` персонажей, которых он ввёл; §18); индексы `idx_messages_chat(chat_id, id)`, `idx_messages_chat_sort(chat_id, sort_key, id)` |
+| `characters` | `id`, `name` (имя первого персонажа или название — для старых версий), `file_path` UNIQUE, `avatar_url` (data:image/… или ''), `first_message` (приветствие, с макросами), `description_preview`, `created_at`, `updated_at`, `title` (название, модели не уходит), `card_json` (структура карточки; '' — свободный текст; §18) |
+| `personas` | `id`, `name` (`{{user}}`), `file_path` UNIQUE, `avatar_url`, `description_preview`, `is_default`, `created_at`, `title` |
+| `chats` | `id`, `title` (по умолчанию «Чат: <название карточки>»), `character_id`, `persona_id`, `model_id`, `effort`, `memory_file_path`, `provider`, `created_at`, `updated_at`; **не используются** (остались в схеме): `system_prompt_path`, `first_message_path`, `project_path` |
+| `messages` | `id`, `chat_id`, `role` (`user`/`assistant`), `content` (текущий вариант, макросы как есть), `thoughts`, `swipes_json` (все варианты), `swipe_index`, `thought_swipes_json` (мысли по вариантам), `created_at`, `sort_key`, `cast_swipes_json` (по варианту — массив `{n, name, text}` персонажей, которых он ввёл; §18); индексы `idx_messages_chat(chat_id, id)`, `idx_messages_chat_sort(chat_id, sort_key, id)` |
 | облако: колонки | у `characters`, `personas`, `chats`, `messages` — `sync_id` (случайные 128 бит hex, одинаковые на всех устройствах, уникальный индекс); `chats.character_sid`/`persona_sid` — ссылка на карточку, пришедшую из облака позже чата; `messages.sort_key` — порядок (старые строки = `id`, новые — мс, всегда больше остальных в чате). **Порядок сообщений — `ORDER BY sort_key, id`**, не по `id` |
 | `cloud_ctl` | одна строка: `tracking` (облако привязано — триггеры пишут очередь), `applying` (идёт применение из облака — триггеры молчат) |
 | `cloud_outbox` | очередь выгрузки: `kind`, `sid`, `parent` (sid чата для сообщений/памяти), `queued_at` (мс изменения = версия записи) |
@@ -350,8 +349,8 @@ mobile_project/
 Облако: `cloud_config` (`projectId`, `apiKey`, `clientId`), `cloud_client_secret`*, `cloud_refresh_token`**, `cloud_dek`** (ключ данных, hex), `cloud_oauth_pending`** (state/verifier/порт входа, 10 мин), `cloud_uid`, `cloud_email`, `cloud_kid` (идентификатор хранилища), `cloud_watermark` (время последней принятой записи облака), `cloud_read_time` (время последнего полного чтения облака), `cloud_last_sync`, `cloud_usage` (расход квоты за тихоокеанские сутки), `cloud_quota_until`, `cloud_pending_persona`. (** — строгие секреты.) Все `cloud_*` не попадают в резервную копию. Синхронизируются (запись `settings`): `selected_model`, `selected_effort`, `safety_threshold`, `project_id`, `active_persona_id` — список совпадает в триггерах `cloud-schema.sql` и в `cloudExportRecord`/`applyCloudSettings`.
 
 ### 7.3 Карточки
-- **Структурная карточка (с 1.9):** источник истины — `characters.card_json` = `{"v":2,"world","chars":[{"n","name","text"}],"next"}`. Файл карточки — её отрисовка (`renderCardFile`: те же теги, что получает модель, с подставленными `{{charN}}` карточки; `{{user}}`/`{{char}}` остаются) — для старых версий, облака старых устройств и восстановления «файл без строки». Новая версия файл структурной карточки не читает.
-- **Свободный текст (карточки до 1.9):** `card_json = ''`, файл = **ровно** описание (редактор старых версий отправлял `rawFileContent`), он целиком идёт модели в тег. Новый редактор открывает такую карточку как персонажа `{{char1}}` (имя карточки, весь текст); после сохранения она становится структурной.
+- **Структурная карточка:** источник истины — `characters.card_json` = `{"v":2,"world","chars":[{"n","name","text"}],"next"}`. Файл карточки — её отрисовка (`renderCardFile`: те же теги, что получает модель, с подставленными `{{charN}}` карточки; `{{user}}`/`{{char}}` остаются) — для старых версий, облака старых устройств и восстановления «файл без строки». Новая версия файл структурной карточки не читает.
+- **Свободный текст (старые карточки):** `card_json = ''`, файл = **ровно** описание, он целиком идёт модели в тег. Новый редактор открывает такую карточку как персонажа `{{char1}}` (имя карточки, весь текст); после сохранения она становится структурной.
 - Название (`title`) — только для интерфейса (списки, чаты, файл карточки по умолчанию); модели не уходит.
 - Приветствие — в БД (`first_message`) и в первом сообщении чата **с макросами**; имена подставляются при показе и для модели.
 - Портрет — `data:image/...` (UI уменьшает до 640 px, `downscaleImage`); без картинки `avatar_url = ''`, UI рисует инициалы (`initialsAvatar`).
@@ -388,7 +387,7 @@ mobile_project/
 ### 8.5 Claude Code CLI (`callClaudeCodeCli`)
 - Проверки: среда установлена, есть вход (иначе `AuthRequiredException` → HTTP 401 → кнопка «Настроить»).
 - Системный промпт пишется в `HOME/.agy/system_prompt_chat_<id>.md`.
-- Команда: `claude -p --output-format stream-json --verbose --include-partial-messages --model <alias|id> [--effort L] --tools "" --disable-slash-commands --permission-mode dontAsk --no-session-persistence --system-prompt-file <файл>`; env `CI=1`; в stdin — `buildClaudeTranscript` (история «Имя:\nреплика» с подставленными макросами + «=== Задание ===»). Ответы модели подписаны именем персонажа, если в карточке ровно один персонаж, иначе «Рассказчик». Задание: «Продолжи ролевую игру одной следующей репликой[ за персонажа «Имя»]. Выведи только сам ответ[ персонажа] без имени в начале и мета-комментариев.» (с 1.9 без «служебных пометок», иначе модель выбрасывает блок `<new_character>`).
+- Команда: `claude -p --output-format stream-json --verbose --include-partial-messages --model <alias|id> [--effort L] --tools "" --disable-slash-commands --permission-mode dontAsk --no-session-persistence --system-prompt-file <файл>`; env `CI=1`; в stdin — `buildClaudeTranscript` (история «Имя:\nреплика» с подставленными макросами + «=== Задание ===»). Ответы модели подписаны именем персонажа, если в карточке ровно один персонаж, иначе «Рассказчик». Задание: «Продолжи ролевую игру одной следующей репликой[ за персонажа «Имя»]. Выведи только сам ответ[ персонажа] без имени в начале и мета-комментариев.» Просьбы убирать служебные пометки в нём нет: иначе модель выбрасывала бы блок `<new_character>`.
 - Разбор `stream-json`: `stream_event` (`text_delta`/`thinking_delta` → живой текст), `assistant` (блоки собираются по `message.id`), `result` (`is_error`).
 - Сторож: нет **ни одной** строки вывода 90 с → процесс убивается, понятная ошибка.
 
@@ -410,7 +409,7 @@ styles.css=<sha256 hex>
 ```
 RSA‑SHA256, base64 → поле `otaSignature` в `version.json`. Публичный ключ — `OTA_PUBLIC_KEY_B64` в `LocalBackendServer`.
 
-**Правило «один build»** (с 1.7.0): OTA‑бандл ставится только на APK того же build. `handleUpdatesCheck`: `nativeUpdateRequired = latestBuild > bundledBuild` (→ «Скачать APK»), `otaAvailable = latestBuild == bundledBuild && версия новее` (→ «Обновить»). `handleUpdatesApply` сначала читает `version.json`, отказывает при другом build, проверяет подпись, пишет в `files/ota_www.new` и подменяет `files/ota_www`. При старте OTA другого build удаляется.
+**Правило «один build»:** OTA‑бандл ставится только на APK того же build. `handleUpdatesCheck`: `nativeUpdateRequired = latestBuild > bundledBuild` (→ «Скачать APK»), `otaAvailable = latestBuild == bundledBuild && версия новее` (→ «Обновить»). `handleUpdatesApply` сначала читает `version.json`, отказывает при другом build, проверяет подпись, пишет в `files/ota_www.new` и подменяет `files/ota_www`. При старте OTA другого build удаляется.
 
 **`version.json`:** `appName`, `version`, `build`, `releaseDate`, `gitRepo`, `gitBranch`, `apkPath`, `releases[]` (`version`, `build`, `date`, `title`, `ref`, `changelog[]`; хранить последние 10), `apkSha256`, `apkSize`, `otaSignature`. Две копии (корень и `mobile/www`) должны совпадать.
 
@@ -422,7 +421,7 @@ RSA‑SHA256, base64 → поле `otaSignature` в `version.json`. Публич
 3. `powershell -ExecutionPolicy Bypass -File android\build-apk.ps1` (релиз).
 4. `powershell -ExecutionPolicy Bypass -File android\sign-ota.ps1` — **последним** (любая правка `mobile/www/*` после подписи её ломает).
 5. Проверить подпись (node + публичный ключ) и хеш APK.
-6. `git commit` («vX.Y.Z (Build N): …») и `git push origin main` (репозиторий `Kuka001/111`).
+6. Обновить `PROJECT_GUIDE.md` (§12, п. 8) и закоммитить вместе с кодом («vX.Y.Z (Build N): …»); `git push origin main` (репозиторий `Kuka001/111`) — только с согласия пользователя.
 7. Поставить APK на телефон: `adb install -r agy-roleplay-android16.apk` (данные сохраняются — тот же ключ подписи).
 
 ---
@@ -430,7 +429,7 @@ RSA‑SHA256, base64 → поле `otaSignature` в `version.json`. Публич
 ## 10. Веб‑интерфейс (mobile/www)
 
 ### 10.1 `index.html`
-SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя')`); `#tabsHost` с четырьмя `.tab-pane` (`#tab-chats`, `#tab-characters`, `#tab-personas`, `#tab-settings`); FAB `#newChatFab`; нижняя навигация `#bottomNav` (`data-action="tab"`); экран чата `#chatRoomView` (шапка `#chatHeaderAvatar/#chatHeaderName/#chatHeaderSub/#chatStatusDot`, лента `#chatScroll > #chatFeed`, кнопка `#jumpBtn`, композер `#chatInput` + `#sendBtn`); `#layers` (все страницы/листы/диалоги); `#toastHost`. Подключает `styles.css` и `app.js` (всё содержимое вкладок рисует JS).
+SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя')`); `#tabsHost` с четырьмя `.tab-pane` (`#tab-chats`, `#tab-characters`, `#tab-personas`, `#tab-settings`); FAB `#newChatFab`; нижняя навигация `#bottomNav` (`data-action="tab"`); экран чата `#chatRoomView` (шапка `#chatHeaderAvatar/#chatHeaderName/#chatHeaderSub/#chatStatusDot`, кнопки «Персонажи» `data-action="chat-cast"` и «Настройки чата», лента `#chatScroll > #chatFeed`, кнопка `#jumpBtn`, композер `#chatInput` + `#sendBtn`); `#layers` (все страницы/листы/диалоги); `#toastHost`. Подключает `styles.css` и `app.js` (всё содержимое вкладок рисует JS).
 
 ### 10.2 `app.js` — разделы (в порядке файла)
 | Раздел | Ключевые функции / объекты |
@@ -471,18 +470,18 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 
 - `npm test` — все `mobile/tests/*.test.js` (Node 24, без зависимостей).
 - `npm run check` — `node --check mobile/www/app.js` + тесты (то же запускает `build-apk.ps1`).
-- `npm run dev` → http://localhost:5173 — UI в браузере ПК с `mock-bridge.js`. Переключатели в URL: `?empty=1`, `?long=1`, `?delay=ms`, `?update=ota|apk`, `?loginhang=1`, `?loginfail=1`, `?hang=1|2`, `?engine=N`, `?cloud=none|signedout|novault|locked|ready|quota|error`. В моке есть карточка мира «Таверна «Сломанный меч»» (Юки `{{char1}}`, Хана `{{char2}}`) и её чат с персонажем из истории (Лира `{{char3}}`); сообщение с `/newchar` даёт ответ с блоком `<new_character>` (пароль мока «мой кот любит зимний чай», код `000G-40R4-0M30-E209-185G-R38E-1W81-24GK`; `&vault=1` — после входа хранилище уже есть).
+- `npm run dev` → http://localhost:5173 — UI в браузере ПК с `mock-bridge.js`. Переключатели в URL: `?empty=1`, `?long=1`, `?delay=ms`, `?update=ota|apk`, `?loginhang=1`, `?loginfail=1`, `?hang=1|2`, `?engine=N`, `?cloud=none|signedout|novault|locked|ready|quota|error` (пароль мока «мой кот любит зимний чай», код `000G-40R4-0M30-E209-185G-R38E-1W81-24GK`; `&vault=1` — после входа хранилище уже есть). В моке есть карточка мира «Таверна «Сломанный меч»» (Юки `{{char1}}`, Хана `{{char2}}`) и её чат с персонажем из истории (Лира `{{char3}}`); сообщение с `/newchar` даёт ответ с блоком `<new_character>`.
 - Облако: `cloud-format.test.js` и `android/tests/CloudCryptoTest.java` проверяют **одни и те же** векторы (Node ↔ JVM); `cloud-schema.test.js` выполняет `android/assets/cloud-schema.sql` на `node:sqlite`. JVM‑тест вручную: `javac -encoding UTF-8 -d <out> android/src/com/agy/roleplay/CloudCrypto.java android/tests/CloudCryptoTest.java` и `java -cp <out> com.agy.roleplay.CloudCryptoTest` (`--emit` печатает вектор Java для Node‑теста).
 - `harness.js` — загружает `app.js` в `vm` с заглушками DOM; тесты используют `window.__appInternals`. Новую чистую функцию для тестов надо добавить в `__appInternals`.
-- Тесты‑«зеркала» (system‑prompt, gemini‑request, updates) повторяют Java‑логику на JS: меняете Java — меняйте зеркало.
+- Тесты‑«зеркала» (system‑prompt, story‑characters, gemini‑request, updates, cloud‑format) повторяют Java‑логику на JS: меняете Java — меняйте зеркало.
 
 ### 11.1 Отладка на телефоне (adb по Wi‑Fi)
 - `adb.exe` — в кэше инструментов (`…\android-sdk\platform-tools\adb.exe`). Телефон уже спарен; найти: `adb mdns services`, затем `adb devices`.
 - `run-as` на этой прошивке заблокирован (SELinux + targetSdk 28). Поэтому:
-  1. `android\build-apk.ps1 -Debuggable` → `%TEMP%\agy-roleplay-debug.apk`; `adb install -r …` (данные сохраняются).
+  1. `android\build-apk.ps1 -Debuggable` → `%TEMP%\agy-roleplay-debug.apk`; `adb install -r …` (данные сохраняются). Отладка WebView и `/api/dev/exec` есть только в такой сборке.
   2. Запуск как с иконки: `adb shell monkey -p com.agy.roleplay -c android.intent.category.LAUNCHER 1`.
   3. `adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>` (pid: `adb shell pidof com.agy.roleplay`).
-  4. CDP‑скрипты в `%TEMP%\agy_tools\`: `devcall.js <port> <METHOD> <endpoint> [json]` (вызов API), `phoneshot.js` (JS + скриншот). `POST /api/dev/exec {"argv":[...]}` — команда в песочнице приложения.
+  4. CDP‑скрипты в `%TEMP%\agy_tools\`: `devcall.js <port> <METHOD> <endpoint> [json|@файл.json] [таймаут, с]` (вызов API; печатает `HTTP <код>` и JSON), `phoneshot.js` (JS + скриншот). `POST /api/dev/exec {"argv":[...]}` — команда в песочнице приложения.
   5. В Git Bash ставьте `MSYS_NO_PATHCONV=1`, иначе аргумент `/api/...` превратится в путь Windows.
   6. После отладки **вернуть релизный APK**.
 - Тестовые данные создавайте на отдельных карточках/чатах («Тест … (удалить)») и удаляйте; перед рискованными проверками делайте `/api/backup/export`.
@@ -491,13 +490,14 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 
 ## 12. Правила и предпочтения пользователя (соблюдать!)
 
-1. **Один системный промпт, без скрытого.** Пользователь пишет промпт сам («Системный промпт» = `GEMINI.md`); ниже — только `<character_persona>`, `<user_persona>`, `<chat_memory>`. Не добавлять скрытые инструкции, не переписывать текст пользователя/истории, не внедрять новый авто‑контекст **без спроса**. Всё, что движок обязан добавить (реплика `[Начало ролевой игры]`, задание транскрипта Claude Code), показывается в окне «Итоговый системный промпт» → «Что ещё получает модель» (`deliveryNote`). Структурные теги карточки (`<world_settings>`, `<character name>`, `<user_persona name>`), подстановка макросов и вынос блоков `<new_character>` из ответов (с 1.9, по просьбе пользователя) — тоже там; **инструкцию писать такие блоки модель получает только из системного промпта пользователя**, приложение её не добавляет. Лор (lore) не используется.
+1. **Один системный промпт, без скрытого.** Промпт пишет пользователь («Системный промпт» = `GEMINI.md`); ниже движок добавляет только теги карточки, персоны и памяти (§8.1). Не добавлять скрытые инструкции, не переписывать текст пользователя/истории, не вводить новый авто‑контекст **без спроса**. Всё, что движок добавляет или меняет (реплика `[Начало ролевой игры]`, задание Claude Code, подстановка макросов, вынос блоков `<new_character>`), показано в «Итоговый системный промпт» → «Что ещё получает модель» (`deliveryNote`). Инструкция писать блоки `<new_character>` — **только** в промпте пользователя. Лор (lore) не используется.
 2. Настройки живут там, где используются: приветствие — в карточке, модель/персона — в чате.
 3. UI‑тексты — по‑русски; комментарии/идентификаторы — по‑английски; стиль кода — как в окружающем коде.
 4. Переводы строк — LF; `.gitattributes` запрещает git менять байты (иначе ломается подпись OTA).
 5. `targetSdk` остаётся 28; Gradle не вводить; зависимости (androidx, npm) не добавлять без необходимости.
 6. Ключи подписи (`agy-release.keystore`, `ota-release-private.pem`) — только на ПК, никогда в git. Debuggable‑APK не публиковать.
 7. Push в GitHub = публикация обновления для приложения — только с согласия пользователя.
+8. **Документация.** `PROJECT_GUIDE.md` хранится в git и описывает только текущее состояние: правится в том же коммите, что и код; устаревшее удаляется, история изменений здесь не ведётся (она в git и `version.json → releases`); текст ясный и краткий — без пересказа кода и повторов.
 
 ---
 
@@ -508,7 +508,7 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 | Любой `/api/*` (путь, поля запроса/ответа) | `LocalBackendServer.routeRequest` + обработчик; вызовы `api()` в `app.js`; `mobile/dev/mock-bridge.js → route()`; при необходимости зеркальные тесты; если старый UI/движок перестаёт понимать — поднять build и `MIN_ENGINE_BUILD` |
 | Список моделей / их effort | `VERTEX_MODELS` / `CLAUDE_CLI_MODELS` (Java); `MODELS` в `mock-bridge.js`; префиксы `claude-code-` / `claude-` критичны для маршрутизации (`generateRoleplayReply`, `providerOf`); `tests/ui-helpers.test.js` |
 | Сборка системного промпта / память | `buildSystemPrompt`, `readChatMemory`, `tidyChatFiles` (Java); `buildSystemPrompt` в `mock-bridge.js`; `tests/system-prompt.test.js`; тексты `openSystemPromptPage`, `openMemoryEditor` |
-| Карточки, макросы, персонажи из истории (§18) | Java «CARDS, CAST & MACROS» ↔ `app.js` (`cardCast`, `storyCast`, `castMacros`, `applyMacros`, `splitLiveText`, `deliveryNote`) ↔ мок (`mock-bridge.js`) ↔ зеркала `tests/system-prompt.test.js` и `tests/story-characters.test.js` — менять вместе; формат `card_json`/`cast_swipes_json` — ещё облако (`cloudExportRecord`/`applyCloudCard`/`applyCloudMessage`, триггеры) и правка `My_System_prompt.md` пользователя (формат блока `<new_character>`) |
+| Карточки, макросы, персонажи из истории (§18) | Java «CARDS, CAST & MACROS» ↔ `app.js` (`cardCast`, `storyCast`, `castMacros`, `applyMacros`, `splitLiveText`, `deliveryNote`) ↔ мок (`mock-bridge.js`) ↔ зеркала `tests/system-prompt.test.js` и `tests/story-characters.test.js` — менять вместе; формат `card_json`/`cast_swipes_json` — ещё облако (`cloudExportRecord`/`applyCloudCard`/`applyCloudMessage`, триггеры). Формат блока `<new_character>` описан в системном промпте пользователя — при изменении сказать ему |
 | Что уходит Gemini/Claude помимо промпта | `generateRoleplayReply`, `buildClaudeTranscript`; `deliveryNote` в `app.js`; `tests/gemini-request.test.js`. Спросить пользователя (см. §12) |
 | Формат подписи OTA | `buildOtaManifestPayload` (Java) **и** `$Payload` в `sign-ota.ps1` **и** зеркало в `tests/updates.test.js` — строго одинаково |
 | Логика «есть ли обновление» | `handleUpdatesCheck`, `handleUpdatesApply`, правило в `initWorkspaceAndDatabase`; `updateAction`/`checkForUpdates`/`openUpdatesPage` в `app.js`; `/api/updates/check` в моке; `tests/updates.test.js` |
@@ -549,26 +549,20 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 
 ---
 
-## 15. Известные ловушки и текущее состояние
+## 15. Известные ловушки
 
-- **Vertex 403 «billing not enabled»** (с 26.10.2026) на проекте `project-4c7a8e8a-764a-42bc-bdf`: Gemini и Claude на Vertex не работают до включения оплаты или смены Project ID. Это не баг кода.
-- proot удалён: на ядре 4.14 под ptrace Bun зависает. Не возвращать.
 - Вход Claude: «выполнен» только при токене в `~/.claude/.credentials.json` (`~/.claude.json` пишется при каждом запуске). «Войти заново» ждёт **новые** учётные данные (`credentialsStamp` ≠ `loginBaseStamp`).
 - Глобальные флаги Claude Code (`--debug-to-stderr`) — **до** подкоманды (`enablePositionalOptions`).
 - `Process.destroy()` шлёт только SIGTERM — убивать через `ClaudeRuntime.kill` (SIGKILL всему дереву).
-- PowerShell `Copy-Item` сохраняет время файла → git может «не заметить» изменение файла того же размера (скрипты теперь пишут байты заново).
-- `adb shell am start -n …` без категории LAUNCHER раньше создавал второе окно; теперь `singleTask`, но для тестов используйте `monkey … LAUNCHER`.
-- Отладка WebView и `/api/dev/exec` работают только в debuggable‑сборке.
-- Haiku в Claude Code иногда начинает ответ с «Имя:» — следствие формата транскрипта (не меняли, т.к. это меняет промпт).
+- `build-apk.ps1` копирует через `Copy-Fresh` (пишет байты заново): `Copy-Item` сохраняет время файла, и git может не заметить изменение файла того же размера.
+- Haiku в Claude Code иногда начинает ответ с «Имя:» — из‑за формата транскрипта; менять транскрипт — только с согласия пользователя (§12).
 - Облако: порядок сообщений — **`sort_key`**, а не `id` (из облака сообщения получают локальные id в порядке прихода). Откат и перегенерация считают «до/после» по позиции в отсортированном списке.
 - Облако: изменения БД ловят триггеры — не пишите в синхронизируемые таблицы в обход (например, `PRAGMA recursive_triggers`, временные таблицы); применение из облака — только внутри `cloudApplying` (иначе эхо в очередь). Файлы (GEMINI.md, память) триггеры не видят — после записи нужен `cloudQueueFile`.
 - Облако: бесплатная квота Firestore действует только для базы `(default)` редакции Standard; сутки квоты — по тихоокеанскому времени. При `RESOURCE_EXHAUSTED` синхронизация ждёт до полуночи (Pacific), данные остаются на телефоне.
 - Облако: вход Google — OAuth‑клиент типа **Desktop app** (loopback разрешён только ему), PKCE + state + случайный порт на 127.0.0.1. Для Android‑клиентов loopback Google запретил.
-- **Android 15+ (телефон пользователя — Android 16): у приложения в фоне нет сети** (`dumpsys netpolicy` → `blocked=APP_BACKGROUND`), запросы падают с `Unable to resolve host … No address associated with hostname`. Поэтому вход в облако двухэтапный (браузер передаёт код → обмен, когда приложение снова на экране), а `CloudSync` не синхронизирует в фоне (`syncMissed` → запуск при `onResume`). **Вход Google для Vertex (AGY) обменивает код в фоне** — на этом телефоне он упадёт так же (пока не исправлено; обход — ручная вставка ссылки на странице «Google Vertex»).
+- **Android 15+ (телефон пользователя — Android 16): у приложения в фоне нет сети** (`dumpsys netpolicy` → `blocked=APP_BACKGROUND`), запросы падают с `Unable to resolve host … No address associated with hostname`. Поэтому вход в облако двухэтапный (браузер передаёт код → обмен, когда приложение снова на экране), а `CloudSync` не синхронизирует в фоне (`syncMissed` → запуск при `onResume`). **Вход Google для Vertex (AGY) обменивает код в фоне** и на этом телефоне падает так же; обход — ручная вставка ссылки на странице «Google Vertex».
 - CDP/`devcall.js` не отвечает, пока приложение в фоне (WebView на паузе); снимок экрана телефона целиком — `adb exec-out screencap -p > file.png`.
 - Облако: ключ данных и refresh‑токен — «строгие» секреты: без Keystore они не сохраняются, после перезапуска нужен пароль (статус `keystoreUnavailable`).
-- `npm run dev`: мок падал на `btoa` с кириллицей в аватарах (исправлено в 1.8.0 — кодируются байты UTF‑8).
-- Ориентиры производительности (1.7.0, реальные данные: 25 чатов): список чатов ~20 КБ / ~40 мс; открытие длинного чата ~100–150 мс; `/api/settings` ~7 мс; память JS ~10 МБ; APK 173 КБ.
 
 ---
 
@@ -580,7 +574,9 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 - **OTA** — подписанное обновление только веб‑слоя (`index.html`, `app.js`, `styles.css`).
 - **Мост (bridge)** — `window.AndroidServer` (Java‑объект `LocalBackendServer`).
 - **Workspace** — папка `files/workspace` с `.md`‑файлами карточек, памяти и системного промпта.
-- **Карточка** — персонаж или персона (строка БД + `.md`‑файл).
+- **Карточка** — карточка персонажа (мир + персонажи или свободный текст) или персона: строка БД + `.md`‑файл.
+- **Макросы** — `{{user}}`, `{{char}}`, `{{charN}}`: в текстах хранятся как есть, заменяются именами при показе и для модели (§18.2).
+- **Персонаж из истории** — персонаж, которого ввёл ответ модели блоком `<new_character>`; хранится в варианте ответа (§18.3).
 - **Свайп / вариант** — альтернативный ответ модели на то же сообщение (`swipes_json`, `swipe_index`).
 - **Effort** — глубина рассуждений модели (`low…max`).
 - **Самопроверка** — «Проверить запуск» Claude Code (`/api/claude/selftest`).
@@ -594,9 +590,9 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 
 ---
 
-## 17. Облако: аккаунт, шифрование, синхронизация (с 1.8.0)
+## 17. Облако: аккаунт, шифрование, синхронизация
 
-Необязательно: без него приложение работает как раньше. Пользователь создаёт **свой** проект Firebase (тариф Spark) по `firebase/README.md`, публикует `firebase/firestore.rules` и вставляет конфигурацию в «Настройки → Облако и аккаунт». Телефон остаётся рабочей копией, облако — зашифрованная копия, привязанная к аккаунту Google.
+Необязательно: без него данные есть только на телефоне. Пользователь создаёт **свой** проект Firebase (тариф Spark) по `firebase/README.md`, публикует `firebase/firestore.rules` и вставляет конфигурацию в «Настройки → Облако и аккаунт». Телефон остаётся рабочей копией, облако — зашифрованная копия, привязанная к аккаунту Google.
 
 ### 17.1 Классы и данные
 - `CloudCrypto` — только JDK (тестируется на ПК); `CloudStore` — сеть (вход Google, Firebase Auth, Firestore REST); `CloudSync` — ключ, синхронизация, статус, квоты. Локальная часть (схема, экспорт/применение записей) — раздел «CLOUD SYNC: LOCAL RECORDS» в `LocalBackendServer`.
@@ -606,7 +602,7 @@ users/{uid}/meta/vault          v, kdf = "pbkdf2-sha256", iter, salt, pw, rc, ki
 users/{uid}/records/{docId}     c (шифротекст), u (время сервера, REQUEST_TIME), n (частей, если > 1)
 users/{uid}/parts/{docId}-{i}   продолжение записи больше 900 КБ (максимум 6 частей)
 ```
-- Записи (JSON внутри шифротекста, конверт `{v: 1, k, sid, mt}`): `character`, `persona` (имя, имя файла, текст карточки, аватар, приветствие, даты; с 1.9 — `title`, у карточки `card` = структура; запись без `card` от старой версии делает карточку свободным текстом, если текст изменился; без `title` — название не трогается), `chat` (название, `characterSid`, `personaSid`, модель, effort, provider, даты), `message` (`chatSid`, role, content, thoughts, swipes, thoughtSwipes, swipeIndex, sortKey, createdAt; с 1.9 — `castSwipes`, без него персонажи сообщения не стираются), `memory` (sid чата; текст без заголовка «# Память чата #N» — N локальный), `prompt` (GEMINI.md), `settings` (модель, effort, safety, projectId, `activePersonaSid`). Удаление — надгробие `{deleted: true}`. `mt` — время последнего локального изменения (= `queued_at`).
+- Записи (JSON внутри шифротекста, конверт `{v: 1, k, sid, mt}`): `character`, `persona` (имя, `title`, имя файла, текст карточки, аватар, приветствие, даты; у структурной карточки — `card`. Запись без `card` (от старой версии) делает карточку свободным текстом, только если текст изменился; без `title` название не трогается), `chat` (название, `characterSid`, `personaSid`, модель, effort, provider, даты), `message` (`chatSid`, role, content, thoughts, swipes, thoughtSwipes, swipeIndex, sortKey, createdAt, `castSwipes`; запись без `castSwipes` персонажей сообщения не стирает), `memory` (sid чата; текст без заголовка «# Память чата #N» — N локальный), `prompt` (GEMINI.md), `settings` (модель, effort, safety, projectId, `activePersonaSid`). Удаление — надгробие `{deleted: true}`. `mt` — время последнего локального изменения (= `queued_at`).
 
 ### 17.2 Шифрование (`CloudCrypto`)
 - Ключ данных (DEK) — 256 бит; подключи `HMAC-SHA256(DEK, "agy/enc/v1" | "agy/id/v1" | "agy/kid/v1")`.
@@ -649,14 +645,14 @@ users/{uid}/parts/{docId}-{i}   продолжение записи больше
 
 ---
 
-## 18. Карточки, состав чата и макросы (с 1.9.0)
+## 18. Карточки, состав чата и макросы
 
 Раздел Java «CARDS, CAST & MACROS» в `LocalBackendServer`; в `app.js` — помощники `cardCast`/`storyCast`/`castMacros`/`applyMacros`/`splitLiveText` и листы `openCastSheet`/`openStoryCharacter`. Зеркала — `tests/system-prompt.test.js`, `tests/story-characters.test.js`.
 
 ### 18.1 Карточка
 - `card_json` = `{"v":2,"world":"…","chars":[{"n":1,"name":"Юки","text":"…"}],"next":3}` (`sanitizeCard`: до 50 персонажей, имя до 80 символов без `"<>` и переводов строк, текст до 200 000; пустые блоки отбрасываются; повтор/плохой номер получает свободный).
 - **Номер навсегда за персонажем.** `next` не уменьшается — номер удалённого персонажа карточки не достаётся другому. Для редактора `GET /api/characters/:id` отдаёт `next_char_num` = max(`next`, наибольший номер персонажей из истории во всех чатах карточки + 1) — новый персонаж карточки не совпадёт ни с кем в её чатах.
-- Свободный текст (до 1.9): персонаж №1 = имя карточки, `next` = 2.
+- Свободный текст: персонаж №1 = имя карточки, `next` = 2.
 - `characters.name` = имя первого персонажа (или название) — его видят старые версии как `{{char}}`.
 
 ### 18.2 Макросы
@@ -671,4 +667,4 @@ users/{uid}/parts/{docId}-{i}   продолжение записи больше
 - UI: значки «Имя · `{{charN}}`» под ответом, во время стриминга блок скрыт («Создаётся персонаж «…»…»), тост после ответа, лист «Персонажи» (кнопка в шапке чата и строка в «Настройках чата»), предупреждение при удалении/откате.
 
 ### 18.4 Разовые исправления данных
-Старые данные пользователя (например, приветствия чатов до 1.9, сохранённые уже с именами) исправляются **разово на телефоне** через debuggable‑сборку и `devcall.js` (`PUT /api/messages/:id`), а не кодом миграции в приложении: сначала `/api/backup/export` на ПК, список изменений — на согласование пользователю.
+Старые данные пользователя (например, приветствия, сохранённые уже с именами) исправляются **разово на телефоне** через debuggable‑сборку и `devcall.js` (`PUT /api/messages/:id`), а не кодом миграции в приложении: сначала `/api/backup/export` на ПК, список изменений — на согласование пользователю.
