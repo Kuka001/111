@@ -615,6 +615,11 @@ button.row:active,
   -webkit-box-orient: vertical;
 }
 
+/* Wraps without a line limit: an explanation that must be read whole. */
+.row-sub.full {
+  white-space: normal;
+}
+
 .row-value {
   flex-shrink: 0;
   max-width: 45%;

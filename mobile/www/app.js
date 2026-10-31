@@ -309,22 +309,43 @@
   const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
 
   /**
+   * How a model runs without thinking: {type, maxEffort} from the engine's
+   * model list (Claude Code CLI models only), or null when the switch does not
+   * apply: the model cannot run without thinking (Opus 5.5, Fable) or it is
+   * not a Claude Code model.
+   */
+  function thinkingOffOf(modelId, models) {
+    const known = (models || []).find(m => m.id === modelId);
+    return known && known.thinkingOff ? known.thinkingOff : null;
+  }
+
+  /** True when a chat asked for no thinking ('off') and its model can run without it. */
+  function thinkingIsOff(modelId, thinking, models) {
+    return thinking === 'off' && Boolean(thinkingOffOf(modelId, models));
+  }
+
+  /**
    * Reasoning levels a model really honours. The native engine reports them per
    * model (models[].efforts); otherwise per provider: Gemini maps MAX to HIGH,
    * Claude-on-Vertex ignores effort, the Claude CLI accepts up to xhigh/max.
+   * Without thinking (thinkingOff) some models take effort up to a cap.
    */
-  function effortOptionsFor(modelId, models) {
+  function effortOptionsFor(modelId, models, thinkingOff) {
     const known = (models || []).find(m => m.id === modelId);
-    if (known && Array.isArray(known.efforts)) return known.efforts.slice();
-    const p = providerOf(modelId);
-    if (p === 'cli') return ['low', 'medium', 'high', 'xhigh', 'max'];
-    if (p === 'vertex-claude') return [];
-    return ['low', 'medium', 'high'];
+    let opts;
+    if (known && Array.isArray(known.efforts)) opts = known.efforts.slice();
+    else {
+      const p = providerOf(modelId);
+      opts = p === 'cli' ? ['low', 'medium', 'high', 'xhigh', 'max'] : (p === 'vertex-claude' ? [] : ['low', 'medium', 'high']);
+    }
+    const cap = thinkingOff && known && known.thinkingOff ? known.thinkingOff.maxEffort : '';
+    if (cap) opts = opts.filter(e => EFFORT_ORDER.indexOf(e) <= EFFORT_ORDER.indexOf(cap));
+    return opts;
   }
 
   /** The level actually used: unsupported levels fall back to the nearest lower one. */
-  function effectiveEffort(modelId, effort, models) {
-    const opts = effortOptionsFor(modelId, models);
+  function effectiveEffort(modelId, effort, models, thinkingOff) {
+    const opts = effortOptionsFor(modelId, models, thinkingOff);
     if (!opts.length) return '';
     const e = String(effort || 'high').toLowerCase();
     if (opts.includes(e)) return e;
@@ -538,6 +559,7 @@
       projectId: '',
       selectedModel: 'gemini-4-argon',
       selectedEffort: 'high',
+      selectedThinking: '',
       safetyThreshold: 'OFF',
       activePersonaId: 0,
       agyAuthenticated: false,
@@ -619,7 +641,7 @@
   // The native engine (APK build) this web layer is made for. The engine only
   // installs an OTA web layer of its own build; this guards against an older
   // engine that still accepts any build.
-  const MIN_ENGINE_BUILD = 27;
+  const MIN_ENGINE_BUILD = 28;
 
   const THEMES = {
     dark: { label: 'Тёмная', bg: '#0f1115', nav: '#13161c', light: false, swatch: ['#0f1115', '#1c2029', '#a4abbb'] },
@@ -667,12 +689,41 @@
     return tpl.content.firstElementChild;
   }
 
+  // WebViews that size text fields to their text themselves (Chromium 123+).
+  const NATIVE_FIELD_SIZING = typeof CSS !== 'undefined' && typeof CSS.supports === 'function'
+    && CSS.supports('field-sizing', 'content');
+
+  /**
+   * Fits a textarea to its text; with maxPx it stops there and scrolls inside.
+   * Where the WebView sizes fields itself, field-sizing is switched on once and
+   * the browser keeps the height while typing. Otherwise the height is measured
+   * at height:auto. That briefly shortens the page and would drop a long
+   * text's scroll position on every key, so the scrolled containers (and the
+   * chat feed next to the composer) get their positions back before anything
+   * is painted.
+   */
   function autoGrow(el, maxPx) {
     if (!el) return;
+    if (NATIVE_FIELD_SIZING) {
+      if (el.dataset.autosize !== '1') {
+        el.dataset.autosize = '1';
+        el.style.setProperty('field-sizing', 'content');
+        el.style.overflowY = maxPx ? 'auto' : 'hidden';
+        if (maxPx) el.style.maxHeight = maxPx + 'px';
+      }
+      return;
+    }
+    const kept = [];
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (p.scrollTop) kept.push([p, p.scrollTop]);
+    }
+    const feed = document.getElementById('chatScroll');
+    if (feed && feed.scrollTop && !feed.contains(el)) kept.push([feed, feed.scrollTop]);
     el.style.height = 'auto';
-    const max = maxPx || 10000;
-    el.style.height = Math.min(el.scrollHeight + 2, max) + 'px';
-    el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
+    const needed = el.scrollHeight + 2;
+    el.style.height = (maxPx ? Math.min(needed, maxPx) : needed) + 'px';
+    el.style.overflowY = maxPx && needed > maxPx ? 'auto' : 'hidden';
+    kept.forEach(([p, top]) => { p.scrollTop = top; });
   }
 
   function findChar(id) {
@@ -708,9 +759,16 @@
   };
   const EFFORT_LABELS = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh', max: 'Max' };
 
-  function modelSummary(modelId, effort) {
-    const e = effectiveEffort(modelId, effort, state.models);
-    return modelName(modelId) + (e ? ' · ' + EFFORT_LABELS[e] : '');
+  /** "High · без мышления": the effort and thinking a chat really runs with ('' if neither applies). */
+  function effortSummary(modelId, effort, thinking) {
+    const off = thinkingIsOff(modelId, thinking, state.models);
+    const e = effectiveEffort(modelId, effort, state.models, off);
+    return [e ? EFFORT_LABELS[e] : '', off ? 'без мышления' : ''].filter(Boolean).join(' · ');
+  }
+
+  function modelSummary(modelId, effort, thinking) {
+    const extra = effortSummary(modelId, effort, thinking);
+    return modelName(modelId) + (extra ? ' · ' + extra : '');
   }
 
   function providerStatus(provider) {
@@ -1095,6 +1153,7 @@
       projectId: s.projectId || '',
       selectedModel: s.selectedModel || 'gemini-4-argon',
       selectedEffort: s.selectedEffort || 'high',
+      selectedThinking: s.selectedThinking === 'off' ? 'off' : '',
       safetyThreshold: s.safetyThreshold || 'OFF',
       activePersonaId: Number(s.activePersonaId) || 0,
       agyAuthenticated: Boolean(s.agyAuthenticated),
@@ -1510,6 +1569,7 @@
       personaId: state.settings.activePersonaId || (state.personas[0] ? state.personas[0].id : 0),
       modelId: state.settings.selectedModel,
       effort: state.settings.selectedEffort,
+      thinking: state.settings.selectedThinking,
       q: '',
       busy: false,
     };
@@ -1544,7 +1604,7 @@
           <div class="list">
             <button class="row" data-act="model">
               <span class="row-icon">${ic(PROVIDERS[prov].icon)}</span>
-              <div class="row-body"><div class="row-title">${escapeHtml(modelName(sel.modelId))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effectiveEffort(sel.modelId, sel.effort, state.models) ? ' · ' + EFFORT_LABELS[effectiveEffort(sel.modelId, sel.effort, state.models)] : ''}</div></div>
+              <div class="row-body"><div class="row-title">${escapeHtml(modelName(sel.modelId))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effortSummary(sel.modelId, sel.effort, sel.thinking) ? ' · ' + effortSummary(sel.modelId, sel.effort, sel.thinking) : ''}</div></div>
               ${ic('chevron-right', 'row-chevron')}
             </button>
           </div>
@@ -1590,9 +1650,11 @@
         title: 'Модель для чата',
         modelId: sel.modelId,
         effort: sel.effort,
+        thinking: sel.thinking,
         onPick: (r) => {
           sel.modelId = r.modelId;
           if (r.effort) sel.effort = r.effort;
+          sel.thinking = r.thinking;
           rerender();
         },
       }),
@@ -1602,7 +1664,7 @@
         sel.busy = true;
         btn.disabled = true;
         try {
-          const payload = { characterId: sel.charId, personaId: sel.personaId, modelId: sel.modelId, effort: sel.effort };
+          const payload = { characterId: sel.charId, personaId: sel.personaId, modelId: sel.modelId, effort: sel.effort, thinking: sel.thinking };
           if (isClaudeCliModel(sel.modelId)) payload.provider = 'claude-cli';
           const res = await api('/api/chats', { method: 'POST', body: payload });
           layer.close();
@@ -1623,16 +1685,30 @@
   // MODEL PICKER
   // ==========================================================================
   function openModelPicker(o) {
-    const sel = { modelId: o.modelId, effort: o.effort || 'high' };
+    const sel = { modelId: o.modelId, effort: o.effort || 'high', thinking: o.thinking === 'off' ? 'off' : '' };
     const groups = ['gemini', 'vertex-claude', 'cli'];
 
     const render = () => {
-      const opts = effortOptionsFor(sel.modelId, state.models);
-      const eff = effectiveEffort(sel.modelId, sel.effort, state.models);
+      const offSpec = thinkingOffOf(sel.modelId, state.models);
+      const off = thinkingIsOff(sel.modelId, sel.thinking, state.models);
+      const cap = off ? offSpec.maxEffort : '';
+      const opts = effortOptionsFor(sel.modelId, state.models, off);
+      const eff = effectiveEffort(sel.modelId, sel.effort, state.models, off);
+      const isCli = providerOf(sel.modelId) === 'cli';
       const effortBlock = opts.length
         ? `<div class="section-title">Глубина рассуждений</div><div class="segmented">${opts.map(e => `<button class="${e === eff ? 'active' : ''}" data-act="effort" data-effort="${e}">${EFFORT_LABELS[e]}</button>`).join('')}</div>
-           <div class="effort-note">${providerOf(sel.modelId) === 'cli' ? 'Передаётся в Claude Code как --effort.' : 'Чем выше, тем дольше модель думает перед ответом.'}</div>`
+           <div class="effort-note">${isCli ? 'Передаётся в Claude Code как --effort.' + (cap ? ` Без мышления effort не выше ${EFFORT_LABELS[cap]}.` : '') : 'Чем выше, тем дольше модель думает перед ответом.'}</div>`
         : `<div class="effort-note">${ic('info', 'ic-xs')} Для этой модели глубина рассуждений не настраивается.</div>`;
+      // The Claude Code CLI only. Opus 5.5 and Fable cannot run without thinking:
+      // the row stays on and disabled, with the reason.
+      const thinkingNote = !offSpec
+        ? `${escapeHtml(modelName(sel.modelId))} не позволяет отключить мышление — это ограничение Anthropic API. Меньше всего модель думает на Low.`
+        : (off ? 'Выключено: модель отвечает сразу, без рассуждений.' : 'Выключите — модель ответит сразу, без рассуждений.');
+      const thinkingBlock = isCli
+        ? `<div class="list" style="margin-top:12px"><button class="row" data-act="thinking"${offSpec ? '' : ' disabled'}>
+            <div class="row-body"><div class="row-title">Мышление</div><div class="row-sub full">${thinkingNote}</div></div>
+            <span class="switch${off ? '' : ' on'}"></span></button></div>`
+        : '';
       const row = (m) => `<button class="row model-row${m.id === sel.modelId ? ' selected' : ''}" data-act="model" data-id="${escapeHtml(m.id)}">
           <span class="row-icon">${m.id === sel.modelId ? ic('check-circle') : ic('circle')}</span>
           <div class="row-body"><div class="row-title">${escapeHtml(m.name)}</div>${m.badge ? `<div class="row-sub">${escapeHtml(m.badge)}</div>` : ''}</div>
@@ -1651,7 +1727,7 @@
           ${st.ok ? '' : `<button class="btn btn-ghost btn-sm" style="margin-top:6px" data-act="provider" data-provider="${g}">Настроить ${escapeHtml(PROVIDERS[g].short)}</button>`}
         </div>`;
       }).join('');
-      return `${effortBlock}${lists}`;
+      return `${effortBlock}${thinkingBlock}${lists}`;
     };
 
     const layer = openSheet({
@@ -1675,16 +1751,24 @@
         sel.effort = el.dataset.effort;
         rerender();
       },
+      thinking: () => {
+        if (!thinkingOffOf(sel.modelId, state.models)) return;
+        sel.thinking = sel.thinking === 'off' ? '' : 'off';
+        rerender();
+      },
       model: (el) => {
         sel.modelId = el.dataset.id;
-        const e = effectiveEffort(sel.modelId, sel.effort, state.models);
+        const e = effectiveEffort(sel.modelId, sel.effort, state.models, thinkingIsOff(sel.modelId, sel.thinking, state.models));
         if (e) sel.effort = e;
         rerender();
       },
       provider: (el) => openProviderSettings(el.dataset.provider),
       done: () => {
         layer.close();
-        o.onPick({ modelId: sel.modelId, effort: effectiveEffort(sel.modelId, sel.effort, state.models) || sel.effort });
+        const off = thinkingIsOff(sel.modelId, sel.thinking, state.models);
+        // thinking keeps the chat's choice even on a model that cannot run
+        // without thinking: it applies again after switching back.
+        o.onPick({ modelId: sel.modelId, effort: effectiveEffort(sel.modelId, sel.effort, state.models, off) || sel.effort, thinking: sel.thinking });
       },
     });
   }
@@ -1764,7 +1848,7 @@
     const title = isDefaultChatTitle(d.chat.title, ch.name, ch.title) ? cardLabel(ch) : d.chat.title;
     $('#chatHeaderAvatar').src = resolveAvatarUrl(ch.avatar_url, cardLabel(ch));
     $('#chatHeaderName').textContent = title;
-    $('#chatHeaderSub').textContent = modelSummary(d.chat.model_id, d.chat.effort) + ' · ' + personaLabel(persona);
+    $('#chatHeaderSub').textContent = modelSummary(d.chat.model_id, d.chat.effort, d.chat.thinking) + ' · ' + personaLabel(persona);
     const st = providerStatus(providerOf(d.chat.model_id));
     const dot = $('#chatStatusDot');
     dot.classList.toggle('off', !st.ok);
@@ -2713,7 +2797,7 @@
         <label class="field"><span class="field-label">Название чата</span><input class="input" data-role="title" value="${escapeHtml(custom)}" placeholder="${escapeHtml(cardLabel(ch))}" maxlength="120" autocomplete="off" /><span class="field-hint">Помогает различать несколько историй с одним персонажем.</span></label>
         <div class="section">
           <div class="section-title">Модель этого чата</div>
-          <div class="list"><button class="row" data-act="model"><span class="row-icon">${ic(PROVIDERS[prov].icon)}</span><div class="row-body"><div class="row-title">${escapeHtml(modelName(chat.model_id))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effectiveEffort(chat.model_id, chat.effort, state.models) ? ' · ' + EFFORT_LABELS[effectiveEffort(chat.model_id, chat.effort, state.models)] : ''}</div></div>${ic('chevron-right', 'row-chevron')}</button></div>
+          <div class="list"><button class="row" data-act="model"><span class="row-icon">${ic(PROVIDERS[prov].icon)}</span><div class="row-body"><div class="row-title">${escapeHtml(modelName(chat.model_id))}</div><div class="row-sub">${escapeHtml(PROVIDERS[prov].label)}${effortSummary(chat.model_id, chat.effort, chat.thinking) ? ' · ' + effortSummary(chat.model_id, chat.effort, chat.thinking) : ''}</div></div>${ic('chevron-right', 'row-chevron')}</button></div>
         </div>
         <div class="section">
           <div class="section-title">Вы играете за</div>
@@ -2774,9 +2858,10 @@
           title: 'Модель этого чата',
           modelId: chat.model_id,
           effort: chat.effort,
+          thinking: chat.thinking,
           onPick: async (r) => {
             try {
-              await patchChat(chatId, { modelId: r.modelId, effort: r.effort });
+              await patchChat(chatId, { modelId: r.modelId, effort: r.effort, thinking: r.thinking });
               layer.refresh();
             } catch (e) {
               toast(e.message, { type: 'error' });
@@ -2899,7 +2984,7 @@
     diag.layer.setBody(`
       <div class="diag-grid">
         ${item('Статус', g.statusText || phase, true)}
-        ${item('Модель', `${modelName(g.modelId || g.model)}${g.effort ? ' · ' + String(g.effort).toUpperCase() : ''}`)}
+        ${item('Модель', `${modelName(g.modelId || g.model)}${g.effort ? ' · ' + String(g.effort).toUpperCase() : ''}${g.thinking === 'off' ? ' · без мышления' : (g.thinking === 'fixed' ? ' · мышление не отключается' : '')}`)}
         ${item('Фаза', phase + (g.finishReason ? ` (${g.finishReason})` : ''))}
         ${item('Время', (g.elapsedSec || ((g.elapsedMs || 0) / 1000).toFixed(1)) + ' с')}
         ${item('HTTP / чанки', `${g.httpStatus || '—'} · ${g.chunksCount || 0}`)}
@@ -2948,7 +3033,7 @@
       const payload = {
         exportedAt: new Date().toISOString(),
         appVersion: state.webVersion || (state.updateInfo && state.updateInfo.currentVersion) || '',
-        chat: { id: chat.id, title: chat.title, model_id: chat.model_id, model_label: modelName(chat.model_id), effort: chat.effort, created_at: chat.created_at || '' },
+        chat: { id: chat.id, title: chat.title, model_id: chat.model_id, model_label: modelName(chat.model_id), effort: chat.effort, thinking: chat.thinking || '', created_at: chat.created_at || '' },
         character: { id: character && character.id, name: character && character.name, title: character && character.title, file_path: character && character.file_path, first_message: character && character.first_message },
         persona: { id: persona && persona.id, name: persona && persona.name, title: persona && persona.title, file_path: persona && persona.file_path },
       };
@@ -2978,7 +3063,7 @@
     lines.push('');
     lines.push(`- **Персонаж:** ${charName}`);
     lines.push(`- **Персона:** ${personaName}`);
-    lines.push(`- **Модель:** ${modelSummary(chat.model_id, chat.effort)} (\`${chat.model_id}\`)`);
+    lines.push(`- **Модель:** ${modelSummary(chat.model_id, chat.effort, chat.thinking)} (\`${chat.model_id}\`)`);
     lines.push(`- **Сообщений:** ${messages.length}`);
     lines.push(`- **Экспорт:** ${new Date().toLocaleString('ru-RU')}`);
     lines.push('');
@@ -3698,7 +3783,7 @@
       </div></div>
       <div class="section"><div class="section-title">ИИ</div><div class="list">
         ${settingsRow({ page: 'prompt', icon: 'scroll', title: 'Системный промпт', sub: promptSub })}
-        ${settingsRow({ page: 'model', icon: 'cpu', title: 'Модель по умолчанию', sub: escapeHtml(modelSummary(s.selectedModel, s.selectedEffort)) + ' · для новых чатов' })}
+        ${settingsRow({ page: 'model', icon: 'cpu', title: 'Модель по умолчанию', sub: escapeHtml(modelSummary(s.selectedModel, s.selectedEffort, s.selectedThinking)) + ' · для новых чатов' })}
       </div></div>
       <div class="section"><div class="section-title">Провайдеры</div><div class="list">
         ${settingsRow({ page: 'vertex', icon: 'cloud', title: 'Google Vertex', sub: s.agyAuthenticated ? escapeHtml(s.agyEmail || 'Gemini и Claude через Google') : escapeHtml(vertex.text), value: pill(vertex) })}
@@ -3740,11 +3825,12 @@
       title: 'Модель по умолчанию',
       modelId: state.settings.selectedModel,
       effort: state.settings.selectedEffort,
+      thinking: state.settings.selectedThinking,
       onPick: async (r) => {
         try {
-          applySettings(await api('/api/settings', { method: 'POST', body: { selectedModel: r.modelId, selectedEffort: r.effort } }));
+          applySettings(await api('/api/settings', { method: 'POST', body: { selectedModel: r.modelId, selectedEffort: r.effort, selectedThinking: r.thinking } }));
           renderSettingsTab();
-          toast('Модель по умолчанию: ' + modelSummary(r.modelId, r.effort), { type: 'success' });
+          toast('Модель по умолчанию: ' + modelSummary(r.modelId, r.effort, r.thinking), { type: 'success' });
         } catch (e) {
           toast(e.message, { type: 'error' });
         }
@@ -5695,6 +5781,8 @@
     providerOf,
     effortOptionsFor,
     effectiveEffort,
+    thinkingOffOf,
+    thinkingIsOff,
     parseServerTime,
     formatRelativeTime,
     formatMessageTime,

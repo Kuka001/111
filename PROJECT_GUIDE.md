@@ -1,7 +1,7 @@
 # AGY Roleplay Studio — руководство по проекту для ИИ‑ассистента
 
 > Вводная для нового чата с ИИ: что за приложение, из чего оно состоит, какой файл за что отвечает и что менять вместе.
-> Описывает **v1.9.0 (build 27)** и только текущее состояние (как вести этот файл — §12, п. 8). История изменений — в git и `version.json → releases`.
+> Описывает **v1.10.0 (build 28)** и только текущее состояние (как вести этот файл — §12, п. 8). История изменений — в git и `version.json → releases`.
 > Имена функций и разделов точные (ищите `grep`); номера строк не приводятся.
 
 ---
@@ -26,7 +26,7 @@
 
 - Карточки персонажей (character cards): название (видит только пользователь), портрет, «Настройки мира» и персонажи `{{char1}}`, `{{char2}}`… с именем и описанием (модели — в `<character_persona>` как `<world_settings>` и `<character name="…">`), приветствие (первое сообщение чата). Карточки старого формата — один свободный текст (§18).
 - Персоны (кто «вы» в истории): название (только для пользователя), имя (`{{user}}`), аватар, описание (`<user_persona name="…">`). Одна персона — «по умолчанию» для новых чатов.
-- Чаты: у каждого своя карточка, персона, модель и «глубина рассуждений» (effort), своя «память чата» (`<chat_memory>`), название; лист «Персонажи» — персонажи карточки и появившиеся в истории (§18).
+- Чаты: у каждого своя карточка, персона, модель, «глубина рассуждений» (effort) и переключатель «Мышление» (у Claude Code, §8.5), своя «память чата» (`<chat_memory>`), название; лист «Персонажи» — персонажи карточки и появившиеся в истории (§18).
 - Сообщения: Markdown для RP (`*действие*`, «реплики»), «мысли» модели (thinking), варианты ответа (свайпы), правка, удаление, откат, перегенерация, остановка генерации. Макросы `{{user}}`/`{{charN}}` хранятся как есть, в ленте и для модели заменяются именами.
 - Живой стриминг ответа (опрос прогресса), журнал генерации (диагностика).
 - Экспорт чата (Markdown/JSON), полная резервная копия/восстановление (JSON).
@@ -205,14 +205,14 @@ mobile_project/
 | Раздел / группа | Методы и что делают |
 |---|---|
 | Константы | OAuth‑клиенты AGY (`AGY_CLIENT_ID/SECRET`, `AGY_GCP_CLIENT_ID/SECRET` — публичные значения установленного приложения), `OTA_TRUSTED_REPO = "Kuka001/111"`, `OTA_PUBLIC_KEY_B64` (ключ проверки OTA), `AGY_OAUTH_PORT = 51121`, `AGY_REDIRECT_URI`, `AGY_SCOPES`, `AGY_VERTEX_ENDPOINT`, `AGY_USER_AGENT`… |
-| `GenerationProgress` (внутренний класс) | состояние одной генерации: `status`, `phase`, `statusText`, `thoughts`, `text`, модель, `endpoint`, `httpStatus`, счётчики, `finishReason`, `error`, `cancelled`, `logs`; `cancel()` рвёт HTTP‑соединение и убивает процесс CLI; `toJson()` — то, что видит UI |
+| `GenerationProgress` (внутренний класс) | состояние одной генерации: `status`, `phase`, `statusText`, `thoughts`, `text`, модель, `thinking` (Claude Code: `on`/`off`/`fixed`), `endpoint`, `httpStatus`, счётчики, `finishReason`, `error`, `cancelled`, `logs`; `cancel()` рвёт HTTP‑соединение и убивает процесс CLI; `toJson()` — то, что видит UI |
 | Синглтон | `attach(activity, webView)`, `detach(activity)`, приватный конструктор → `initWorkspaceAndDatabase()` и фоновые `ClaudeRuntime.cleanupLegacy()` + `tidyChatFiles()` |
 | Виртуальный хост | `VIRTUAL_HOST = "appassets.agy.local"`, `getStartPageUrl()`, `serveVirtualAsset(path)` (сначала `files/ota_www/`, если OTA активен, иначе `assets/www/` из APK), `isOtaBundleActive()`, `virtualMimeType()` |
 | Мост | `requestAsync` → `routeRequest` → `deliverResponse`; `reloadWebView`, `openExternalUrl`, `shareExportText`, `saveExportFile`, `setSystemBars` |
 | INITIALIZATION | `initWorkspaceAndDatabase()`: папки `characters/personas/memories`, таблицы, `addColumnIfMissing`, индекс `idx_messages_chat`, настройки по умолчанию (`setDefaultSetting`), удаление устаревших ключей, `migratePlaintextSecrets`, создание `GEMINI.md`, правило «OTA только для своего build», нормализация модели и `safety_threshold`, `clearPlaceholderAvatars`, `syncWorkspaceFilesWithDb` |
 | SECRET SETTINGS AT REST | `getOrCreateSecretKey` (Keystore AES‑256‑GCM), `encryptSecret`/`decryptSecret` (префикс `enc:v1:`), `getSetting`/`setSetting` (+ кэш расшифрованных секретов `secretCache`). **Строгие** секреты облака (`STRICT_SECRET_KEYS`: ключ данных, refresh‑токен, ожидающий вход) без Keystore не пишутся на диск вовсе (`encryptSecretStrict`, флаг `keystoreUnavailable`) |
 | Карточки ↔ файлы | `syncWorkspaceFilesWithDb` (строки без файла удаляются, файлы без строки добавляются; только при старте и после восстановления копии), `pruneMissingCardRows`, `cardFiles`, `parseHeaderName`, `parseFirstMessage`, `parsePreview` |
-| Модели | `VERTEX_MODELS`, `CLAUDE_CLI_MODELS` (таблицы), `getCleanBaseModelsJson`, `findCliModel`, `normalizeBaseModelId`, `normalizeEffort`, `normalizeSafetyThreshold`, `getEngineBuild` |
+| Модели | `VERTEX_MODELS`, `CLAUDE_CLI_MODELS` (таблицы), `getCleanBaseModelsJson`, `noThinkingType`/`noThinkingMaxEffort`, `findCliModel`, `normalizeBaseModelId`, `normalizeEffort`, `normalizeThinking`, `normalizeSafetyThreshold`, `getEngineBuild` |
 | ROUTER | `routeRequest(...)` — все `/api/*` (таблица в §6); помощники `okJson`, `isEditableWorkspaceFile` (писать можно только `GEMINI.md` и `memories/*.md`), `deleteCard`, `firstId`, `chatExists`, `cliPromptFile`, `deleteChat` |
 | FULL BACKUP & RESTORE | `dumpTable`, `collectWorkspaceFiles`, `handleBackupExport` (без секретов и без `cloud_*`), `handleBackupImport` (транзакция; только известные колонки — `tableColumns`; настройки по белому списку `RESTORABLE_SETTINGS`; папки карточек/памяти заменяются целиком; затем sync и `tidyChatFiles`). При включённом облаке: сначала `cloudSync.pullBeforeRestore()`, после — `cloudQueueRestoredFiles()`; триггеры ставят в очередь удалённые и восстановленные строки, так что облако заменяется копией |
 | CLOUD SYNC: LOCAL RECORDS | `initCloudSchema` (выполняет `assets/cloud-schema.sql`; при ошибке облако выключено — `cloudSchemaReady`), `cloudSetTracking`/`cloudIsTracking`, `cloudQueueFile` (GEMINI.md и память — их триггеры не видят), `cloudQueueAll`, `cloudExportRecord(kind, sid)` (запись → JSON без конверта), `cloudApplying(work)` (chatWriteLock → транзакция → `applying=1`), `cloudApplyRecord` + `applyCloudCard/Chat/Memory/Message/Settings` (всё из облака проверяется: sid, даты, модели, аватары, имена файлов строятся локально), `cloudResolvePersona`, `cloudWipeLocalData`, `cloudNotifyChanged`/`cloudNotifyAuth`, класс `CloudApplied` |
@@ -255,7 +255,7 @@ mobile_project/
 
 ### 5.8 Скрипты сборки
 **`android/build-apk.ps1 [-Debuggable]`**
-1. Обеспечивает инструменты в кэше `C:\Users\Kazuma\.gemini\antigravity-cli\brain\5fcbe0c0-e9e8-4f16-9fa1-c4f2a1a5c107\scratch\android-sdk` (JDK 17, build‑tools 35, platform 35; там же `platform-tools\adb.exe`).
+1. Обеспечивает инструменты в кэше `C:\Users\Kazuma\.gemini\antigravity-cli\brain\5fcbe0c0-e9e8-4f16-9fa1-c4f2a1a5c107\scratch\android-sdk` (JDK 17, build‑tools 35, platform 35; там же `platform-tools\adb.exe` — через него ПК работает с телефоном по «Отладке по Wi‑Fi», §11.1).
 2. Запускает веб‑тесты `node --test` и JVM‑тест `android/tests/CloudCryptoTest.java` (javac/java из JDK 17; обход обоих: `$env:AGY_SKIP_TESTS="1"`).
 3. Копирует корневой `version.json` → `mobile/www/version.json`, затем `mobile/www/*` → `android/assets/www/`.
 4. `aapt2 compile/link` (для `-Debuggable` добавляет `android:debuggable="true"`), `javac -source 8 -target 8` семи Java‑файлов (`$JavaSources`) + `R.java`, `d8` → `classes.dex`, `jar -uf` добавляет dex и `assets/` (вместе с `cloud-schema.sql`).
@@ -275,9 +275,9 @@ mobile_project/
 | Метод и путь | Обработчик (Java) | Что делает | Кто вызывает в app.js |
 |---|---|---|---|
 | GET `/api/health` | inline | ok, `engineBuild`, `appVersion` | (отладка) |
-| GET `/api/settings` | inline | модель/effort по умолчанию, активная персона, `safetyThreshold`, флаги входа Google/Claude, `engineBuild`, `appVersion` | `loadAll`, `refreshSettings` |
-| POST `/api/settings` | inline | `projectId`, `selectedModel`, `selectedEffort`, `activePersonaId`, `safetyThreshold` | `openDefaultModelPicker`, `openVertexPage` |
-| GET `/api/models` | `getCleanBaseModelsJson` | список моделей с `efforts[]`, `legacy` | `loadAll` |
+| GET `/api/settings` | inline | модель/effort/мышление (`selectedThinking`) по умолчанию, активная персона, `safetyThreshold`, флаги входа Google/Claude, `engineBuild`, `appVersion` | `loadAll`, `refreshSettings` |
+| POST `/api/settings` | inline | `projectId`, `selectedModel`, `selectedEffort`, `selectedThinking`, `activePersonaId`, `safetyThreshold` | `openDefaultModelPicker`, `openVertexPage` |
+| GET `/api/models` | `getCleanBaseModelsJson` | список моделей с `efforts[]`, `legacy`; у моделей Claude Code — `thinkingOff` (`{type, maxEffort}` или `null`, §8.5) | `loadAll` |
 | GET `/api/files/content?path=` | inline | текст файла workspace | системный промпт, память чата |
 | POST `/api/files/file` | inline | записать `GEMINI.md` или `memories/*.md` (другое — 400) | `openSystemPromptPage`, `openMemoryEditor` |
 | GET/POST `/api/characters` | `queryCharactersArray` / `saveOrUpdateCharacter` | список (с `fileContent`, `avatar_url`, `title`, `card`) / создать (`title, avatarUrl, filePath, firstMessage, card{world, chars[{n, name, text}]}`; без `card` — свободный текст: `name` + `rawFileContent`) | `loadAll`, `loadCards`, `openCardEditor` |
@@ -285,8 +285,8 @@ mobile_project/
 | GET/POST `/api/personas` | `queryPersonasArray` / `saveOrUpdatePersona` | + `activePersonaId`; поле `title` | то же |
 | PUT/DELETE `/api/personas/:id` | … / `deleteCard` | при удалении активной — активной становится первая | `openCardEditor` |
 | POST `/api/personas/:id/activate` | inline | персона по умолчанию | `activatePersona` |
-| GET/POST `/api/chats` | `queryChatsListArray` / `createNewChat` | список (без аватаров; + `character_title`, `persona_title`) / новый чат (+ файл памяти, приветствие с макросами) | `loadChats`, `openNewChat` |
-| GET/PATCH/DELETE `/api/chats/:id` | `getChatDetailsJson` / inline / `deleteChat` | детали (без аватаров) / модель, effort, персона, название / удаление (+ отмена генерации, файлы) | `openChatRoom`, `patchChat`, `deleteChat` |
+| GET/POST `/api/chats` | `queryChatsListArray` / `createNewChat` | список (без аватаров; + `character_title`, `persona_title`) / новый чат (`thinking` — по умолчанию из настройки; + файл памяти, приветствие с макросами) | `loadChats`, `openNewChat` |
+| GET/PATCH/DELETE `/api/chats/:id` | `getChatDetailsJson` / inline / `deleteChat` | детали (без аватаров) / модель, effort, мышление (`thinking`), персона, название / удаление (+ отмена генерации, файлы) | `openChatRoom`, `patchChat`, `deleteChat` |
 | POST `/api/chats/:id/messages` | `handleSendChatMessage` | отправить; ответ `{userMessage, assistantMessage, generation}` | `sendMessage` |
 | DELETE `/api/chats/:id/messages?after=ID` | inline | откат: удалить все сообщения после ID | `rewindTo` |
 | GET `/api/chats/:id/generation` | inline | `{active, generation, lastGeneration}` | `pollWatched`, `attachToRunningGeneration`, диагностика |
@@ -333,7 +333,7 @@ mobile_project/
 | `settings` | `key` PK, `value` |
 | `characters` | `id`, `name` (имя первого персонажа или название — для старых версий), `file_path` UNIQUE, `avatar_url` (data:image/… или ''), `first_message` (приветствие, с макросами), `description_preview`, `created_at`, `updated_at`, `title` (название, модели не уходит), `card_json` (структура карточки; '' — свободный текст; §18) |
 | `personas` | `id`, `name` (`{{user}}`), `file_path` UNIQUE, `avatar_url`, `description_preview`, `is_default`, `created_at`, `title` |
-| `chats` | `id`, `title` (по умолчанию «Чат: <название карточки>»), `character_id`, `persona_id`, `model_id`, `effort`, `memory_file_path`, `provider`, `created_at`, `updated_at`; **не используются** (остались в схеме): `system_prompt_path`, `first_message_path`, `project_path` |
+| `chats` | `id`, `title` (по умолчанию «Чат: <название карточки>»), `character_id`, `persona_id`, `model_id`, `effort`, `thinking` (`off` — без мышления, где модель это позволяет; `''` — как у модели), `memory_file_path`, `provider`, `created_at`, `updated_at`; **не используются** (остались в схеме): `system_prompt_path`, `first_message_path`, `project_path` |
 | `messages` | `id`, `chat_id`, `role` (`user`/`assistant`), `content` (текущий вариант, макросы как есть), `thoughts`, `swipes_json` (все варианты), `swipe_index`, `thought_swipes_json` (мысли по вариантам), `created_at`, `sort_key`, `cast_swipes_json` (по варианту — массив `{n, name, text}` персонажей, которых он ввёл; §18); индексы `idx_messages_chat(chat_id, id)`, `idx_messages_chat_sort(chat_id, sort_key, id)` |
 | облако: колонки | у `characters`, `personas`, `chats`, `messages` — `sync_id` (случайные 128 бит hex, одинаковые на всех устройствах, уникальный индекс); `chats.character_sid`/`persona_sid` — ссылка на карточку, пришедшую из облака позже чата; `messages.sort_key` — порядок (старые строки = `id`, новые — мс, всегда больше остальных в чате). **Порядок сообщений — `ORDER BY sort_key, id`**, не по `id` |
 | `cloud_ctl` | одна строка: `tracking` (облако привязано — триггеры пишут очередь), `applying` (идёт применение из облака — триггеры молчат) |
@@ -344,9 +344,9 @@ mobile_project/
 Время в БД — `CURRENT_TIMESTAMP` SQLite (UTC, строка `YYYY-MM-DD HH:MM:SS`; UI парсит `parseServerTime`).
 
 ### 7.2 Ключи настроек (`settings`)
-`project_id` (Vertex Project ID, по умолчанию `project-4c7a8e8a-764a-42bc-bdf`), `selected_model`, `selected_effort`, `active_persona_id`, `safety_threshold` (`OFF`/`BLOCK_NONE`/`BLOCK_ONLY_HIGH`), `agy_access_token`*, `agy_refresh_token`*, `google_auth_token`* (старый ручной токен), `agy_token_expiry`, `agy_user_email`, `agy_discovered_project`, `git_branch`, `installed_version`, `installed_build`, `installed_commit`, `ota_active`. (* — шифруются; никогда не уходят в JS и в резервную копию.)
+`project_id` (Vertex Project ID, по умолчанию `project-4c7a8e8a-764a-42bc-bdf`), `selected_model`, `selected_effort`, `selected_thinking` (`off`/`''` для новых чатов), `active_persona_id`, `safety_threshold` (`OFF`/`BLOCK_NONE`/`BLOCK_ONLY_HIGH`), `agy_access_token`*, `agy_refresh_token`*, `google_auth_token`* (старый ручной токен), `agy_token_expiry`, `agy_user_email`, `agy_discovered_project`, `git_branch`, `installed_version`, `installed_build`, `installed_commit`, `ota_active`. (* — шифруются; никогда не уходят в JS и в резервную копию.)
 
-Облако: `cloud_config` (`projectId`, `apiKey`, `clientId`), `cloud_client_secret`*, `cloud_refresh_token`**, `cloud_dek`** (ключ данных, hex), `cloud_oauth_pending`** (state/verifier/порт входа, 10 мин), `cloud_uid`, `cloud_email`, `cloud_kid` (идентификатор хранилища), `cloud_watermark` (время последней принятой записи облака), `cloud_read_time` (время последнего полного чтения облака), `cloud_last_sync`, `cloud_usage` (расход квоты за тихоокеанские сутки), `cloud_quota_until`, `cloud_pending_persona`. (** — строгие секреты.) Все `cloud_*` не попадают в резервную копию. Синхронизируются (запись `settings`): `selected_model`, `selected_effort`, `safety_threshold`, `project_id`, `active_persona_id` — список совпадает в триггерах `cloud-schema.sql` и в `cloudExportRecord`/`applyCloudSettings`.
+Облако: `cloud_config` (`projectId`, `apiKey`, `clientId`), `cloud_client_secret`*, `cloud_refresh_token`**, `cloud_dek`** (ключ данных, hex), `cloud_oauth_pending`** (state/verifier/порт входа, 10 мин), `cloud_uid`, `cloud_email`, `cloud_kid` (идентификатор хранилища), `cloud_watermark` (время последней принятой записи облака), `cloud_read_time` (время последнего полного чтения облака), `cloud_last_sync`, `cloud_usage` (расход квоты за тихоокеанские сутки), `cloud_quota_until`, `cloud_pending_persona`. (** — строгие секреты.) Все `cloud_*` не попадают в резервную копию. Синхронизируются (запись `settings`): `selected_model`, `selected_effort`, `selected_thinking`, `safety_threshold`, `project_id`, `active_persona_id` — список совпадает в триггерах `cloud-schema.sql` и в `cloudExportRecord`/`applyCloudSettings`.
 
 ### 7.3 Карточки
 - **Структурная карточка:** источник истины — `characters.card_json` = `{"v":2,"world","chars":[{"n","name","text"}],"next"}`. Файл карточки — её отрисовка (`renderCardFile`: те же теги, что получает модель, с подставленными `{{charN}}` карточки; `{{user}}`/`{{char}}` остаются) — для старых версий, облака старых устройств и восстановления «файл без строки». Новая версия файл структурной карточки не читает.
@@ -373,7 +373,7 @@ mobile_project/
 - иначе → **Gemini на Vertex**.
 Та же логика в UI: `providerOf()` (`'cli'`, `'vertex-claude'`, `'gemini'`).
 
-Списки моделей: `VERTEX_MODELS` (`{id, name, provider, badge, efforts}`) и `CLAUDE_CLI_MODELS` (`{id, --model значение, name, badge, efforts, legacy}`), повтор в `mock-bridge.js → MODELS`. Effort: `low, medium, high, xhigh, max` (у каждой модели свой набор; неподдерживаемый уровень понижается до ближайшего — `resolveClaudeCliEffort` / `effectiveEffort` в UI).
+Списки моделей: `VERTEX_MODELS` (`{id, name, provider, badge, efforts}`) и `CLAUDE_CLI_MODELS` (`{id, --model значение, name, badge, efforts, legacy, без мышления}`, последняя колонка — §8.5), повтор в `mock-bridge.js → MODELS`. Effort: `low, medium, high, xhigh, max` (у каждой модели свой набор; неподдерживаемый уровень понижается до ближайшего — `resolveClaudeCliEffort` / `effectiveEffort` в UI).
 
 ### 8.3 Gemini (`callAntigravityGateway`, ветка Gemini)
 - `POST {AGY_VERTEX_ENDPOINT}/{v1beta1|v1}/projects/{proj}/locations/global/publishers/google/models/{model}:streamGenerateContent?alt=sse`, заголовки `Authorization: Bearer`, `x-goog-user-project`.
@@ -388,8 +388,18 @@ mobile_project/
 - Проверки: среда установлена, есть вход (иначе `AuthRequiredException` → HTTP 401 → кнопка «Настроить»).
 - Системный промпт пишется в `HOME/.agy/system_prompt_chat_<id>.md`.
 - Команда: `claude -p --output-format stream-json --verbose --include-partial-messages --model <alias|id> [--effort L] --tools "" --disable-slash-commands --permission-mode dontAsk --no-session-persistence --system-prompt-file <файл>`; env `CI=1`; в stdin — `buildClaudeTranscript` (история «Имя:\nреплика» с подставленными макросами + «=== Задание ===»). Ответы модели подписаны именем персонажа, если в карточке ровно один персонаж, иначе «Рассказчик». Задание: «Продолжи ролевую игру одной следующей репликой[ за персонажа «Имя»]. Выведи только сам ответ[ персонажа] без имени в начале и мета-комментариев.» Просьбы убирать служебные пометки в нём нет: иначе модель выбрасывала бы блок `<new_character>`.
-- Разбор `stream-json`: `stream_event` (`text_delta`/`thinking_delta` → живой текст), `assistant` (блоки собираются по `message.id`), `result` (`is_error`).
+- Разбор `stream-json`: `system/init` (фактическая модель — в журнал: во что развернулся алиас), `stream_event` (`text_delta`/`thinking_delta` → живой текст; блоки мышления считаются — их текст бывает пустым), `assistant` (блоки собираются по `message.id`), `result` (`is_error`).
 - Сторож: нет **ни одной** строки вывода 90 с → процесс убивается, понятная ошибка.
+- **Мышление.** По умолчанию CLI включает его на всех моделях. `thinking = 'off'` у чата выключает его там, где позволяет API (последняя колонка `CLAUDE_CLI_MODELS`, `/api/models → thinkingOff`):
+
+  | Модель | Без мышления |
+  |---|---|
+  | Opus 5.5, Fable 5.1, Fable 5, алиас `opus` | нельзя (API отвечает 400) — модель думает, в журнале пометка; в UI переключатель неактивен |
+  | Sonnet 5.5, алиас `sonnet` | `thinking: {type: "between_tools"}`, effort не выше `high` |
+  | Haiku 5.5, алиас `haiku`, Opus 5 | `{type: "disabled"}`, effort не выше `high` |
+  | Sonnet 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | `{type: "disabled"}` |
+
+  Процессу добавляются `CLAUDE_CODE_DISABLE_THINKING=1` (CLI не строит свои части запроса для мышления) и `CLAUDE_CODE_EXTRA_BODY={"thinking":{"type":…}}` (CLI вливает его в тело запроса после своих полей); effort понижается в `resolveClaudeCliEffort`. Алиасы — по каталогу закреплённого CLI (2.1.310: Opus 5.5, Sonnet 5.5, Haiku 5.5).
 
 ### 8.6 Прогресс, отмена, ошибки
 `GenerationProgress` в `activeGenerations` (одна на чат, `startGeneration` → иначе 409) и `lastGenerations` (для «Последняя генерация»). `cancel()` → флаг + разрыв HTTP + kill процесса. Удаление чата отменяет генерацию; запись ответа идёт под `chatWriteLock` после проверки `chatExists`.
@@ -422,7 +432,7 @@ RSA‑SHA256, base64 → поле `otaSignature` в `version.json`. Публич
 4. `powershell -ExecutionPolicy Bypass -File android\sign-ota.ps1` — **последним** (любая правка `mobile/www/*` после подписи её ломает).
 5. Проверить подпись (node + публичный ключ) и хеш APK.
 6. Обновить `PROJECT_GUIDE.md` (§12, п. 8) и закоммитить вместе с кодом («vX.Y.Z (Build N): …»); `git push origin main` (репозиторий `Kuka001/111`) — только с согласия пользователя.
-7. Поставить APK на телефон: `adb install -r agy-roleplay-android16.apk` (данные сохраняются — тот же ключ подписи).
+7. Поставить APK на телефон через «Отладку по Wi‑Fi» (§11.1): `adb install -r agy-roleplay-android16.apk` (данные сохраняются — тот же ключ подписи).
 
 ---
 
@@ -435,16 +445,16 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 | Раздел | Ключевые функции / объекты |
 |---|---|
 | NATIVE BRIDGE CONTRACT | `hasBridge`, `api()`, `__onAndroidServerResponse`, `decodeBase64Utf8` |
-| PURE HELPERS (тестируются) | `escapeHtml`, `stripMarkdownPreview`, `formatRoleplayHtml`/`formatInlineMarkdown`/`highlightDialogue` (Markdown RP, всё экранируется до разметки), `parseServerTime`, `formatRelativeTime`, `formatMessageTime`, `pluralRu`, `formatCount`, `initialsOf`, `hueFromString`, `initialsAvatar`, `objectUrlFor` + `resolveAvatarUrl` (фото → кэшированный `blob:`), `isClaudeCliModel`, `providerOf`, `effortOptionsFor`, `effectiveEffort`, `sortChats`, `filterChats`, `isDefaultChatTitle` (имя или название карточки), **карточки и макросы (§18):** `cardLabel`, `personaLabel`, `cardCast`, `storyCast`, `castMacros`, `applyMacros`, `splitLiveText` (живой ответ без блоков `<new_character>`), `passwordStrength`, `formatBytes`, `agoText`, `cloudSummary` |
-| STATE, PREFERENCES | объект `state` (настройки, модели, карточки, чаты, `room`, `generations`, `drafts`, `updateInfo`…), `prefs` (`agy_ui_prefs_v1`), `MIN_ENGINE_BUILD = 27`, `THEMES`, `ACCENTS`, `applyTheme` |
-| DOM HELPERS | `$`, `$$`, `ic`, `htmlToElement`, `autoGrow`, `findChar`, `findPersona`, `cardMatches` (поиск по названию, именам, описанию), `personaChipsHtml`, `modelName`, `PROVIDERS`, `modelSummary`, `providerStatus`, `copyText`, `openExternal`, `reloadApp`, `saveFile` |
+| PURE HELPERS (тестируются) | `escapeHtml`, `stripMarkdownPreview`, `formatRoleplayHtml`/`formatInlineMarkdown`/`highlightDialogue` (Markdown RP, всё экранируется до разметки), `parseServerTime`, `formatRelativeTime`, `formatMessageTime`, `pluralRu`, `formatCount`, `initialsOf`, `hueFromString`, `initialsAvatar`, `objectUrlFor` + `resolveAvatarUrl` (фото → кэшированный `blob:`), `isClaudeCliModel`, `providerOf`, `thinkingOffOf`/`thinkingIsOff` (можно ли выключить мышление), `effortOptionsFor`/`effectiveEffort` (с учётом потолка effort без мышления), `sortChats`, `filterChats`, `isDefaultChatTitle` (имя или название карточки), **карточки и макросы (§18):** `cardLabel`, `personaLabel`, `cardCast`, `storyCast`, `castMacros`, `applyMacros`, `splitLiveText` (живой ответ без блоков `<new_character>`), `passwordStrength`, `formatBytes`, `agoText`, `cloudSummary` |
+| STATE, PREFERENCES | объект `state` (настройки, модели, карточки, чаты, `room`, `generations`, `drafts`, `updateInfo`…), `prefs` (`agy_ui_prefs_v1`), `MIN_ENGINE_BUILD = 28`, `THEMES`, `ACCENTS`, `applyTheme` |
+| DOM HELPERS | `$`, `$$`, `ic`, `htmlToElement`, `autoGrow` (поле по высоте текста: `field-sizing: content`, где WebView умеет; иначе замер через `height:auto` с возвратом прокрутки контейнеров и ленты; без потолка, кроме явного `maxPx`), `findChar`, `findPersona`, `cardMatches` (поиск по названию, именам, описанию), `personaChipsHtml`, `modelName`, `PROVIDERS`, `effortSummary`/`modelSummary` («High · без мышления»), `providerStatus`, `copyText`, `openExternal`, `reloadApp`, `saveFile` |
 | UI KIT: toasts | `toast(message, {type, action, duration})` |
 | UI KIT: layers | `openLayer`, `closeLayer`, `requestCloseLayer`, `topLayer`, `refreshLayers`, `bindActs`, `openSheet`, `openPage`, `confirmDialog`, `actionSheet`, `openTextSheet`, `emptyHtml` |
 | DATA LOADING | `applySettings`, `loadAll`, `warnOldEngine`, `loadChats`, `loadCards`, `refreshSettings`, `refreshClaudeStatus`, `refreshAgyStatus`, `refreshCloudStatus` (`state.cloud`); хуки `__onAgyOAuthSuccess`, `__onNativeFileSaved`, `__onCloudAuthDone`, `__onCloudSyncChanged` |
 | TABS & ROUTING | `openTab`, `renderTab`, `renderAllTabs`, **`handleBack`** |
 | CHATS TAB | `renderChatsTab`, `renderChatsList` (фильтр‑чипы по карточкам), `chatCardLabel`, `chatPreview` (превью с подставленными именами), `chatRowHtml`, свайп строки (экспорт/удалить), `deleteChat` |
 | NEW CHAT | `openNewChat` (персонаж, персона, модель) |
-| MODEL PICKER | `openModelPicker` (группы по провайдеру, «Предыдущие версии», effort) |
+| MODEL PICKER | `openModelPicker` (группы по провайдеру, «Предыдущие версии», effort, переключатель «Мышление» у моделей Claude Code: у Opus 5.5/Fable неактивен с пояснением; `onPick({modelId, effort, thinking})` — новый чат, настройки чата, модель по умолчанию) |
 | CHAT ROOM | `withCardImages` (аватары из списков карточек), `openChatRoom`, `closeChatRoom`, `renderRoomHeader`, `feedContext` (+ `macros` чата), `messageHtml` (текст с подставленными именами), `castChipsHtml` (значки персонажей ответа), `liveHtml`, `errorHtml`, **`syncFeed`** (обновляет только изменившиеся сообщения по `data-key`/`data-sig`), `patchLive` (блоки `<new_character>` → «Создаётся персонаж…») |
 | generation lifecycle | `startGeneration`, `ensurePolling`, `pollGenerations`/`pollWatched` (без наложения, пауза в фоне), `attachToRunningGeneration`, `endGeneration`, `generationError`, `sendMessage`, `regenerate`, `announceNewCharacters` (тост), `stopGeneration`, `retryGeneration`, `selectSwipe`, `swipeBy`, `insertAsterisks` |
 | message actions | `openMessageActions` (копирует текст с именами), `openEditMessage` (сырой текст + кнопки макросов), `deleteMessage`, `rewindTo` (оба предупреждают о персонажах — `castLossNote`) |
@@ -475,8 +485,9 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 - `harness.js` — загружает `app.js` в `vm` с заглушками DOM; тесты используют `window.__appInternals`. Новую чистую функцию для тестов надо добавить в `__appInternals`.
 - Тесты‑«зеркала» (system‑prompt, story‑characters, gemini‑request, updates, cloud‑format) повторяют Java‑логику на JS: меняете Java — меняйте зеркало.
 
-### 11.1 Отладка на телефоне (adb по Wi‑Fi)
-- `adb.exe` — в кэше инструментов (`…\android-sdk\platform-tools\adb.exe`). Телефон уже спарен; найти: `adb mdns services`, затем `adb devices`.
+### 11.1 Отладка на телефоне («Отладка по Wi‑Fi»)
+- С телефоном работают без кабеля, через «Отладку по Wi‑Fi» (Настройки → Для разработчиков). Включает её пользователь; IP, порт и код подключения показаны на экране этой настройки, порт меняется при каждом включении. Телефон не находится — попросить пользователя включить «Отладку по Wi‑Fi».
+- На ПК это соединение обслуживает `adb.exe` из кэша инструментов (`…\android-sdk\platform-tools\adb.exe`): найти телефон — `adb mdns services`, подключиться — `adb connect <IP:порт>`, проверить — `adb devices`. ПК ещё не спарен — подключение по коду на телефоне и `adb pair <IP:порт> <код>`.
 - `run-as` на этой прошивке заблокирован (SELinux + targetSdk 28). Поэтому:
   1. `android\build-apk.ps1 -Debuggable` → `%TEMP%\agy-roleplay-debug.apk`; `adb install -r …` (данные сохраняются). Отладка WebView и `/api/dev/exec` есть только в такой сборке.
   2. Запуск как с иконки: `adb shell monkey -p com.agy.roleplay -c android.intent.category.LAUNCHER 1`.
@@ -506,7 +517,7 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 | Что меняете | Что ещё нужно изменить/проверить |
 |---|---|
 | Любой `/api/*` (путь, поля запроса/ответа) | `LocalBackendServer.routeRequest` + обработчик; вызовы `api()` в `app.js`; `mobile/dev/mock-bridge.js → route()`; при необходимости зеркальные тесты; если старый UI/движок перестаёт понимать — поднять build и `MIN_ENGINE_BUILD` |
-| Список моделей / их effort | `VERTEX_MODELS` / `CLAUDE_CLI_MODELS` (Java); `MODELS` в `mock-bridge.js`; префиксы `claude-code-` / `claude-` критичны для маршрутизации (`generateRoleplayReply`, `providerOf`); `tests/ui-helpers.test.js` |
+| Список моделей / их effort / режим без мышления | `VERTEX_MODELS` / `CLAUDE_CLI_MODELS` (Java; последняя колонка — таблица §8.5); `MODELS` в `mock-bridge.js`; префиксы `claude-code-` / `claude-` критичны для маршрутизации (`generateRoleplayReply`, `providerOf`); `tests/ui-helpers.test.js` |
 | Сборка системного промпта / память | `buildSystemPrompt`, `readChatMemory`, `tidyChatFiles` (Java); `buildSystemPrompt` в `mock-bridge.js`; `tests/system-prompt.test.js`; тексты `openSystemPromptPage`, `openMemoryEditor` |
 | Карточки, макросы, персонажи из истории (§18) | Java «CARDS, CAST & MACROS» ↔ `app.js` (`cardCast`, `storyCast`, `castMacros`, `applyMacros`, `splitLiveText`, `deliveryNote`) ↔ мок (`mock-bridge.js`) ↔ зеркала `tests/system-prompt.test.js` и `tests/story-characters.test.js` — менять вместе; формат `card_json`/`cast_swipes_json` — ещё облако (`cloudExportRecord`/`applyCloudCard`/`applyCloudMessage`, триггеры). Формат блока `<new_character>` описан в системном промпте пользователя — при изменении сказать ему |
 | Что уходит Gemini/Claude помимо промпта | `generateRoleplayReply`, `buildClaudeTranscript`; `deliveryNote` в `app.js`; `tests/gemini-request.test.js`. Спросить пользователя (см. §12) |
@@ -523,7 +534,7 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 | Правила Firestore / поля документов | `firebase/firestore.rules` (поля `c, u, n`; хранилище `v, kdf, iter, salt, pw, rc, kid, u`) ↔ `CloudSync` (`vaultFields`, `prepare`) ↔ `CloudStore.putWrite`; пользователь публикует правила сам — обновить `firebase/README.md` |
 | Новая настройка | `setDefaultSetting` (init); GET/POST `/api/settings`; `applySettings` в `app.js`; `RESTORABLE_SETTINGS` (если должна восстанавливаться из копии); секрет — добавить в `SECRET_SETTING_KEYS` (секрет облака — ещё и в `STRICT_SECRET_KEYS`); если она общая для аккаунта — в синхронизируемые (строка выше) |
 | Карточки / аватары | `saveOrUpdateCharacter/Persona` (`sanitizeCard`, `renderCardFile`, `cardPreview`), `cleanAvatarUrl`, `cardFileName`; `openCardEditor`, `downscaleImage`, `resolveAvatarUrl`, `withCardImages`, `cardLabel`/`personaLabel` в `app.js` (детали чата приходят **без** аватаров) |
-| Среда Claude Code (версии, части) | `ClaudeRuntime.PARTS` + **`RUNTIME_VERSION`** + `MUSL_LOADER_SHA256` (если меняется rootfs); тексты размера загрузки в `openClaudePage`; проверить «Проверить запуск» на телефоне |
+| Среда Claude Code (версии, части) | `ClaudeRuntime.PARTS` + **`RUNTIME_VERSION`** + `MUSL_LOADER_SHA256` (если меняется rootfs); тексты размера загрузки в `openClaudePage`; проверить «Проверить запуск» на телефоне; перепроверить мышление (§8.5): куда ведут алиасы, работают ли ещё `CLAUDE_CODE_DISABLE_THINKING` и `CLAUDE_CODE_EXTRA_BODY` |
 | Аргументы/разбор Claude Code CLI | `callClaudeCodeCli`, `handleClaudeAuthStart`, `runFullStart`; помнить: глобальные флаги до подкоманды |
 | Скрипты `assets/claude-diag/*` | константы `PRELOAD_*` в `ClaudeRuntime`; `runProbe`/`runFullStart`; `tests/claude-diag.test.js`; это нативные assets → нужен новый APK (build +1) |
 | Иконка в UI | `<symbol id="i-…">` в `index.html` ↔ `ic('…')` в `app.js` |
@@ -556,12 +567,14 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 - `Process.destroy()` шлёт только SIGTERM — убивать через `ClaudeRuntime.kill` (SIGKILL всему дереву).
 - `build-apk.ps1` копирует через `Copy-Fresh` (пишет байты заново): `Copy-Item` сохраняет время файла, и git может не заметить изменение файла того же размера.
 - Haiku в Claude Code иногда начинает ответ с «Имя:» — из‑за формата транскрипта; менять транскрипт — только с согласия пользователя (§12).
+- Мышление в Claude Code нельзя выключить флагами CLI: у моделей, которые каталог CLI помечает `rejects_disabled_thinking` (Sonnet 5.5, Haiku 5.5), `--thinking disabled` превращается в адаптивное, а `CLAUDE_CODE_DISABLE_THINKING` лишь убирает параметр (у моделей Claude 5 без параметра — адаптивное мышление). Рабочая связка — §8.5. Opus 5.5 и Fable 5/5.1 без мышления не работают вовсе (ограничение API).
+- `autoGrow`: замер через `height:auto` сжимает поле и сбрасывает прокрутку страницы — экран прыгает на каждой букве. Не убирать `field-sizing` и возврат прокрутки, не возвращать потолок высоты (у длинного текста появлялась вторая прокрутка).
 - Облако: порядок сообщений — **`sort_key`**, а не `id` (из облака сообщения получают локальные id в порядке прихода). Откат и перегенерация считают «до/после» по позиции в отсортированном списке.
 - Облако: изменения БД ловят триггеры — не пишите в синхронизируемые таблицы в обход (например, `PRAGMA recursive_triggers`, временные таблицы); применение из облака — только внутри `cloudApplying` (иначе эхо в очередь). Файлы (GEMINI.md, память) триггеры не видят — после записи нужен `cloudQueueFile`.
 - Облако: бесплатная квота Firestore действует только для базы `(default)` редакции Standard; сутки квоты — по тихоокеанскому времени. При `RESOURCE_EXHAUSTED` синхронизация ждёт до полуночи (Pacific), данные остаются на телефоне.
 - Облако: вход Google — OAuth‑клиент типа **Desktop app** (loopback разрешён только ему), PKCE + state + случайный порт на 127.0.0.1. Для Android‑клиентов loopback Google запретил.
 - **Android 15+ (телефон пользователя — Android 16): у приложения в фоне нет сети** (`dumpsys netpolicy` → `blocked=APP_BACKGROUND`), запросы падают с `Unable to resolve host … No address associated with hostname`. Поэтому вход в облако двухэтапный (браузер передаёт код → обмен, когда приложение снова на экране), а `CloudSync` не синхронизирует в фоне (`syncMissed` → запуск при `onResume`). **Вход Google для Vertex (AGY) обменивает код в фоне** и на этом телефоне падает так же; обход — ручная вставка ссылки на странице «Google Vertex».
-- CDP/`devcall.js` не отвечает, пока приложение в фоне (WebView на паузе); снимок экрана телефона целиком — `adb exec-out screencap -p > file.png`.
+- CDP/`devcall.js` не отвечает, пока приложение в фоне (WebView на паузе); снимок всего экрана телефона — `adb exec-out screencap -p > file.png` (через «Отладку по Wi‑Fi», §11.1).
 - Облако: ключ данных и refresh‑токен — «строгие» секреты: без Keystore они не сохраняются, после перезапуска нужен пароль (статус `keystoreUnavailable`).
 
 ---
@@ -579,6 +592,7 @@ SVG‑спрайт иконок (`<symbol id="i-имя">`, в JS — `ic('имя
 - **Персонаж из истории** — персонаж, которого ввёл ответ модели блоком `<new_character>`; хранится в варианте ответа (§18.3).
 - **Свайп / вариант** — альтернативный ответ модели на то же сообщение (`swipes_json`, `swipe_index`).
 - **Effort** — глубина рассуждений модели (`low…max`).
+- **Мышление (thinking)** — рассуждения модели перед ответом; у Claude Code выключается переключателем чата там, где позволяет API (§8.5).
 - **Самопроверка** — «Проверить запуск» Claude Code (`/api/claude/selftest`).
 - **Безопасный режим Bun** — флаги `BUN_FEATURE_FLAG_*`, отключающие новые механизмы ядра (`.compat = safe`).
 - **Облако** — зашифрованная копия данных в проекте Firebase пользователя (§17).
@@ -602,7 +616,7 @@ users/{uid}/meta/vault          v, kdf = "pbkdf2-sha256", iter, salt, pw, rc, ki
 users/{uid}/records/{docId}     c (шифротекст), u (время сервера, REQUEST_TIME), n (частей, если > 1)
 users/{uid}/parts/{docId}-{i}   продолжение записи больше 900 КБ (максимум 6 частей)
 ```
-- Записи (JSON внутри шифротекста, конверт `{v: 1, k, sid, mt}`): `character`, `persona` (имя, `title`, имя файла, текст карточки, аватар, приветствие, даты; у структурной карточки — `card`. Запись без `card` (от старой версии) делает карточку свободным текстом, только если текст изменился; без `title` название не трогается), `chat` (название, `characterSid`, `personaSid`, модель, effort, provider, даты), `message` (`chatSid`, role, content, thoughts, swipes, thoughtSwipes, swipeIndex, sortKey, createdAt, `castSwipes`; запись без `castSwipes` персонажей сообщения не стирает), `memory` (sid чата; текст без заголовка «# Память чата #N» — N локальный), `prompt` (GEMINI.md), `settings` (модель, effort, safety, projectId, `activePersonaSid`). Удаление — надгробие `{deleted: true}`. `mt` — время последнего локального изменения (= `queued_at`).
+- Записи (JSON внутри шифротекста, конверт `{v: 1, k, sid, mt}`): `character`, `persona` (имя, `title`, имя файла, текст карточки, аватар, приветствие, даты; у структурной карточки — `card`. Запись без `card` (от старой версии) делает карточку свободным текстом, только если текст изменился; без `title` название не трогается), `chat` (название, `characterSid`, `personaSid`, модель, effort, `thinking`, provider, даты; запись без `thinking` его не меняет), `message` (`chatSid`, role, content, thoughts, swipes, thoughtSwipes, swipeIndex, sortKey, createdAt, `castSwipes`; запись без `castSwipes` персонажей сообщения не стирает), `memory` (sid чата; текст без заголовка «# Память чата #N» — N локальный), `prompt` (GEMINI.md), `settings` (модель, effort, `selectedThinking`, safety, projectId, `activePersonaSid`). Удаление — надгробие `{deleted: true}`. `mt` — время последнего локального изменения (= `queued_at`).
 
 ### 17.2 Шифрование (`CloudCrypto`)
 - Ключ данных (DEK) — 256 бит; подключи `HMAC-SHA256(DEK, "agy/enc/v1" | "agy/id/v1" | "agy/kid/v1")`.

@@ -1,12 +1,26 @@
 {
     "appName":  "AGY Roleplay Studio",
-    "version":  "1.9.0",
-    "build":  27,
-    "releaseDate":  "2026-10-30",
+    "version":  "1.10.0",
+    "build":  28,
+    "releaseDate":  "2026-10-31",
     "gitRepo":  "Kuka001/111",
     "gitBranch":  "main",
     "apkPath":  "agy-roleplay-android16.apk",
     "releases":  [
+                     {
+                         "version":  "1.10.0",
+                         "build":  28,
+                         "date":  "2026-10-31",
+                         "title":  "Мышление Claude Code можно выключить; правка длинного текста без прыжков",
+                         "ref":  "main",
+                         "changelog":  [
+                                           "Переключатель «Мышление» в выборе модели (в чате, в новом чате и в модели по умолчанию): у моделей Claude Code его можно выключить, и модель ответит сразу, без рассуждений. Работает и там, где сам Claude Code отключать отказывается: Sonnet 5.5 и Haiku 5.5, а также Opus 5, Sonnet 5 и модели 4.x",
+                                           "У Opus 5.5, Fable 5 и Fable 5.1 мышление отключить нельзя — это ограничение Anthropic API. Переключатель у них неактивен, рядом пояснение; меньше всего они думают на Low",
+                                           "Без мышления у Opus 5, Sonnet 5.5 и Haiku 5.5 effort не выше High — так требует API",
+                                           "Правка длинного текста в карточках, персонах и персонажах из истории: экран больше не прыгает на каждой букве, а длинное описание целиком помещается в поле без второй прокрутки",
+                                           "Журнал генерации Claude Code показывает фактическую модель (во что развернулась «новейшая») и число блоков мышления"
+                                       ]
+                     },
                      {
                          "version":  "1.9.0",
                          "build":  27,
@@ -146,29 +160,9 @@
                                            "Файлы и папки рабочей среды полностью скрыты: нет файлового менеджера, путей к файлам и «рабочей папки» Claude",
                                            "Чаты Claude Code работают во внутренней папке среды автоматически, без настройки"
                                        ]
-                     },
-                     {
-                         "version":  "1.6.0",
-                         "build":  18,
-                         "date":  "2026-10-25",
-                         "title":  "Новый интерфейс, единый системный промпт и кнопка «Стоп»",
-                         "ref":  "main",
-                         "changelog":  [
-                                           "НОВЫЙ ИНТЕРФЕЙС: 4 вкладки (Чаты · Персонажи · Персоны · Настройки), SVG-иконки, единая дизайн-система",
-                                           "Книжная лента сообщений, ответ модели печатается прямо в чате, кнопка «Стоп»",
-                                           "Жесты: свайп по ответу листает варианты, долгое нажатие открывает меню сообщения, свайп чата в списке",
-                                           "Единый системный промпт для Gemini и Claude: ваш текст + \u003ccharacter_persona\u003e + \u003cuser_persona\u003e (+ \u003cchat_memory\u003e)",
-                                           "Claude Code CLI больше не требует выбирать .md-файлы: промпт и приветствие берутся из настроек и карточки персонажа",
-                                           "Лор удалён из промпта; файлы workspace перенесены в Настройки → Для продвинутых",
-                                           "Настройки чата: своя модель и effort, персона, название, память, предпросмотр итогового промпта",
-                                           "Темы (тёмная, AMOLED, светлая), акцентный цвет и настройки чтения (шрифт, интервал, подсветка реплик)",
-                                           "Поиск и сортировка чатов по последней активности, фильтр по персонажу",
-                                           "Исправлено: смена модели больше не переписывает все чаты; создание персонажа с тем же именем не затирает старого",
-                                           "Восстановление бэкапа из файла .json, подтверждения перед удалением, кнопка «Назад» закрывает все слои"
-                                       ]
                      }
                  ],
-    "apkSha256":  "9961a77261d5f001db1563d90cd1efd7006d95c0be13eb3fda73adbd04016db3",
-    "apkSize":  242872,
-    "otaSignature":  "D08SwPRoHK/kTJFBZOCXZ5NRx7dhDAYYmTysYJk4IRBl3DKZ/L4m02kmbADm9uIZdHHGGrqQOb5mDlG3p3MBUQ15uRlGjfNRInrJBVU6bTe05k7S4NW26/ZfrluAbuj88/mkjYaSfWnGgipQ35lqDYmdrEebYQOecR0J9eGg2JPWCS/NvmntshwxqHPDXA3fnAvJ/KDM8dfzDOepPxulCW/NSb6aa+c0J8kC0SloMZBLJs5RNhGm6AAjtGByqrh7cm4g+sdym4GeR8FqHxRnID+MqP/VXI9kKbnamUsZkVT/VBIghB2QQGE2sBI4kqdjvkMIiYKCxFfylVC3PnjCsQ=="
+    "apkSha256":  "83e42d47676b43b4acb19e6515fad246f3895a1df83eb12ae94f3fe3ef815541",
+    "apkSize":  246967,
+    "otaSignature":  "2Z7XnlVICpQma3/AcjIf/jafXDNWdU1EteKwmCBNQhkUj8ndMzWNaOodnYFFjPw95GAuzlXGCk3fg9xGDfts1C9QOJvM4eccNQ/jSdBTzHgViOQoj7/zXWvgxIpVQTVWbrIqe2z2xwrTPoE0Ac8PUorZKyUwAcwSBUL98zrz8oRmP20jznsF8n8eOJYS5jBKQkE+bEZVO2O9JpmRsZTWbUpBLOgGhmBD0lYpdG+e2czJlbD/2RvK2aDPlGNhEsit5gc9qeBv3ilaCv/dunJEvN59A0SX65+esHm2ZE6VlwDQ08TTWRx5fynIzmmczjDYSTD1sSdQme07c0YoK4FW/w=="
 }

@@ -22,7 +22,7 @@ function schemaStatements() {
     .filter(Boolean);
 }
 
-/** The app's own tables, as initWorkspaceAndDatabase() leaves them (with the 1.8 sync and 1.9 card columns). */
+/** The app's own tables, as initWorkspaceAndDatabase() leaves them (with the sync, card and thinking columns). */
 function appDatabase() {
   const db = new DatabaseSync(':memory:');
   db.exec(`
@@ -37,7 +37,7 @@ function appDatabase() {
     CREATE TABLE chats (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, character_id INTEGER NOT NULL,
       persona_id INTEGER NOT NULL, model_id TEXT NOT NULL, effort TEXT DEFAULT 'high', memory_file_path TEXT DEFAULT '',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, provider TEXT DEFAULT '',
-      sync_id TEXT, character_sid TEXT DEFAULT '', persona_sid TEXT DEFAULT '');
+      sync_id TEXT, character_sid TEXT DEFAULT '', persona_sid TEXT DEFAULT '', thinking TEXT DEFAULT '');
     CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, role TEXT NOT NULL,
       content TEXT NOT NULL, thoughts TEXT DEFAULT '', swipes_json TEXT DEFAULT '[]', swipe_index INTEGER DEFAULT 0,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP, thought_swipes_json TEXT DEFAULT '[]', sync_id TEXT, sort_key INTEGER,
@@ -142,6 +142,17 @@ test('1.9 fields queue their record: card title and structure, persona title, ch
   db.exec('DELETE FROM cloud_outbox');
   db.exec("UPDATE characters SET title = 'Таверна'");
   assert.deepStrictEqual(outbox(db).map(r => r.kind), ['character']);
+});
+
+test('a chat\'s thinking switch and the default for new chats are queued', () => {
+  const db = linkedDatabase();
+  const chatId = addChat(db);
+  db.exec('DELETE FROM cloud_outbox');
+  db.prepare("UPDATE chats SET thinking = 'off' WHERE id = ?").run(chatId);
+  assert.deepStrictEqual(outbox(db).map(r => r.kind), ['chat']);
+  db.exec('DELETE FROM cloud_outbox');
+  db.exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('selected_thinking', 'off')");
+  assert.deepStrictEqual(outbox(db).map(r => [r.kind, r.sid]), [['settings', 'settings']]);
 });
 
 test('a deleted message names its chat; deleting the chat queues the chat and its memory', () => {

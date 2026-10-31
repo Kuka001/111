@@ -162,6 +162,9 @@ public class LocalBackendServer {
         volatile String modelId = "";
         volatile String vertexModel = "";
         volatile String effort = "";
+        // Claude Code CLI only: "on", "off", or "fixed" (asked off, but the model
+        // cannot run without thinking); "" for the other providers.
+        volatile String thinking = "";
         volatile String thinkingConfigSummary = "";
         volatile String projectId = "";
         volatile String endpoint = "";
@@ -218,6 +221,7 @@ public class LocalBackendServer {
             g.put("modelId", modelId);
             g.put("vertexModel", vertexModel);
             g.put("effort", effort);
+            g.put("thinking", thinking);
             g.put("thinkingConfigSummary", thinkingConfigSummary);
             g.put("projectId", projectId);
             g.put("endpoint", endpoint);
@@ -585,6 +589,10 @@ public class LocalBackendServer {
             addColumnIfMissing("chats", "character_sid", "TEXT DEFAULT ''");
             addColumnIfMissing("chats", "persona_sid", "TEXT DEFAULT ''");
             addColumnIfMissing("messages", "sort_key", "INTEGER");
+            // A chat's thinking: "off" runs the model without thinking where the
+            // model allows it (Claude Code CLI), "" keeps the model's default.
+            // Before initCloudSchema: its chat trigger watches this column.
+            addColumnIfMissing("chats", "thinking", "TEXT DEFAULT ''");
             initCloudSchema();
 
             JSONObject bundled = readBundledVersionManifest();
@@ -1016,27 +1024,38 @@ public class LocalBackendServer {
         {"gemini-3.1-pro", "Gemini 3.1 Pro", "Google DeepMind", "Глубокий", EFFORTS_BASIC},
     };
 
-    // Claude Code CLI models: {id, --model value, name, badge, efforts ("" = no effort control), legacy}.
-    // Every model still served (retired ones excluded); the CLI aliases always
-    // follow the newest model of their family.
+    // How the Anthropic API runs a model without thinking (last column of
+    // CLAUDE_CLI_MODELS): the `thinking` type to send, ":high" when the model
+    // then takes effort high at most (a 400 above it), "" when it cannot.
+    private static final String NO_THINKING_DISABLED = "disabled";
+    private static final String NO_THINKING_DISABLED_HIGH = "disabled:high";
+    private static final String NO_THINKING_BETWEEN_TOOLS_HIGH = "between_tools:high";
+    private static final String NO_THINKING_IMPOSSIBLE = "";
+
+    // Claude Code CLI models: {id, --model value, name, badge, efforts ("" = no effort control), legacy,
+    // without thinking}. Every model still served (retired ones excluded); the
+    // CLI aliases always follow the newest model of their family. Their
+    // "without thinking" follows the catalog of the pinned CLI (ClaudeRuntime):
+    // opus = Opus 5.5, sonnet = Sonnet 5.5, haiku = Haiku 5.5 — recheck it when
+    // RUNTIME_VERSION changes.
     private static final String[][] CLAUDE_CLI_MODELS = new String[][]{
-        {"claude-code-opus", "opus", "Claude Opus (новейшая)", "Всегда последняя Opus", EFFORTS_ALL, "0"},
-        {"claude-code-sonnet", "sonnet", "Claude Sonnet (новейшая)", "Всегда последняя Sonnet", EFFORTS_ALL, "0"},
-        {"claude-code-haiku", "haiku", "Claude Haiku (новейшая)", "Всегда последняя Haiku", EFFORTS_ALL, "0"},
-        {"claude-code-fable-5-1", "claude-fable-5-1", "Claude Fable 5.1", "Самая мощная", EFFORTS_ALL, "0"},
-        {"claude-code-opus-5-5", "claude-opus-5-5", "Claude Opus 5.5", "Opus", EFFORTS_ALL, "0"},
-        {"claude-code-sonnet-5-5", "claude-sonnet-5-5", "Claude Sonnet 5.5", "Sonnet", EFFORTS_ALL, "0"},
-        {"claude-code-haiku-5-5", "claude-haiku-5-5", "Claude Haiku 5.5", "Haiku · быстрая", EFFORTS_ALL, "0"},
-        {"claude-code-fable-5", "claude-fable-5", "Claude Fable 5", "Предыдущая Fable", EFFORTS_ALL, "1"},
-        {"claude-code-opus-5", "claude-opus-5", "Claude Opus 5", "Предыдущая Opus", EFFORTS_ALL, "1"},
-        {"claude-code-opus-4-8", "claude-opus-4-8", "Claude Opus 4.8", "Opus 4", EFFORTS_ALL, "1"},
-        {"claude-code-opus-4-7", "claude-opus-4-7", "Claude Opus 4.7", "Opus 4", EFFORTS_ALL, "1"},
-        {"claude-code-opus-4-6", "claude-opus-4-6", "Claude Opus 4.6", "Opus 4", EFFORTS_NO_XHIGH, "1"},
-        {"claude-code-opus-4-5", "claude-opus-4-5", "Claude Opus 4.5", "Opus 4", EFFORTS_BASIC, "1"},
-        {"claude-code-sonnet-5", "claude-sonnet-5", "Claude Sonnet 5", "Предыдущая Sonnet", EFFORTS_ALL, "1"},
-        {"claude-code-sonnet-4-6", "claude-sonnet-4-6", "Claude Sonnet 4.6", "Sonnet 4", EFFORTS_NO_XHIGH, "1"},
-        {"claude-code-sonnet-4-5", "claude-sonnet-4-5", "Claude Sonnet 4.5", "Снимается 30.11.2026", "", "1"},
-        {"claude-code-haiku-4-5", "claude-haiku-4-5", "Claude Haiku 4.5", "Haiku 4", "", "1"},
+        {"claude-code-opus", "opus", "Claude Opus (новейшая)", "Всегда последняя Opus", EFFORTS_ALL, "0", NO_THINKING_IMPOSSIBLE},
+        {"claude-code-sonnet", "sonnet", "Claude Sonnet (новейшая)", "Всегда последняя Sonnet", EFFORTS_ALL, "0", NO_THINKING_BETWEEN_TOOLS_HIGH},
+        {"claude-code-haiku", "haiku", "Claude Haiku (новейшая)", "Всегда последняя Haiku", EFFORTS_ALL, "0", NO_THINKING_DISABLED_HIGH},
+        {"claude-code-fable-5-1", "claude-fable-5-1", "Claude Fable 5.1", "Самая мощная", EFFORTS_ALL, "0", NO_THINKING_IMPOSSIBLE},
+        {"claude-code-opus-5-5", "claude-opus-5-5", "Claude Opus 5.5", "Opus", EFFORTS_ALL, "0", NO_THINKING_IMPOSSIBLE},
+        {"claude-code-sonnet-5-5", "claude-sonnet-5-5", "Claude Sonnet 5.5", "Sonnet", EFFORTS_ALL, "0", NO_THINKING_BETWEEN_TOOLS_HIGH},
+        {"claude-code-haiku-5-5", "claude-haiku-5-5", "Claude Haiku 5.5", "Haiku · быстрая", EFFORTS_ALL, "0", NO_THINKING_DISABLED_HIGH},
+        {"claude-code-fable-5", "claude-fable-5", "Claude Fable 5", "Предыдущая Fable", EFFORTS_ALL, "1", NO_THINKING_IMPOSSIBLE},
+        {"claude-code-opus-5", "claude-opus-5", "Claude Opus 5", "Предыдущая Opus", EFFORTS_ALL, "1", NO_THINKING_DISABLED_HIGH},
+        {"claude-code-opus-4-8", "claude-opus-4-8", "Claude Opus 4.8", "Opus 4", EFFORTS_ALL, "1", NO_THINKING_DISABLED},
+        {"claude-code-opus-4-7", "claude-opus-4-7", "Claude Opus 4.7", "Opus 4", EFFORTS_ALL, "1", NO_THINKING_DISABLED},
+        {"claude-code-opus-4-6", "claude-opus-4-6", "Claude Opus 4.6", "Opus 4", EFFORTS_NO_XHIGH, "1", NO_THINKING_DISABLED},
+        {"claude-code-opus-4-5", "claude-opus-4-5", "Claude Opus 4.5", "Opus 4", EFFORTS_BASIC, "1", NO_THINKING_DISABLED},
+        {"claude-code-sonnet-5", "claude-sonnet-5", "Claude Sonnet 5", "Предыдущая Sonnet", EFFORTS_ALL, "1", NO_THINKING_DISABLED},
+        {"claude-code-sonnet-4-6", "claude-sonnet-4-6", "Claude Sonnet 4.6", "Sonnet 4", EFFORTS_NO_XHIGH, "1", NO_THINKING_DISABLED},
+        {"claude-code-sonnet-4-5", "claude-sonnet-4-5", "Claude Sonnet 4.5", "Снимается 30.11.2026", "", "1", NO_THINKING_DISABLED},
+        {"claude-code-haiku-4-5", "claude-haiku-4-5", "Claude Haiku 4.5", "Haiku 4", "", "1", NO_THINKING_DISABLED},
     };
 
     private JSONArray getCleanBaseModelsJson() throws Exception {
@@ -1045,9 +1064,25 @@ public class LocalBackendServer {
             arr.put(makeModelObj(m[0], m[1], m[2], m[3], m[4], false));
         }
         for (String[] m : CLAUDE_CLI_MODELS) {
-            arr.put(makeModelObj(m[0], m[2], "Claude Code · на устройстве", m[3], m[4], "1".equals(m[5])));
+            JSONObject o = makeModelObj(m[0], m[2], "Claude Code · на устройстве", m[3], m[4], "1".equals(m[5]));
+            // {type, maxEffort}, or null: the model cannot run without thinking.
+            o.put("thinkingOff", m[6].isEmpty() ? JSONObject.NULL
+                : new JSONObject().put("type", noThinkingType(m[6])).put("maxEffort", noThinkingMaxEffort(m[6])));
+            arr.put(o);
         }
         return arr;
+    }
+
+    /** The `thinking` type that turns this model's thinking off ("" = it cannot be turned off). */
+    private static String noThinkingType(String spec) {
+        int colon = spec.indexOf(':');
+        return colon < 0 ? spec : spec.substring(0, colon);
+    }
+
+    /** The highest effort the model takes without thinking ("" = any). */
+    private static String noThinkingMaxEffort(String spec) {
+        int colon = spec.indexOf(':');
+        return colon < 0 ? "" : spec.substring(colon + 1);
     }
 
     private JSONObject makeModelObj(String id, String name, String provider, String badge, String efforts, boolean legacy) throws Exception {
@@ -1094,6 +1129,11 @@ public class LocalBackendServer {
         }
     }
 
+    /** A chat's thinking setting: "off", or "" for the model's default. */
+    private static String normalizeThinking(String raw) {
+        return raw != null && "off".equalsIgnoreCase(raw.trim()) ? "off" : "";
+    }
+
     /** Vertex safety threshold for Gemini: OFF (default), BLOCK_NONE or BLOCK_ONLY_HIGH. */
     private static String normalizeSafetyThreshold(String raw) {
         String st = raw != null ? raw.trim().toUpperCase(Locale.ROOT) : "";
@@ -1135,6 +1175,7 @@ public class LocalBackendServer {
                 res.put("projectId", getSetting("project_id", "project-4c7a8e8a-764a-42bc-bdf"));
                 res.put("selectedModel", normalizeBaseModelId(getSetting("selected_model", "gemini-4-argon")));
                 res.put("selectedEffort", getSetting("selected_effort", "high"));
+                res.put("selectedThinking", normalizeThinking(getSetting("selected_thinking", "")));
                 res.put("activePersonaId", parseIntOr(getSetting("active_persona_id", "0"), 0));
                 res.put("safetyThreshold", normalizeSafetyThreshold(getSetting("safety_threshold", "OFF")));
                 // Access tokens are deliberately NOT exposed to the WebView layer:
@@ -1150,13 +1191,16 @@ public class LocalBackendServer {
             }
             if (method.equals("POST")) {
                 if (body.has("projectId")) setSetting("project_id", body.optString("projectId").trim());
-                // Defaults for NEW chats only. Existing chats keep their own model/effort,
+                // Defaults for NEW chats only. Existing chats keep their own model/effort/thinking,
                 // which is changed per chat via PATCH /api/chats/:id.
                 if (body.has("selectedModel")) {
                     setSetting("selected_model", normalizeBaseModelId(body.optString("selectedModel").trim()));
                 }
                 if (body.has("selectedEffort")) {
                     setSetting("selected_effort", normalizeEffort(body.optString("selectedEffort")));
+                }
+                if (body.has("selectedThinking")) {
+                    setSetting("selected_thinking", normalizeThinking(body.optString("selectedThinking")));
                 }
                 if (body.has("activePersonaId")) setSetting("active_persona_id", String.valueOf(body.optInt("activePersonaId", 0)));
                 if (body.has("safetyThreshold")) {
@@ -1288,6 +1332,7 @@ public class LocalBackendServer {
                     ContentValues cv = new ContentValues();
                     if (body.has("modelId")) cv.put("model_id", normalizeBaseModelId(body.optString("modelId")));
                     if (body.has("effort")) cv.put("effort", normalizeEffort(body.optString("effort")));
+                    if (body.has("thinking")) cv.put("thinking", normalizeThinking(body.optString("thinking")));
                     if (body.has("personaId")) cv.put("persona_id", body.optInt("personaId"));
                     if (body.has("title")) {
                         String title = body.optString("title", "").trim();
@@ -1725,7 +1770,8 @@ public class LocalBackendServer {
 
     /** Settings a backup may bring back; the rest is device state, OTA state or secrets. */
     private static final java.util.Set<String> RESTORABLE_SETTINGS = new java.util.HashSet<>(Arrays.asList(
-        "selected_model", "selected_effort", "active_persona_id", "safety_threshold", "project_id", "git_branch"));
+        "selected_model", "selected_effort", "selected_thinking", "active_persona_id", "safety_threshold", "project_id",
+        "git_branch"));
 
     private java.util.Set<String> tableColumns(String table) {
         java.util.Set<String> cols = new java.util.HashSet<>();
@@ -1814,6 +1860,7 @@ public class LocalBackendServer {
                     String v = settings.optString(k);
                     if ("selected_model".equals(k)) v = normalizeBaseModelId(v);
                     if ("selected_effort".equals(k)) v = normalizeEffort(v);
+                    if ("selected_thinking".equals(k)) v = normalizeThinking(v);
                     if ("safety_threshold".equals(k)) v = normalizeSafetyThreshold(v);
                     setSetting(k, v);
                 }
@@ -2077,13 +2124,14 @@ public class LocalBackendServer {
                 case "chat":
                     // A card this chat waits for (it came from the cloud first) is still referenced by sync_id.
                     c = db.rawQuery("SELECT c.title, c.model_id, c.effort, c.provider, c.created_at, c.updated_at, "
-                        + "COALESCE(ch.sync_id, c.character_sid, ''), COALESCE(p.sync_id, c.persona_sid, '') FROM chats c "
+                        + "COALESCE(ch.sync_id, c.character_sid, ''), COALESCE(p.sync_id, c.persona_sid, ''), c.thinking FROM chats c "
                         + "LEFT JOIN characters ch ON ch.id = c.character_id LEFT JOIN personas p ON p.id = c.persona_id "
                         + "WHERE c.sync_id = ?", new String[]{sid});
                     if (!c.moveToFirst()) return null;
                     return new JSONObject().put("title", str(c, 0)).put("modelId", str(c, 1)).put("effort", str(c, 2))
                         .put("provider", str(c, 3)).put("createdAt", str(c, 4)).put("updatedAt", str(c, 5))
-                        .put("characterSid", str(c, 6)).put("personaSid", str(c, 7));
+                        .put("characterSid", str(c, 6)).put("personaSid", str(c, 7))
+                        .put("thinking", normalizeThinking(str(c, 8)));
                 case "message":
                     c = db.rawQuery("SELECT m.role, m.content, m.thoughts, m.swipes_json, m.swipe_index, "
                         + "m.thought_swipes_json, m.sort_key, m.created_at, ch.sync_id, m.cast_swipes_json FROM messages m "
@@ -2106,6 +2154,7 @@ public class LocalBackendServer {
                     return new JSONObject()
                         .put("selectedModel", getSetting("selected_model", "gemini-4-argon"))
                         .put("selectedEffort", getSetting("selected_effort", "high"))
+                        .put("selectedThinking", normalizeThinking(getSetting("selected_thinking", "")))
                         .put("safetyThreshold", getSetting("safety_threshold", "OFF"))
                         .put("projectId", getSetting("project_id", ""))
                         .put("activePersonaSid", syncIdOf("personas", parseIntOr(getSetting("active_persona_id", "0"), 0)));
@@ -2283,6 +2332,8 @@ public class LocalBackendServer {
         cv.put("persona_sid", personaSid);
         cv.put("model_id", normalizeBaseModelId(p.optString("modelId", "")));
         cv.put("effort", normalizeEffort(p.optString("effort", "")));
+        // A record from a version without this field keeps the local value.
+        if (p.has("thinking")) cv.put("thinking", normalizeThinking(p.optString("thinking", "")));
         cv.put("provider", clip(p.optString("provider", ""), 40));
         putTimestamp(cv, "created_at", p.optString("createdAt", ""));
         putTimestamp(cv, "updated_at", p.optString("updatedAt", ""));
@@ -2379,6 +2430,7 @@ public class LocalBackendServer {
     private void applyCloudSettings(JSONObject p, CloudApplied out) {
         if (p.has("selectedModel")) setSetting("selected_model", normalizeBaseModelId(p.optString("selectedModel")));
         if (p.has("selectedEffort")) setSetting("selected_effort", normalizeEffort(p.optString("selectedEffort")));
+        if (p.has("selectedThinking")) setSetting("selected_thinking", normalizeThinking(p.optString("selectedThinking")));
         if (p.has("safetyThreshold")) setSetting("safety_threshold", normalizeSafetyThreshold(p.optString("safetyThreshold")));
         // It becomes part of the Vertex URL: plain project ids only.
         String project = p.optString("projectId", "").trim();
@@ -2776,7 +2828,7 @@ public class LocalBackendServer {
             "(SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id), " +
             "MAX(COALESCE(c.updated_at, c.created_at, ''), " +
             "COALESCE((SELECT m.created_at FROM messages m WHERE m.chat_id = c.id ORDER BY m.sort_key DESC, m.id DESC LIMIT 1), '')) AS last_activity, " +
-            "c.created_at, ch.title, p.title " +
+            "c.created_at, ch.title, p.title, c.thinking " +
             "FROM chats c " +
             "LEFT JOIN characters ch ON ch.id = c.character_id " +
             "LEFT JOIN personas p ON p.id = c.persona_id " +
@@ -2799,6 +2851,7 @@ public class LocalBackendServer {
                 o.put("created_at", cur.getString(11) != null ? cur.getString(11) : "");
                 o.put("character_title", str(cur, 12));
                 o.put("persona_title", str(cur, 13));
+                o.put("thinking", normalizeThinking(str(cur, 14)));
                 arr.put(o);
             }
         } finally {
@@ -2812,6 +2865,7 @@ public class LocalBackendServer {
         int personaId = body.optInt("personaId", parseIntOr(getSetting("active_persona_id", "0"), 0));
         String modelId = normalizeBaseModelId(body.optString("modelId", getSetting("selected_model", "gemini-4-argon")));
         String effort = normalizeEffort(body.optString("effort", getSetting("selected_effort", "high")));
+        String thinking = normalizeThinking(body.optString("thinking", getSetting("selected_thinking", "")));
         String provider = body.optString("provider", "").trim();
 
         JSONObject character = getCharacterByIdJson(charId);
@@ -2830,6 +2884,7 @@ public class LocalBackendServer {
         cv.put("persona_id", persona.optInt("id", 0));
         cv.put("model_id", modelId);
         cv.put("effort", effort);
+        cv.put("thinking", thinking);
         cv.put("provider", provider);
         int chatId = (int) db.insert("chats", null, cv);
 
@@ -2865,7 +2920,7 @@ public class LocalBackendServer {
     }
 
     private JSONObject getChatDetailsJson(int chatId) throws Exception {
-        Cursor c = db.rawQuery("SELECT id, title, character_id, persona_id, model_id, effort, memory_file_path, provider, created_at FROM chats WHERE id = ?", new String[]{String.valueOf(chatId)});
+        Cursor c = db.rawQuery("SELECT id, title, character_id, persona_id, model_id, effort, memory_file_path, provider, created_at, thinking FROM chats WHERE id = ?", new String[]{String.valueOf(chatId)});
         if (!c.moveToFirst()) {
             c.close();
             return errorJson(404, "Чат не найден");
@@ -2882,6 +2937,7 @@ public class LocalBackendServer {
         chat.put("memory_file_path", c.getString(6));
         chat.put("provider", c.getString(7) != null ? c.getString(7) : "");
         chat.put("created_at", c.getString(8) != null ? c.getString(8) : "");
+        chat.put("thinking", normalizeThinking(c.getString(9)));
         c.close();
 
         JSONObject character = getCharacterByIdJson(charId);
@@ -3047,7 +3103,8 @@ public class LocalBackendServer {
             prog.statusText = "📋 Сборка контекста (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ")...";
             prog.addLog("Старт запроса: " + baseModel + " • Effort: " + effort.toUpperCase(Locale.ROOT));
 
-            String[] result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, history, chat.optString("memory_file_path", ""), prog);
+            boolean thinkingOff = "off".equals(normalizeThinking(chat.optString("thinking", "")));
+            String[] result = generateRoleplayReply(chatId, projectId, baseModel, effort, thinkingOff, character, persona, history, chat.optString("memory_file_path", ""), prog);
             prog.throwIfCancelled();
             NewCharacters introduced = extractNewCharacters(result[0]);
 
@@ -3186,7 +3243,8 @@ public class LocalBackendServer {
                 prog.statusText = "🔄 Перегенерация (" + baseModel + " • " + effort.toUpperCase(Locale.ROOT) + ")...";
                 prog.addLog("Старт перегенерации: " + baseModel + " • Effort: " + effort.toUpperCase(Locale.ROOT));
 
-                String[] result = generateRoleplayReply(chatId, projectId, baseModel, effort, character, persona, historyBefore, chat.optString("memory_file_path", ""), prog);
+                boolean thinkingOff = "off".equals(normalizeThinking(chat.optString("thinking", "")));
+                String[] result = generateRoleplayReply(chatId, projectId, baseModel, effort, thinkingOff, character, persona, historyBefore, chat.optString("memory_file_path", ""), prog);
                 prog.throwIfCancelled();
                 NewCharacters introduced = extractNewCharacters(result[0]);
 
@@ -4399,14 +4457,17 @@ public class LocalBackendServer {
     /**
      * Maps our effort to a level the chosen model accepts, or "" when the model
      * has no effort control (then --effort is not passed at all). An unsupported
-     * level falls back to the highest supported level below it.
+     * level falls back to the highest supported level below it. Without
+     * thinking, some models take effort high at most (noThinkingMaxEffort).
      */
-    private String resolveClaudeCliEffort(String baseModel, String effort) {
+    private String resolveClaudeCliEffort(String baseModel, String effort, boolean noThinking) {
         String[] m = findCliModel(normalizeBaseModelId(baseModel));
         String supported = m != null ? m[4] : EFFORTS_ALL;
         if (supported.isEmpty()) return "";
         List<String> levels = Arrays.asList("low", "medium", "high", "xhigh", "max");
-        List<String> allowed = Arrays.asList(supported.split(","));
+        List<String> allowed = new ArrayList<>(Arrays.asList(supported.split(",")));
+        String cap = noThinking && m != null ? noThinkingMaxEffort(m[6]) : "";
+        if (!cap.isEmpty()) allowed.retainAll(levels.subList(0, levels.indexOf(cap) + 1));
         String want = normalizeEffort(effort);
         for (int i = levels.indexOf(want); i >= 0; i--) {
             if (allowed.contains(levels.get(i))) return levels.get(i);
@@ -4459,11 +4520,15 @@ public class LocalBackendServer {
      * Runs one roleplay turn through the on-device Claude Code CLI. Streams the
      * stream-json output into {@code prog} so the polling UI shows live
      * progress. Returns {@code {reply, thoughts}} like callAntigravityGateway.
+     *
+     * thinkingOff runs the model without thinking where the API allows it
+     * (CLAUDE_CLI_MODELS, last column); Opus 5.5 and Fable always think.
      */
     private String[] callClaudeCodeCli(
         int chatId,
         String baseModel,
         String effort,
+        boolean thinkingOff,
         JSONObject character,
         JSONObject persona,
         JSONArray history,
@@ -4472,10 +4537,14 @@ public class LocalBackendServer {
     ) throws Exception {
         String normBase = normalizeBaseModelId(baseModel);
         String cliModel = resolveClaudeCliModel(normBase);
-        String cliEffort = resolveClaudeCliEffort(normBase, effort);
+        String[] cliRow = findCliModel(normBase);
+        String offType = thinkingOff && cliRow != null ? noThinkingType(cliRow[6]) : "";
+        boolean noThinking = !offType.isEmpty();
+        String cliEffort = resolveClaudeCliEffort(normBase, effort, noThinking);
         prog.modelId = normBase;
         prog.vertexModel = "claude-code-cli:" + cliModel;
         prog.effort = cliEffort.isEmpty() ? "—" : cliEffort;
+        prog.thinking = noThinking ? "off" : (thinkingOff ? "fixed" : "on");
 
         prog.phase = "auth";
         prog.statusText = "🔧 Проверка среды Claude Code...";
@@ -4521,16 +4590,34 @@ public class LocalBackendServer {
         args.add(sysPromptPath);
 
         prog.phase = "connecting";
-        String effortLabel = cliEffort.isEmpty() ? "без effort" : cliEffort;
+        String effortLabel = (cliEffort.isEmpty() ? "без effort" : cliEffort) + (noThinking ? ", без мышления" : "");
         prog.endpoint = "claude " + cliModel + " (" + effortLabel + ")";
         prog.statusText = "🤖 Запуск Claude Code (" + cliModel + " • " + effortLabel + ")...";
         prog.addLog("claude -p --model " + cliModel + (cliEffort.isEmpty() ? "" : " --effort " + cliEffort)
             + " --system-prompt-file ~/" + cliPromptFile(chatId) + " (" + systemPrompt.length() + " симв.)");
+        if (noThinking) {
+            String cap = noThinkingMaxEffort(cliRow[6]);
+            prog.addLog("Мышление: выкл (thinking.type=" + offType
+                + (cap.isEmpty() ? "" : ", effort не выше " + cap) + ")");
+        } else if (thinkingOff) {
+            prog.addLog("Мышление: у этой модели не отключается (ограничение Anthropic API) — модель думает");
+        }
 
         prog.throwIfCancelled();
         refreshGuestDns();
         ProcessBuilder pb = claudeRuntime.newClaudeProcess(args, claudeRuntime.defaultOptions());
         pb.environment().put("CI", "1"); // non-interactive generation only
+        if (noThinking) {
+            // The CLI cannot turn thinking off itself on every model: for those it
+            // marks rejects_disabled_thinking (Sonnet 5.5, Haiku 5.5) it omits
+            // `thinking` or turns `--thinking disabled` back into adaptive, and an
+            // omitted `thinking` means adaptive thinking on Claude 5 models. So its
+            // own thinking handling is off, and the request gets the model's value
+            // through CLAUDE_CODE_EXTRA_BODY, merged after the CLI's own fields.
+            pb.environment().put("CLAUDE_CODE_DISABLE_THINKING", "1");
+            pb.environment().put("CLAUDE_CODE_EXTRA_BODY",
+                new JSONObject().put("thinking", new JSONObject().put("type", offType)).toString());
+        }
         final Process proc = pb.start();
         prog.activeProcess = proc;
         if (prog.cancelled) ClaudeRuntime.kill(proc); // Stop pressed while it was starting
@@ -4596,6 +4683,8 @@ public class LocalBackendServer {
         StringBuilder liveThoughts = new StringBuilder();
         String resultText = "";
         int chunks = 0;
+        // Thinking blocks the API started; their text can be empty (display omitted).
+        int thinkingBlockCount = 0;
         boolean sawError = false;
         String errorMessage = "";
 
@@ -4623,6 +4712,10 @@ public class LocalBackendServer {
                     // A new attempt or message: live text starts over.
                     liveText.setLength(0);
                     liveThoughts.setLength(0);
+                } else if ("content_block_start".equals(et)) {
+                    JSONObject started = event.optJSONObject("content_block");
+                    String sb = started != null ? started.optString("type", "") : "";
+                    if ("thinking".equals(sb) || "redacted_thinking".equals(sb)) thinkingBlockCount++;
                 } else if ("content_block_delta".equals(et)) {
                     JSONObject delta = event.optJSONObject("delta");
                     if (delta != null) {
@@ -4664,6 +4757,10 @@ public class LocalBackendServer {
                         if (!th.isEmpty() && !thinkingBlocks.contains(th)) thinkingBlocks.add(th);
                     }
                 }
+            } else if ("system".equals(type) && "init".equals(evt.optString("subtype", ""))) {
+                // The model an alias (opus/sonnet/haiku) resolved to.
+                String actual = evt.optString("model", "");
+                if (!actual.isEmpty()) prog.addLog("Модель Claude Code: " + actual);
             } else if ("result".equals(type)) {
                 prog.finishReason = evt.optString("subtype", "");
                 resultText = evt.optString("result", "");
@@ -4709,7 +4806,8 @@ public class LocalBackendServer {
             throw new Exception("Claude Code CLI вернул пустой ответ (" + describeExit(exit) + ")"
                 + (err.isEmpty() ? "" : ": " + (err.length() > 300 ? err.substring(0, 300) : err)));
         }
-        prog.addLog("✅ Claude Code завершил ответ (" + reply.length() + " симв., событий: " + chunks + ")");
+        prog.addLog("✅ Claude Code завершил ответ (" + reply.length() + " симв., событий: " + chunks
+            + ", блоков мышления: " + thinkingBlockCount + ")");
         return new String[]{reply, thoughts};
     }
 
@@ -5205,6 +5303,7 @@ public class LocalBackendServer {
         String projectId,
         String baseModel,
         String effort,
+        boolean thinkingOff,
         JSONObject character,
         JSONObject persona,
         JSONArray history,
@@ -5212,9 +5311,10 @@ public class LocalBackendServer {
         GenerationProgress prog
     ) throws Exception {
         // Provider routing. Every provider gets the same system prompt
-        // (buildSystemPrompt) and the whole history as it is.
+        // (buildSystemPrompt) and the whole history as it is. The thinking
+        // switch is the Claude Code CLI's only.
         if (normalizeBaseModelId(baseModel).startsWith("claude-code-")) {
-            return callClaudeCodeCli(chatId, baseModel, effort, character, persona, history, memoryRelPath, prog);
+            return callClaudeCodeCli(chatId, baseModel, effort, thinkingOff, character, persona, history, memoryRelPath, prog);
         }
 
         String systemInstructionText = buildSystemPrompt(character, persona, memoryRelPath, history);

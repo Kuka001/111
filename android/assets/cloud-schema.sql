@@ -146,7 +146,7 @@ END
 DROP TRIGGER IF EXISTS cloud_chats_upd
 --;;
 -- Not updated_at: a reply bumps it every time (touchChat), and the list order follows the messages anyway.
-CREATE TRIGGER cloud_chats_upd AFTER UPDATE OF title, character_id, persona_id, model_id, effort, provider
+CREATE TRIGGER cloud_chats_upd AFTER UPDATE OF title, character_id, persona_id, model_id, effort, provider, thinking
 ON chats WHEN NEW.sync_id IS NOT NULL AND (SELECT tracking = 1 AND applying = 0 FROM cloud_ctl WHERE id = 1) BEGIN
   DELETE FROM cloud_outbox WHERE kind = 'chat' AND sid = NEW.sync_id;
   INSERT INTO cloud_outbox (kind, sid, parent, queued_at)
@@ -209,7 +209,7 @@ DROP TRIGGER IF EXISTS cloud_settings_insert
 --;;
 -- Only the settings that belong to the account; the rest are device state or secrets.
 CREATE TRIGGER cloud_settings_insert AFTER INSERT ON settings
-WHEN NEW.key IN ('selected_model', 'selected_effort', 'safety_threshold', 'project_id', 'active_persona_id')
+WHEN NEW.key IN ('selected_model', 'selected_effort', 'selected_thinking', 'safety_threshold', 'project_id', 'active_persona_id')
   AND (SELECT tracking = 1 AND applying = 0 FROM cloud_ctl WHERE id = 1) BEGIN
   DELETE FROM cloud_outbox WHERE kind = 'settings' AND sid = 'settings';
   INSERT INTO cloud_outbox (kind, sid, parent, queued_at)
@@ -219,7 +219,7 @@ END
 DROP TRIGGER IF EXISTS cloud_settings_update
 --;;
 CREATE TRIGGER cloud_settings_update AFTER UPDATE ON settings
-WHEN NEW.key IN ('selected_model', 'selected_effort', 'safety_threshold', 'project_id', 'active_persona_id')
+WHEN NEW.key IN ('selected_model', 'selected_effort', 'selected_thinking', 'safety_threshold', 'project_id', 'active_persona_id')
   AND (SELECT tracking = 1 AND applying = 0 FROM cloud_ctl WHERE id = 1) BEGIN
   DELETE FROM cloud_outbox WHERE kind = 'settings' AND sid = 'settings';
   INSERT INTO cloud_outbox (kind, sid, parent, queued_at)

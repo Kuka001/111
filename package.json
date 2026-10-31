@@ -1,6 +1,6 @@
 {
   "name": "agy-roleplay-studio",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "private": true,
   "description": "AGY Roleplay Studio — Android 16 roleplay client (Java + WebView)",
   "scripts": {

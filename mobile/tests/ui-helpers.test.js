@@ -13,6 +13,8 @@ const {
   providerOf,
   effortOptionsFor,
   effectiveEffort,
+  thinkingOffOf,
+  thinkingIsOff,
   parseServerTime,
   formatRelativeTime,
   formatMessageTime,
@@ -113,6 +115,38 @@ test('per-model effort lists from the native engine take precedence', () => {
   assert.strictEqual(effectiveEffort('claude-code-haiku-4-5', 'high', models), '');
   // Unknown to the list (older engines): provider defaults still apply.
   assert.strictEqual(effectiveEffort('claude-code-sonnet', 'xhigh', models), 'xhigh');
+});
+
+test('thinking off: which Claude Code models allow it and how it caps effort', () => {
+  // As /api/models reports them (CLAUDE_CLI_MODELS, last column).
+  const ALL = ['low', 'medium', 'high', 'xhigh', 'max'];
+  const models = [
+    { id: 'claude-code-opus-5-5', efforts: ALL, thinkingOff: null },
+    { id: 'claude-code-fable-5-1', efforts: ALL, thinkingOff: null },
+    { id: 'claude-code-sonnet-5-5', efforts: ALL, thinkingOff: { type: 'between_tools', maxEffort: 'high' } },
+    { id: 'claude-code-haiku-5-5', efforts: ALL, thinkingOff: { type: 'disabled', maxEffort: 'high' } },
+    { id: 'claude-code-sonnet-5', efforts: ALL, thinkingOff: { type: 'disabled', maxEffort: '' } },
+    { id: 'claude-code-sonnet-4-5', efforts: [], thinkingOff: { type: 'disabled', maxEffort: '' } },
+    { id: 'gemini-4-argon', efforts: ['low', 'medium', 'high'] },
+  ];
+  // Opus 5.5 and Fable always think; other providers have no switch.
+  assert.strictEqual(thinkingOffOf('claude-code-opus-5-5', models), null);
+  assert.strictEqual(thinkingOffOf('claude-code-fable-5-1', models), null);
+  assert.strictEqual(thinkingOffOf('gemini-4-argon', models), null);
+  assert.strictEqual(thinkingIsOff('claude-code-opus-5-5', 'off', models), false);
+  assert.strictEqual(thinkingIsOff('claude-code-sonnet-5-5', 'off', models), true);
+  assert.strictEqual(thinkingIsOff('claude-code-sonnet-5-5', '', models), false);
+  assert.strictEqual(thinkingOffOf('claude-code-sonnet-5-5', models).type, 'between_tools');
+  // Without thinking Sonnet 5.5 and Haiku 5.5 take effort high at most.
+  assert.deepStrictEqual(Array.from(effortOptionsFor('claude-code-sonnet-5-5', models, true)), ['low', 'medium', 'high']);
+  assert.strictEqual(effectiveEffort('claude-code-haiku-5-5', 'max', models, true), 'high');
+  assert.strictEqual(effectiveEffort('claude-code-haiku-5-5', 'max', models, false), 'max');
+  // The cap is the model's: Opus 5.5 keeps its levels, Sonnet 5 has no cap.
+  assert.strictEqual(effectiveEffort('claude-code-opus-5-5', 'max', models, true), 'max');
+  assert.strictEqual(effectiveEffort('claude-code-sonnet-5', 'max', models, true), 'max');
+  // Sonnet 4.5 has no effort control, but its thinking can still be turned off.
+  assert.strictEqual(effectiveEffort('claude-code-sonnet-4-5', 'high', models, true), '');
+  assert.strictEqual(thinkingIsOff('claude-code-sonnet-4-5', 'off', models), true);
 });
 
 test('sortChats orders by last activity and falls back to id', () => {

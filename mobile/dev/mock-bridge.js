@@ -114,6 +114,7 @@
       projectId: 'project-4c7a8e8a-764a-42bc-bdf',
       selectedModel: 'gemini-4-argon',
       selectedEffort: 'high',
+      selectedThinking: '',
       activePersonaId: 1,
       safetyThreshold: 'OFF',
       agyAuthenticated: true,
@@ -208,10 +209,16 @@
     }
   }
 
-  // Mirrors VERTEX_MODELS / CLAUDE_CLI_MODELS in LocalBackendServer.java.
+  // Mirrors VERTEX_MODELS / CLAUDE_CLI_MODELS in LocalBackendServer.java. The
+  // CLI rows end with "without thinking": the API's thinking type, ':high' for
+  // an effort cap, '' when the model cannot run without thinking.
   const ALL = 'low,medium,high,xhigh,max';
   const BASIC = 'low,medium,high';
   const CLI = 'Claude Code · на устройстве';
+  const OFF = 'disabled';
+  const OFF_HIGH = 'disabled:high';
+  const BETWEEN_HIGH = 'between_tools:high';
+  const ALWAYS = '';
   const MODELS = [
     ['gemini-4-argon', 'Gemini 4 Argon', 'Google DeepMind', 'Флагман RP', BASIC],
     ['claude-opus-5-5', 'Claude Opus 5.5', 'Anthropic (AGY)', 'Литературный', ''],
@@ -221,24 +228,31 @@
     ['gemini-3.6-flash', 'Gemini 3.6 Flash', 'Google DeepMind', 'Скоростной', BASIC],
     ['gemini-3.5-flash-lite', 'Gemini 3.5 Flash Lite', 'Google DeepMind', 'Лёгкий', BASIC],
     ['gemini-3.1-pro', 'Gemini 3.1 Pro', 'Google DeepMind', 'Глубокий', BASIC],
-    ['claude-code-opus', 'Claude Opus (новейшая)', CLI, 'Всегда последняя Opus', ALL],
-    ['claude-code-sonnet', 'Claude Sonnet (новейшая)', CLI, 'Всегда последняя Sonnet', ALL],
-    ['claude-code-haiku', 'Claude Haiku (новейшая)', CLI, 'Всегда последняя Haiku', ALL],
-    ['claude-code-fable-5-1', 'Claude Fable 5.1', CLI, 'Самая мощная', ALL],
-    ['claude-code-opus-5-5', 'Claude Opus 5.5', CLI, 'Opus', ALL],
-    ['claude-code-sonnet-5-5', 'Claude Sonnet 5.5', CLI, 'Sonnet', ALL],
-    ['claude-code-haiku-5-5', 'Claude Haiku 5.5', CLI, 'Haiku · быстрая', ALL],
-    ['claude-code-fable-5', 'Claude Fable 5', CLI, 'Предыдущая Fable', ALL, true],
-    ['claude-code-opus-5', 'Claude Opus 5', CLI, 'Предыдущая Opus', ALL, true],
-    ['claude-code-opus-4-8', 'Claude Opus 4.8', CLI, 'Opus 4', ALL, true],
-    ['claude-code-opus-4-7', 'Claude Opus 4.7', CLI, 'Opus 4', ALL, true],
-    ['claude-code-opus-4-6', 'Claude Opus 4.6', CLI, 'Opus 4', 'low,medium,high,max', true],
-    ['claude-code-opus-4-5', 'Claude Opus 4.5', CLI, 'Opus 4', BASIC, true],
-    ['claude-code-sonnet-5', 'Claude Sonnet 5', CLI, 'Предыдущая Sonnet', ALL, true],
-    ['claude-code-sonnet-4-6', 'Claude Sonnet 4.6', CLI, 'Sonnet 4', 'low,medium,high,max', true],
-    ['claude-code-sonnet-4-5', 'Claude Sonnet 4.5', CLI, 'Снимается 30.11.2026', '', true],
-    ['claude-code-haiku-4-5', 'Claude Haiku 4.5', CLI, 'Haiku 4', '', true],
-  ].map(([id, name, provider, badge, efforts, legacy]) => ({ id, name, provider, badge, efforts: efforts ? efforts.split(',') : [], legacy: !!legacy }));
+    ['claude-code-opus', 'Claude Opus (новейшая)', CLI, 'Всегда последняя Opus', ALL, false, ALWAYS],
+    ['claude-code-sonnet', 'Claude Sonnet (новейшая)', CLI, 'Всегда последняя Sonnet', ALL, false, BETWEEN_HIGH],
+    ['claude-code-haiku', 'Claude Haiku (новейшая)', CLI, 'Всегда последняя Haiku', ALL, false, OFF_HIGH],
+    ['claude-code-fable-5-1', 'Claude Fable 5.1', CLI, 'Самая мощная', ALL, false, ALWAYS],
+    ['claude-code-opus-5-5', 'Claude Opus 5.5', CLI, 'Opus', ALL, false, ALWAYS],
+    ['claude-code-sonnet-5-5', 'Claude Sonnet 5.5', CLI, 'Sonnet', ALL, false, BETWEEN_HIGH],
+    ['claude-code-haiku-5-5', 'Claude Haiku 5.5', CLI, 'Haiku · быстрая', ALL, false, OFF_HIGH],
+    ['claude-code-fable-5', 'Claude Fable 5', CLI, 'Предыдущая Fable', ALL, true, ALWAYS],
+    ['claude-code-opus-5', 'Claude Opus 5', CLI, 'Предыдущая Opus', ALL, true, OFF_HIGH],
+    ['claude-code-opus-4-8', 'Claude Opus 4.8', CLI, 'Opus 4', ALL, true, OFF],
+    ['claude-code-opus-4-7', 'Claude Opus 4.7', CLI, 'Opus 4', ALL, true, OFF],
+    ['claude-code-opus-4-6', 'Claude Opus 4.6', CLI, 'Opus 4', 'low,medium,high,max', true, OFF],
+    ['claude-code-opus-4-5', 'Claude Opus 4.5', CLI, 'Opus 4', BASIC, true, OFF],
+    ['claude-code-sonnet-5', 'Claude Sonnet 5', CLI, 'Предыдущая Sonnet', ALL, true, OFF],
+    ['claude-code-sonnet-4-6', 'Claude Sonnet 4.6', CLI, 'Sonnet 4', 'low,medium,high,max', true, OFF],
+    ['claude-code-sonnet-4-5', 'Claude Sonnet 4.5', CLI, 'Снимается 30.11.2026', '', true, OFF],
+    ['claude-code-haiku-4-5', 'Claude Haiku 4.5', CLI, 'Haiku 4', '', true, OFF],
+  ].map(([id, name, provider, badge, efforts, legacy, off]) => {
+    const m = { id, name, provider, badge, efforts: efforts ? efforts.split(',') : [], legacy: !!legacy };
+    if (off !== undefined) {
+      const [type, maxEffort = ''] = off.split(':');
+      m.thinkingOff = off ? { type, maxEffort } : null;
+    }
+    return m;
+  });
 
   // ---------------------------------------------------------------------------
   const err = (status, msg, extra) => Object.assign({ __status: status, error: msg }, extra || {});
@@ -246,6 +260,8 @@
   const fileContent = (p) => (p && db.files[p] !== undefined ? db.files[p] : '');
   const preview = (t) => String(t || '').replace(/^#.*$/gm, '').replace(/\s+/g, ' ').trim().slice(0, 160);
   const safety = (v) => (['BLOCK_NONE', 'BLOCK_ONLY_HIGH'].includes(String(v || '').toUpperCase()) ? String(v).toUpperCase() : 'OFF');
+  // Like normalizeThinking: 'off', or '' for the model's default.
+  const thinkingValue = (v) => (String(v || '').trim().toLowerCase() === 'off' ? 'off' : '');
 
   function charJson(c) {
     if (!c) return null;
@@ -269,7 +285,7 @@
       { id: 0, name: 'Персонаж', title: '', card: null, file_path: '', avatar_url: '', first_message: '', description_preview: '', fileContent: '' };
     const persona = personaJson(db.personas.find(p => p.id === chat.persona_id)) || personaJson(db.personas[0]) ||
       { id: 0, name: 'Игрок', title: '', file_path: '', avatar_url: '', description_preview: '', fileContent: '' };
-    const c = Object.assign({}, chat);
+    const c = Object.assign({}, chat, { thinking: thinkingValue(chat.thinking) });
     delete c.updated_at;
     // Like the engine: card images are not repeated in chat details.
     delete character.avatar_url;
@@ -286,7 +302,7 @@
       const lastActivity = [c.updated_at || c.created_at, last ? last.created_at : ''].sort().pop();
       return {
         id: c.id, title: c.title, character_id: c.character_id, persona_id: c.persona_id, model_id: c.model_id,
-        effort: c.effort, character_name: ch ? ch.name : 'Персонаж', persona_name: p ? p.name : 'Игрок',
+        effort: c.effort, thinking: thinkingValue(c.thinking), character_name: ch ? ch.name : 'Персонаж', persona_name: p ? p.name : 'Игрок',
         character_title: ch ? ch.title || '' : '', persona_title: p ? p.title || '' : '',
         last_message: last ? last.content.slice(0, 300) : '', message_count: msgs.length,
         last_activity: lastActivity, created_at: c.created_at,
@@ -320,7 +336,7 @@
   function newProgress(chat) {
     return {
       status: 'running', phase: 'context', statusText: '📋 Сборка контекста...', thoughts: '', text: '',
-      modelId: chat.model_id, vertexModel: chat.model_id, effort: chat.effort, thinkingConfigSummary: 'thinkingLevel=HIGH',
+      modelId: chat.model_id, vertexModel: chat.model_id, effort: chat.effort, thinking: '', thinkingConfigSummary: 'thinkingLevel=HIGH',
       projectId: db.settings.projectId, endpoint: 'mock://vertex', httpStatus: 0, chunksCount: 0, thoughtsChars: 0, textChars: 0,
       contextMessagesCount: 0, promptChars: 0, finishReason: '', error: '', cancelled: false,
       elapsedMs: 0, elapsedSec: '0.0', logs: [], _start: Date.now(),
@@ -355,6 +371,14 @@
     const lastUser = [...history].reverse().find(m => m.role === 'user');
     const userText = lastUser ? lastUser.content : '';
     log(g, 'Старт запроса: ' + chat.model_id + ' • Effort: ' + String(chat.effort).toUpperCase());
+    if (chat.model_id.startsWith('claude-code-')) {
+      // Like callClaudeCodeCli: off only where the model allows it.
+      const m = MODELS.find(x => x.id === chat.model_id);
+      const askedOff = thinkingValue(chat.thinking) === 'off';
+      g.thinking = askedOff && m && m.thinkingOff ? 'off' : (askedOff ? 'fixed' : 'on');
+      if (g.thinking === 'off') log(g, 'Мышление: выкл (thinking.type=' + m.thinkingOff.type + (m.thinkingOff.maxEffort ? ', effort не выше ' + m.thinkingOff.maxEffort : '') + ')');
+      if (g.thinking === 'fixed') log(g, 'Мышление: у этой модели не отключается (ограничение Anthropic API) — модель думает');
+    }
     g.contextMessagesCount = history.length;
     g.promptChars = 1800 + history.reduce((n, m) => n + m.content.length, 0);
 
@@ -383,7 +407,8 @@
       g.httpStatus = 200;
       g.phase = 'thinking';
       g.statusText = '💭 Персонаж размышляет...';
-      const thoughts = 'Нужно сохранить характер ' + ch.name + ': коротко, с иронией. Игрок явно что-то скрывает — подыграть, но подтолкнуть сюжет вперёд. Добавить деталь о перьях, чтобы связать с прошлой сценой.';
+      const thoughts = g.thinking === 'off' ? ''
+        : 'Нужно сохранить характер ' + ch.name + ': коротко, с иронией. Игрок явно что-то скрывает — подыграть, но подтолкнуть сюжет вперёд. Добавить деталь о перьях, чтобы связать с прошлой сценой.';
       for (let i = 0; i < thoughts.length; i += 9) {
         g.thoughts = thoughts.slice(0, i + 9);
         g.thoughtsChars = g.thoughts.length;
@@ -437,6 +462,7 @@
         for (const k of ['projectId', 'selectedModel', 'selectedEffort', 'activePersonaId']) {
           if (body[k] !== undefined) db.settings[k] = body[k];
         }
+        if (body.selectedThinking !== undefined) db.settings.selectedThinking = thinkingValue(body.selectedThinking);
         if (body.safetyThreshold !== undefined) db.settings.safetyThreshold = safety(body.safetyThreshold);
       }
       return Object.assign({}, db.settings, { engineBuild: ENGINE, appVersion: APP_VERSION });
@@ -546,6 +572,7 @@
       const id = nextId();
       db.chats.push({ id, title: 'Чат: ' + (character.title || character.name), character_id: character.id, persona_id: persona.id,
         model_id: body.modelId || db.settings.selectedModel, effort: body.effort || db.settings.selectedEffort,
+        thinking: thinkingValue(body.thinking !== undefined ? body.thinking : db.settings.selectedThinking),
         memory_file_path: 'memories/chat_' + id + '.md', provider: body.provider || '', created_at: now(), updated_at: now() });
       db.files['memories/chat_' + id + '.md'] = '# Память чата #' + id + '\n\n';
       // Like the engine: the greeting keeps its macros.
@@ -563,6 +590,7 @@
           if (!chat) return err(404, 'Чат не найден');
           if (body.modelId) chat.model_id = body.modelId;
           if (body.effort) chat.effort = body.effort;
+          if (body.thinking !== undefined) chat.thinking = thinkingValue(body.thinking);
           if (body.personaId !== undefined) chat.persona_id = Number(body.personaId);
           if (body.title !== undefined) chat.title = String(body.title).trim();
           return chatDetails(chatId);
